@@ -29,9 +29,9 @@ class PrinterNeoPixel:
         self.printer.register_event_handler("klippy:connect", self.send_data)
         # Register commands
         self.gcode = self.printer.lookup_object('gcode')
-        self.gcode.register_mux_command("SET_NEOPIXEL", "NEOPIXEL", name,
-                                        self.cmd_SET_NEOPIXEL,
-                                        desc=self.cmd_SET_NEOPIXEL_help)
+        self.gcode.register_mux_command("SET_LED", "LED", name,
+                                        self.cmd_SET_LED,
+                                        desc=self.cmd_SET_LED_help)
     def build_config(self):
         if self.mcu.get_constant_float('CLOCK_FREQ') <= 20000000:
             raise self.printer.config_error(
@@ -42,8 +42,8 @@ class PrinterNeoPixel:
     def send_data(self, minclock=0):
         self.neopixel_send_cmd.send([self.oid, self.color_data],
                                     minclock=minclock)
-    cmd_SET_NEOPIXEL_help = "Set the color of a neopixel led"
-    def cmd_SET_NEOPIXEL(self, params):
+    cmd_SET_LED_help = "Set the color of an LED"
+    def cmd_SET_LED(self, params):
         # Parse parameters
         red = self.gcode.get_float('RED', params, 0., minval=0., maxval=1.)
         green = self.gcode.get_float('GREEN', params, 0., minval=0., maxval=1.)
