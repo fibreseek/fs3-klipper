@@ -7,6 +7,7 @@ import logging
 
 class GCodeMove:
     def __init__(self, config):
+        self.config = config
         self.printer = printer = config.get_printer()
         printer.register_event_handler("klippy:ready", self._handle_ready)
         printer.register_event_handler("klippy:shutdown", self._handle_shutdown)
@@ -110,8 +111,46 @@ class GCodeMove:
         if self.is_printer_ready:
             self.last_position = self.position_with_transform()
     # G-Code movement commands
+    # extruder À‹¡œ
+    # extruder1 œÀŒ¨
+    # extruder2 ’≥∫œº¡
+    
+    def aniso_extruder_switch(self, gcmd):
+        gcode = self.printer.lookup_object('gcode')
+        params = gcmd.get_command_parameters()
+        #curr_extruder = self.printer.lookup_object('toolhead').get_extruder()
+        extruder = self.printer.lookup_object('extruder')
+        extruder1 = self.printer.lookup_object('extruder1')
+        extruder2 = self.printer.lookup_object('extruder2')
+        
+        if 'E' in params:
+            pass
+        elif 'U' in params:
+            if self.absolute_extrude:
+                raise gcmd.error("M83 MODE ONLY!")
+            gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder1")
+            if 'V' in params:
+                    U_rotation_distance = self.config.getsection('extruder1').getfloat('rotation_distance')
+                    V_rotation_distance = self.config.getsection('extruder2').getfloat('rotation_distance')
+                    gcode.run_script_from_command("SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder1")
+                    if 'P' in params:
+                        p =  float(params['P'])
+                        gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % (p*V_rotation_distance))
+                    else:
+                        gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % ((float(params['U'])/float(params['V']))*V_rotation_distance))
+            else:
+                    gcode.run_script_from_command("SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder2")
+        elif 'V' in params: 
+            if self.absolute_extrude:
+                raise gcmd.error("M83 MODE ONLY!")
+            gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder2")
+            V_rotation_distance = self.config.getsection('extruder2').getfloat('rotation_distance')
+            gcode.run_script_from_command("SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder2")
+            gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % (V_rotation_distance))
+
     def cmd_G1(self, gcmd):
         # Move
+        self.aniso_extruder_switch(gcmd)
         params = gcmd.get_command_parameters()
         try:
             for pos, axis in enumerate('XYZ'):
@@ -131,6 +170,22 @@ class GCodeMove:
                 else:
                     # value relative to base coordinate position
                     self.last_position[3] = v + self.base_position[3]
+            if 'U' in params:
+                v = float(params['U']) * self.extrude_factor
+                if not self.absolute_coord or not self.absolute_extrude:
+                    # value relative to position of last move
+                    self.last_position[3] += v
+                else:
+                    # value relative to base coordinate position
+                    self.last_position[3] = v + self.base_position[3]
+            elif 'V' in params:
+                val = float(params['V']) * self.extrude_factor
+                if not self.absolute_coord or not self.absolute_extrude:
+                    # value relative to position of last move
+                    self.last_position[3] += val
+                else:
+                    # value relative to base coordinate position
+                    self.last_position[3] = val + self.base_position[3]
             if 'F' in params:
                 gcode_speed = float(params['F'])
                 if gcode_speed <= 0.:
