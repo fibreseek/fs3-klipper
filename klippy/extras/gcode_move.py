@@ -8,6 +8,8 @@ import logging
 class GCodeMove:
     def __init__(self, config):
         self.config = config
+        self.mode = -1
+        self.proportion = -1
         self.printer = printer = config.get_printer()
         printer.register_event_handler("klippy:ready", self._handle_ready)
         printer.register_event_handler("klippy:shutdown", self._handle_shutdown)
@@ -111,10 +113,10 @@ class GCodeMove:
         if self.is_printer_ready:
             self.last_position = self.position_with_transform()
     # G-Code movement commands
-    # extruder À‹¡œ
-    # extruder1 œÀŒ¨
-    # extruder2 ’≥∫œº¡
-    
+    # extruder ??
+    # extruder1 ??
+    # extruder2 ???
+    # mode 0: E 1: UV 2: U 3: V
     def aniso_extruder_switch(self, gcmd):
         gcode = self.printer.lookup_object('gcode')
         params = gcmd.get_command_parameters()
@@ -124,29 +126,43 @@ class GCodeMove:
         extruder2 = self.printer.lookup_object('extruder2')
         
         if 'E' in params:
-            pass
+            self.mode = 0
+            self.proportion = 0
         elif 'U' in params:
             if self.absolute_extrude:
                 raise gcmd.error("M83 MODE ONLY!")
-            gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder1")
+            
             if 'V' in params:
-                    U_rotation_distance = self.config.getsection('extruder1').getfloat('rotation_distance')
-                    V_rotation_distance = self.config.getsection('extruder2').getfloat('rotation_distance')
+                if self.mode != 1:
+                    gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder1")
                     gcode.run_script_from_command("SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder1")
-                    if 'P' in params:
-                        p =  float(params['P'])
+                U_rotation_distance = self.config.getsection('extruder1').getfloat('rotation_distance')
+                V_rotation_distance = self.config.getsection('extruder2').getfloat('rotation_distance')
+                if 'P' in params:
+                    p =  float(params['P'])
+                    if self.proportion != p:
                         gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % (p*V_rotation_distance))
-                    else:
-                        gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % ((float(params['U'])/float(params['V']))*V_rotation_distance))
+                        self.proportion = p
+                else:
+                    gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % ((float(params['U'])/float(params['V']))*V_rotation_distance))
+                    self.proportion = float(params['U'])/float(params['V'])
+                self.mode = 1
             else:
+                if self.mode != 2:
+                    gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder1")
                     gcode.run_script_from_command("SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder2")
+                    self.proportion = 0
+                    self.mode = 2
         elif 'V' in params: 
-            if self.absolute_extrude:
-                raise gcmd.error("M83 MODE ONLY!")
-            gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder2")
-            V_rotation_distance = self.config.getsection('extruder2').getfloat('rotation_distance')
-            gcode.run_script_from_command("SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder2")
-            gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % (V_rotation_distance))
+            if self.mode != 3:
+                if self.absolute_extrude:
+                    raise gcmd.error("M83 MODE ONLY!")
+                gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder2")
+                V_rotation_distance = self.config.getsection('extruder2').getfloat('rotation_distance')
+                gcode.run_script_from_command("SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder2")
+                gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % (V_rotation_distance))
+                self.mode = 3
+                self.proportion = 0
 
     def cmd_G1(self, gcmd):
         # Move
