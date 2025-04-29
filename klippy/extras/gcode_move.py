@@ -52,6 +52,13 @@ class GCodeMove:
         self.saved_states = {}
         self.move_transform = self.move_with_transform = None
         self.position_with_transform = (lambda: [0., 0., 0., 0.])
+        self.printer.register_event_handler('idle_timeout:idle', self._handle_not_printing)
+
+    # idle Timeout handler
+    def _handle_not_printing(self, print_time):
+        logging.info("G-Code move: idle_timeout:idle")
+        self.mode = -1
+        self.proportion = -1
     def _handle_ready(self):
         self.is_printer_ready = True
         if self.move_transform is None:
@@ -113,9 +120,9 @@ class GCodeMove:
         if self.is_printer_ready:
             self.last_position = self.position_with_transform()
     # G-Code movement commands
-    # extruder ??
-    # extruder1 ??
-    # extruder2 ???
+    # extruder plastics
+    # extruder1 carbon fibre
+    # extruder2 carbon fibre adhesive
     # mode 0: E 1: UV 2: U 3: V
     def aniso_extruder_switch(self, gcmd):
         gcode = self.printer.lookup_object('gcode')
