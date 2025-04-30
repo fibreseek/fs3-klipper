@@ -166,6 +166,7 @@ class Homing:
         self.changed_axes = []
         self.trigger_mcu_pos = {}
         self.adjust_pos = {}
+        self.gcode = printer.lookup_object("gcode")
     def set_axes(self, axes):
         self.changed_axes = axes
     def get_axes(self):
@@ -208,6 +209,7 @@ class Homing:
             retractpos = [hp - ad * retract_r
                           for hp, ad in zip(homepos, axes_d)]
             self.toolhead.move(retractpos, hi.retract_speed)
+            self.gcode.run_script_from_command("G4 P2000")
             # Home again
             startpos = [rp - ad * retract_r
                         for rp, ad in zip(retractpos, axes_d)]
