@@ -13,7 +13,6 @@
 #include "command.h" // DECL_CONSTANT_STR
 #include "internal.h" // GPIO
 #include "sched.h" // DECL_INIT
-#include "printf.h"
 #include "board/misc.h"
 
 
