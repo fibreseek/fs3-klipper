@@ -94,6 +94,13 @@ src-$(CONFIG_USBCANBUS) += $(usb-src-y) $(canbus-src-y)
 src-$(CONFIG_USBCANBUS) += stm32/chipid.c generic/usb_canbus.c
 src-$(CONFIG_HAVE_GPIO_HARD_PWM) += stm32/hard_pwm.c
 
+
+#aniso add start
+src-$(CONFIG_MACH_STM32H7) += stm32/xyz_align.c
+
+
+
+#aniso add end
 # Binary output file rules
 target-y += $(OUT)klipper.bin
 
