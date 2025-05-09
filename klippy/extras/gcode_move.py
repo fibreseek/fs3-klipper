@@ -119,9 +119,10 @@ class GCodeMove:
     def reset_last_position(self):
         if self.is_printer_ready:
             self.last_position = self.position_with_transform()
+    
     # G-Code movement commands
-    # extruder plastics
-    # extruder1 carbon fibre
+    # extruder carbon fibre
+    # extruder1 plastics
     # extruder2 carbon fibre adhesive
     # mode 0: E 1: UV 2: U 3: V
     def aniso_extruder_switch(self, gcmd):
@@ -141,9 +142,9 @@ class GCodeMove:
             
             if 'V' in params:
                 if self.mode != 1:
-                    gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder1")
-                    gcode.run_script_from_command("SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder1")
-                U_rotation_distance = self.config.getsection('extruder1').getfloat('rotation_distance')
+                    gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder")
+                    gcode.run_script_from_command("SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder")
+                U_rotation_distance = self.config.getsection('extruder').getfloat('rotation_distance')
                 V_rotation_distance = self.config.getsection('extruder2').getfloat('rotation_distance')
                 if 'P' in params:
                     p =  float(params['P'])
@@ -156,7 +157,7 @@ class GCodeMove:
                 self.mode = 1
             else:
                 if self.mode != 2:
-                    gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder1")
+                    gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder")
                     gcode.run_script_from_command("SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder2")
                     self.proportion = 0
                     self.mode = 2
