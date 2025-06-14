@@ -3,7 +3,7 @@
 # Setup the toolchain
 CROSS_PREFIX=arm-none-eabi-
 
-dirs-y += src/stm32 src/generic lib/fast-hash
+dirs-y += src/stm32 src/generic lib/fast-hash src/stm32/debug
 dirs-$(CONFIG_MACH_STM32F0) += lib/stm32f0
 dirs-$(CONFIG_MACH_STM32F1) += lib/stm32f1
 dirs-$(CONFIG_MACH_N32G45x) += lib/n32g45x
@@ -97,9 +97,9 @@ src-$(CONFIG_HAVE_GPIO_HARD_PWM) += stm32/hard_pwm.c
 
 #aniso add start
 src-$(CONFIG_MACH_STM32H7) += stm32/xyz_align.c
-
-
-
+src-$(CONFIG_MACH_STM32H7) += stm32/aniso_bed_mesh.c
+src-$(CONFIG_MACH_STM32H7) += stm32/debug/debug.c
+src-$(CONFIG_MACH_STM32H7) += stm32/debug/printf.c
 #aniso add end
 # Binary output file rules
 target-y += $(OUT)klipper.bin
