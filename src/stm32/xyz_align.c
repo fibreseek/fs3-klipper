@@ -124,6 +124,68 @@ void gpio_irq_init_pf0(void) //PF0
     NVIC->IP[irq_number] = (priority_group << 4) | 7; // 设置 4-bit 优先级分组和优先级
 }
 
+void EXTI15_10_IRQHandler(void)
+{
+    if (EXTI->PR1 & (1UL << 11))  // 检查是否是 EXTI10 触发
+    {
+        EXTI->PR1 = (1UL << 11);  // 清除挂起标志（写 1 清除）
+        if(offset_index == 0)
+        {
+            offset_z0 = get_step_count_z();
+        }
+        else if(offset_index == 5)
+        {
+            offset_z1 = get_step_count_z();
+        }
+        if(offset_index < 10)
+        {
+            offset_xy[offset_index] = get_step_count_x();
+        }
+        offset_index ++;
+        // 处理逻辑
+    }
+}
+
+void gpio_irq_init_pg11(void) // PG11
+{
+    // 1. 使能 GPIOG 时钟
+    RCC->AHB4ENR |= RCC_AHB4ENR_GPIOGEN;
+    
+    // 2. 将 PG11 配置为输入模式 (修改 MODER11)
+    GPIOG->MODER &= ~(3UL << (11 * 2)); // 00: 输入模式
+    
+    // 3. 将 PG11 配置为上拉输入
+    GPIOG->PUPDR &= ~(3UL << (11 * 2)); // 清除 PUPDR11
+    GPIOG->PUPDR |= (1UL << (11 * 2));  // 01: 上拉模式
+    
+    // 4. 使能 SYSCFG 时钟
+    RCC->APB4ENR |= RCC_APB4ENR_SYSCFGEN;
+    
+    // 5. 选择 EXTI11 映射到 GPIOG
+    SYSCFG->EXTICR[2] &= ~(0xF << (3 * 4)); // 清除 EXTI11 选择
+    SYSCFG->EXTICR[2] |= (6 << (3 * 4));    // 选择 GPIOG (6: GPIOG)
+    
+    // 6. 配置 EXTI11 中断触发条件为上升沿触发
+    EXTI->FTSR1 &= ~(1 << 11);  // 清除下降沿触发
+    EXTI->RTSR1 |= (1 << 11);   // 设置上升沿触发
+    
+    // 7. 使能 EXTI11 中断
+    EXTI->IMR1 |= (1 << 11);  // 使能中断
+    EXTI->EMR1 |= (1 << 11);  // 使能事件
+    
+    // 8. 配置 NVIC 中断优先级和使能中断
+    uint32_t irq_number = 40; // EXTI15_10 对应 NVIC 中断号为 40
+
+    // 使能 NVIC 中断 EXTI15_10 在 NVIC ISER[1]中第 8 位（40 % 32 = 8）
+    NVIC->ISER[irq_number / 32] = (1 << (irq_number % 32));
+
+    // 配置 NVIC 中断优先级分组为 4-bit 优先级 EXTI15_10 在 IPR[10]中设置 8 位优先级
+    uint32_t priority_group = 2; // 设置 4-bit 优先级分组
+    NVIC->IP[irq_number] = (priority_group << 4) | 7; // 设置 4-bit 优先级分组和优先级
+}
+
+
 DECL_COMMAND(command_align_start, "align_start oid=%c val=%c");
-DECL_ARMCM_IRQ(EXTI0_IRQHandler, EXTI0_IRQn);
-DECL_INIT(gpio_irq_init_pf0);
+//DECL_ARMCM_IRQ(EXTI0_IRQHandler, EXTI0_IRQn);
+DECL_ARMCM_IRQ(EXTI15_10_IRQHandler, EXTI15_10_IRQn);
+DECL_INIT(gpio_irq_init_pg11);

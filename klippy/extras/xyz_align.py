@@ -61,7 +61,13 @@ class xyz_align:
             
 
         else:
-            self.gcode.respond_info("handle_align_end: %d" % (res))
+            z0 = params['z0']
+            z1 = params['z1']
+            x0 = params['x0']
+            y0 = params['y0']
+            x1 = params['x1']
+            y1 = params['y1']
+            self.gcode.respond_info("handle_align_end: %d %d %d %d %d %d %d" % (res,x0,x1,y0,y1,z0,z1))
 
     def cmd_XYZ_ALIGN_TEST(self, gcmd):
         self.align_start_cmd.send([self.oid, 1])
@@ -78,8 +84,11 @@ class xyz_align:
                 "SAVE_GCODE_STATE NAME=pre_offset_state\n"
                 "G90\n"
                 "G1 Z%d\n"
-                "G1 X100 Y100 F%d\n"
+                "G1 F3000\n"
+                "T0\n"
+                "G1 X100 Y100\n"
                 "G1 X%d Y%d\n"
+                "G1 F%d\n"
                 "G1 Z%d\n"
                 "G1 Z%d\n"
                 "G1 Z%d\n"
@@ -97,12 +106,15 @@ class xyz_align:
                 "G1 Z%d\n"
                 "G1 Y%d\n"
                 "G1 Z%d\n"
-                % (self.t0_offset_z,self.speed, self.t0_offset_x, self.t0_offset_y,self.t0_offset_z_press,self.t0_offset_z,self.t0_offset_z_press,self.t0_offset_x+self.move_offset,self.t0_offset_z,self.t0_offset_x,self.t0_offset_z_press,self.t0_offset_x-self.move_offset,self.t0_offset_z,self.t0_offset_x,self.t0_offset_z_press,self.t0_offset_y+self.move_offset,self.t0_offset_z,self.t0_offset_y,self.t0_offset_z_press,self.t0_offset_y-self.move_offset,self.t1_offset_z))
+                % (self.t0_offset_z, self.t0_offset_x, self.t0_offset_y,self.speed,self.t0_offset_z_press,self.t0_offset_z,self.t0_offset_z_press,self.t0_offset_x+self.move_offset,self.t0_offset_z,self.t0_offset_x,self.t0_offset_z_press,self.t0_offset_x-self.move_offset,self.t0_offset_z,self.t0_offset_x,self.t0_offset_z_press,self.t0_offset_y+self.move_offset,self.t0_offset_z,self.t0_offset_y,self.t0_offset_z_press,self.t0_offset_y-self.move_offset,self.t1_offset_z))
                 #add change to t1
-            self.gcode.run_script_from_command("G4 P5000")    
+            self.gcode.run_script_from_command("G1 F3000")    
+            self.gcode.run_script_from_command("T1")
+            self.gcode.run_script_from_command("SET_GCODE_OFFSET X=0 Y=0 Z=0")
             self.gcode.run_script_from_command(
                 "G1 Z%d\n"
                 "G1 X%d Y%d\n"
+                "G1 F%d\n"
                 "G1 Z%d\n"
                 "G1 Z%d\n"
                 "G1 Z%d\n"
@@ -121,7 +133,9 @@ class xyz_align:
                 "G1 Y%d\n"
                 "G1 Z%d\n"
                 "RESTORE_GCODE_STATE NAME=pre_offset_state\n"
-                % (self.t1_offset_z, self.t1_offset_x, self.t1_offset_y,self.t1_offset_z_press,self.t1_offset_z,self.t1_offset_z_press,self.t1_offset_x+self.move_offset,self.t1_offset_z,self.t1_offset_x,self.t1_offset_z_press,self.t1_offset_x-self.move_offset,self.t1_offset_z,self.t1_offset_x,self.t1_offset_z_press,self.t1_offset_y+self.move_offset-2,self.t1_offset_z,self.t1_offset_y,self.t1_offset_z_press,self.t1_offset_y-self.move_offset,self.t1_offset_z))
+                % (self.t1_offset_z, self.t1_offset_x, self.t1_offset_y,self.speed,self.t1_offset_z_press,self.t1_offset_z,self.t1_offset_z_press,self.t1_offset_x+self.move_offset,self.t1_offset_z,self.t1_offset_x,self.t1_offset_z_press,self.t1_offset_x-self.move_offset,self.t1_offset_z,self.t1_offset_x,self.t1_offset_z_press,self.t1_offset_y+self.move_offset-2,self.t1_offset_z,self.t1_offset_y,self.t1_offset_z_press,self.t1_offset_y-self.move_offset,self.t1_offset_z))
+            self.gcode.run_script_from_command("G1 F3000")
+            self.gcode.run_script_from_command("T0")
             self.gcode.run_script_from_command("M400") 
             self.align_start_cmd.send([self.oid, 1])
     
