@@ -15,15 +15,13 @@
 #include "sched.h" // DECL_INIT
 #include "board/misc.h"
 
-
-
-
 static int32_t offset_z0 = 0;
 static int32_t offset_z1 = 0;
 static int32_t offset_xy[10] = {0};
 static uint8_t offset_index = 0;
 extern int32_t get_step_count_x(void);
 extern int32_t get_step_count_z(void);
+#define PG11_VALUE (GPIOG->IDR & (1 << 11)) ? 1 : 0
 
 void command_align_start(uint32_t *args)
 {
@@ -61,6 +59,11 @@ void command_align_start(uint32_t *args)
             ((offset_xy[5] - offset_xy[9])-(offset_xy[8] - offset_xy[5]))/2
         );*/
         break;
+
+        case 2:
+            sendf("xyz_align_end oid=%c res=%c z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i", oid, 2, PG11_VALUE, 0, 0,0,0,0);
+        break;
+
     }
 }    //sendf("uart_get_cmd oid=%c val=%c", oid, val);
 

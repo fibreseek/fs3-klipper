@@ -11,14 +11,16 @@ class xyz_align:
         self.gcode = self.printer.lookup_object('gcode')
         self.t0_offset_x = config.getfloat('t0_offset_x')
         self.t0_offset_y = config.getfloat('t0_offset_y')
-        self.t0_offset_z = config.getfloat('t0_offset_z') 
-        self.t0_offset_z_press = config.getfloat('t0_offset_z_press')
+        # self.t0_offset_z = config.getfloat('t0_offset_z') 
+        # self.t0_offset_z_press = config.getfloat('t0_offset_z_press')
         self.t1_offset_x = config.getfloat('t1_offset_x')
         self.t1_offset_y = config.getfloat('t1_offset_y')
-        self.t1_offset_z = config.getfloat('t1_offset_z')
-        self.t1_offset_z_press = config.getfloat('t1_offset_z_press')
+        # self.t1_offset_z = config.getfloat('t1_offset_z')
+        # self.t1_offset_z_press = config.getfloat('t1_offset_z_press')
         self.move_offset = config.getfloat('move_offset')
         self.speed = config.getfloat('speed',3000)
+        self.offset_z = 10
+        self.z_value = 1
         ppins = self.printer.lookup_object('pins')
         pin_params = ppins.lookup_pin(config.get('pin'))
         self.mcu = pin_params['chip']
@@ -60,7 +62,7 @@ class xyz_align:
             self.gcode.respond_info("handle_align_end offset : x=%f y=%f z=%f" % (x_offset,y_offset,z_offset))
             
 
-        else:
+        elif(res == 1):
             z0 = params['z0']
             z1 = params['z1']
             x0 = params['x0']
@@ -68,11 +70,26 @@ class xyz_align:
             x1 = params['x1']
             y1 = params['y1']
             self.gcode.respond_info("handle_align_end: %d %d %d %d %d %d %d" % (res,x0,x1,y0,y1,z0,z1))
+        elif(res == 2):
+            self.z_value = params['z0']
+            self.gcode.respond_info("handle_align_end: z = %d" % (res,x0,x1,y0,y1,z0,z1))
 
     def cmd_XYZ_ALIGN_TEST(self, gcmd):
         self.align_start_cmd.send([self.oid, 1])
        #self.gcode.respond_info("xyz_align: %d" % (self.oid))
-
+    def get_z_press_val(self):
+        z_offset = 1;
+        while(z_offset < 15):
+            self.gcode.run_script_from_command("G1 Z%d\n" % (self.offset_z - z_offset))
+            self.gcode.run_script_from_command("M400\n")
+            self.z_value == 1
+            self.align_start_cmd.send([self.oid, 2])
+            self.gcode.run_script_from_command("G4 P300\n")
+            if (self.z_value == 0):
+                self.offset_z_press = self.offset_z - z_offset
+                break
+            z_offset += 1    
+            
     def cmd_XYZ_ALIGN(self, gcmd):
         curtime = self.printer.get_reactor().monotonic()
         status = self.printer.lookup_object('toolhead').get_status(curtime)['homed_axes']
@@ -86,12 +103,21 @@ class xyz_align:
                 "G1 Z%d\n"
                 "G1 F3000\n"
                 "T0\n"
-                "G1 X100 Y100\n"
+                "G1 X100 Y100 F3000\n"
                 "G1 X%d Y%d\n"
+                % (self.offset_z, self.t0_offset_x, self.t0_offset_y))
+
+            self.get_z_press_val()    
+            if (self.z_value == 1):
+                self.gcode.respond_info("Z press value not found, aborting alignment")
+                return
+
+            self.gcode.run_script_from_command(
                 "G1 F%d\n"
                 "G1 Z%d\n"
                 "G1 Z%d\n"
-                "G1 Z%d\n"
+                % (self.speed,self.offset_z,self.offset_z_press))
+            self.gcode.run_script_from_command(
                 "G1 X%d\n"
                 "G1 Z%d\n"
                 "G1 X%d\n"
@@ -105,17 +131,25 @@ class xyz_align:
                 "G1 Y%d\n"
                 "G1 Z%d\n"
                 "G1 Y%d\n"
-                "G1 Z%d\n"
-                % (self.t0_offset_z, self.t0_offset_x, self.t0_offset_y,self.speed,self.t0_offset_z_press,self.t0_offset_z,self.t0_offset_z_press,self.t0_offset_x+self.move_offset,self.t0_offset_z,self.t0_offset_x,self.t0_offset_z_press,self.t0_offset_x-self.move_offset,self.t0_offset_z,self.t0_offset_x,self.t0_offset_z_press,self.t0_offset_y+self.move_offset,self.t0_offset_z,self.t0_offset_y,self.t0_offset_z_press,self.t0_offset_y-self.move_offset,self.t1_offset_z))
+                "G1 Z%d\n"   
+                % (self.t0_offset_x+self.move_offset,self.offset_z,self.t0_offset_x,self.offset_z_press,self.t0_offset_x-self.move_offset,self.offset_z,self.t0_offset_x,self.offset_z_press,self.t0_offset_y+self.move_offset,self.offset_z,self.t0_offset_y,self.offset_z_press,self.t0_offset_y-self.move_offset,self.offset_z))
                 #add change to t1
             self.gcode.run_script_from_command("G1 F3000")    
+            self.gcode.run_script_from_command("G1 Y100")
             self.gcode.run_script_from_command("T1")
             self.gcode.run_script_from_command("SET_GCODE_OFFSET X=0 Y=0 Z=0")
             self.gcode.run_script_from_command(
-                "G1 Z%d\n"
+                "G1 Z%d F3000\n"
                 "G1 X%d Y%d\n"
+                % (self.offset_z, self.t1_offset_x, self.t1_offset_y))
+                
+            self.get_z_press_val()    
+            if (self.z_value == 1):
+                self.gcode.respond_info("Z press value not found, aborting alignment")
+                return
+
+            self.gcode.run_script_from_command(
                 "G1 F%d\n"
-                "G1 Z%d\n"
                 "G1 Z%d\n"
                 "G1 Z%d\n"
                 "G1 X%d\n"
@@ -133,8 +167,9 @@ class xyz_align:
                 "G1 Y%d\n"
                 "G1 Z%d\n"
                 "RESTORE_GCODE_STATE NAME=pre_offset_state\n"
-                % (self.t1_offset_z, self.t1_offset_x, self.t1_offset_y,self.speed,self.t1_offset_z_press,self.t1_offset_z,self.t1_offset_z_press,self.t1_offset_x+self.move_offset,self.t1_offset_z,self.t1_offset_x,self.t1_offset_z_press,self.t1_offset_x-self.move_offset,self.t1_offset_z,self.t1_offset_x,self.t1_offset_z_press,self.t1_offset_y+self.move_offset-2,self.t1_offset_z,self.t1_offset_y,self.t1_offset_z_press,self.t1_offset_y-self.move_offset,self.t1_offset_z))
+                % (self.speed,self.offset_z,self.offset_z_press,self.t1_offset_x+self.move_offset,self.offset_z,self.t1_offset_x,self.offset_z_press,self.t1_offset_x-self.move_offset,self.offset_z,self.t1_offset_x,self.offset_z_press,self.t1_offset_y+self.move_offset-2,self.offset_z,self.t1_offset_y,self.offset_z_press,self.t1_offset_y-self.move_offset,self.offset_z))
             self.gcode.run_script_from_command("G1 F3000")
+            self.gcode.run_script_from_command("G1 Y100")
             self.gcode.run_script_from_command("T0")
             self.gcode.run_script_from_command("M400") 
             self.align_start_cmd.send([self.oid, 1])
