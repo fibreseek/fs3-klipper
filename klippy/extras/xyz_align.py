@@ -40,6 +40,8 @@ class xyz_align:
 
         #self.gcode.respond_info("build_config: %d" % (self.session_x.getfloat('rotation_distance')))
     #res=%u z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i
+#- 成功返回 M118 XYZ_ALIGN=1 x_offset=xxx y_offset=xxx z_offset=xxx
+#- 失败返回 M118 XYZ_ALIGN=0
 
     def handle_align_end(self, params):
         # Expand the message ack_count from 8-bit
@@ -59,17 +61,18 @@ class xyz_align:
             x_offset = x1*x_rotation_distance/(x_microsteps*200) - (x0*x_rotation_distance/(x_microsteps*200)) + self.t0_offset_x - self.t1_offset_x
             y_offset = y1*x_rotation_distance/(x_microsteps*200) - (y0*x_rotation_distance/(x_microsteps*200)) + self.t0_offset_y - self.t1_offset_y
             
-            self.gcode.respond_info("handle_align_end offset : x=%f y=%f z=%f" % (x_offset,y_offset,z_offset))
-            
+            #self.gcode.respond_info("handle_align_end offset : x=%f y=%f z=%f" % (x_offset,y_offset,z_offset))
+            self.gcode.run_script_from_command("M118 XYZ_ALIGN=1 x_offset=%f y_offset=%f z_offset=%f"% (x_offset,y_offset,z_offset))
 
-        elif(res == 1):
+        elif(res == 0):
             z0 = params['z0']
             z1 = params['z1']
             x0 = params['x0']
             y0 = params['y0']
             x1 = params['x1']
             y1 = params['y1']
-            self.gcode.respond_info("handle_align_end: %d %d %d %d %d %d %d" % (res,x0,x1,y0,y1,z0,z1))
+            self.gcode.run_script_from_command("M118 XYZ_ALIGN=0")
+
         elif(res == 2):
             self.z_value = params['z0']
             self.gcode.respond_info("handle_align_end: z = %d" % (res,x0,x1,y0,y1,z0,z1))
