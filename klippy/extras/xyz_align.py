@@ -38,11 +38,6 @@ class xyz_align:
         self.mcu.add_config_cmd("align_start oid=%d val=%d" % (self.oid, 0))
         self.align_start_cmd = self.mcu.lookup_command("align_start oid=%c val=%c", cq=self.cmd_queue)
 
-        #self.gcode.respond_info("build_config: %d" % (self.session_x.getfloat('rotation_distance')))
-    #res=%u z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i
-#- 成功返回 M118 XYZ_ALIGN=1 x_offset=xxx y_offset=xxx z_offset=xxx
-#- 失败返回 M118 XYZ_ALIGN=0
-
     def handle_align_end(self, params):
         # Expand the message ack_count from 8-bit
         res = params['res']
