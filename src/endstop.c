@@ -34,18 +34,16 @@ uint8_t gpio_in_read_pre(struct gpio_in g)
 {
     uint8_t val= 0;
     uint32_t ticks = 0;
+#ifndef __linux__
     if(g.bit == zendstop->pin.bit)  //z
     {
-        //ticks =timer_read_time();
         val = gpio_in_read_pre1();
-        //ticks_info1 = timer_read_time() - ticks;
         return val;
     }
-    else
+    else   
+#endif    
     {
-        //ticks =timer_read_time();
         val = gpio_in_read(g);
-        //ticks_info2 = timer_read_time() - ticks;
         return val;
     }
 }
