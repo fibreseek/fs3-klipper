@@ -47,6 +47,7 @@ class aniso_bed_mesh:
             self.revop = 5
         elif op == 6:
             self.gcode.respond_info("aniso bed mesh re record z zero step success! step:%d" % val)
+            #self.gcode.run_script_from_command("G1 Z8")
             self.revop = 6    
         
     def cmd_probe_align(self, gcmd):
@@ -96,7 +97,7 @@ class aniso_bed_mesh:
             wait_count = 0
 
             if self.sendop == 3:
-                self.gcode.run_script_from_command("G1 X150 Y150")
+                self.gcode.run_script_from_command("G1 X150 Y150 F3000")
                 for i in range(10):
                     self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=3 VELOCITY=15")
                     self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=-3 VELOCITY=15")
@@ -124,6 +125,7 @@ class aniso_bed_mesh:
                         self.gcode.run_script_from_command("G1 Z8")
                         self.gcode.run_script_from_command("G28.1 Z")
                         self.gcode.run_script_from_command("M400")
+
                         self.update_uart_cmd.send([self.oid, 6, 0])
                         while wait_count < 10:
                             self.gcode.run_script_from_command("G4 P300")

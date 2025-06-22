@@ -59,9 +59,9 @@ class xyz_align:
             #self.gcode.respond_info("handle_align_end offset : x=%f y=%f z=%f" % (x_offset,y_offset,z_offset))
             self.gcode.run_script_from_command("M118 XYZ_ALIGN=1 x_offset=%f y_offset=%f z_offset=%f"% (x_offset,y_offset,z_offset))
             
-            self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (x_offset))
-            self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (y_offset))
-            self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=zoffset VALUE=%f" % (z_offset))
+            self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (0-x_offset))
+            self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (0-y_offset))
+            self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=zoffset VALUE=%f" % (0-z_offset))
 
         elif(res == 0):
             z0 = params['z0']
@@ -71,10 +71,11 @@ class xyz_align:
             x1 = params['x1']
             y1 = params['y1']
             self.gcode.run_script_from_command("M118 XYZ_ALIGN=0")
+            self.gcode.respond_info("handle_align_end: res = %d x0 = %d x1 = %d y0 = %d y1 = %d z0 = %d z1 = %d" % (res,x0,x1,y0,y1,z0,z1))
 
         elif(res == 2):
             self.z_value = params['z0']
-            self.gcode.respond_info("handle_align_end: z = %d" % (res,x0,x1,y0,y1,z0,z1))
+            self.gcode.respond_info("handle_align_end: z = %d" % (self.z_value))
 
     def cmd_XYZ_ALIGN_TEST(self, gcmd):
         self.align_start_cmd.send([self.oid, 1])
@@ -84,9 +85,9 @@ class xyz_align:
         while(z_offset < 15):
             self.gcode.run_script_from_command("G1 Z%d\n" % (self.offset_z - z_offset))
             self.gcode.run_script_from_command("M400\n")
-            self.z_value == 1
+            self.z_value = 1
             self.align_start_cmd.send([self.oid, 2])
-            self.gcode.run_script_from_command("G4 P300\n")
+            self.gcode.run_script_from_command("G4 P1000\n")
             if (self.z_value == 0):
                 self.offset_z_press = self.offset_z - z_offset
                 break
