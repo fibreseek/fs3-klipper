@@ -1,6 +1,7 @@
 import pins, logging
 import configparser
 from . import output_pin
+import time
 
 class xyz_align:
     def __init__(self, config):
@@ -87,7 +88,8 @@ class xyz_align:
             self.gcode.run_script_from_command("M400\n")
             self.z_value = 1
             self.align_start_cmd.send([self.oid, 2])
-            self.gcode.run_script_from_command("G4 P1000\n")
+            time.sleep(1.0) 
+            #self.gcode.run_script_from_command("G4 P1000\n")
             if (self.z_value == 0):
                 self.offset_z_press = self.offset_z - z_offset
                 break

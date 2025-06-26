@@ -62,7 +62,7 @@ class aniso_bed_mesh:
         self.sendop = 1
         self.gcode.run_script_from_command("G90")
         self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=5 VELOCITY=10")
-        #self.gcode.run_script_from_command("G28.1 x y")
+
         self.gcode.run_script_from_command("G28.1 y")
         self.gcode.run_script_from_command("G1 y5")
         self.gcode.run_script_from_command("M400")
@@ -98,7 +98,7 @@ class aniso_bed_mesh:
 
             if self.sendop == 3:
                 self.gcode.run_script_from_command("G1 X150 Y150 F3000")
-                for i in range(10):
+                for i in range(3):
                     self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=3 VELOCITY=15")
                     self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=-3 VELOCITY=15")
                 self.gcode.run_script_from_command("M400")
