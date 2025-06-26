@@ -91,7 +91,7 @@ class xyz_align:
             time.sleep(1.0) 
             #self.gcode.run_script_from_command("G4 P1000\n")
             if (self.z_value == 0):
-                self.offset_z_press = self.offset_z - z_offset
+                self.offset_z_press = self.offset_z - z_offset -0.1
                 break
             z_offset += 1    
             
