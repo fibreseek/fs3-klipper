@@ -37,7 +37,7 @@ class ResonanceTester:
 
     def cmd_FULL_RESONANCE_TEST(self, gcmd):
         gcmd.respond_info("Starting full resonance testing for X and Y axes...")
-        self.gcode.run_script_from_command("M118 Start Vibration Testing Calibration")
+        self.gcode.run_script_from_command("M118 [Calibration] Start Vibration Testing Calibration")
         
         # Execute tests for both axes
         self.run_resonance_tests('xy')
@@ -54,7 +54,7 @@ class ResonanceTester:
         self.update_config_file('y', y_freq)
         
         gcmd.respond_info("Resonance testing completed. Please RESTART or FIRMWARE_RESTART to apply changes")
-        self.gcode.run_script_from_command("M118 Vibration Testing Calibration Complete")
+        self.gcode.run_script_from_command("M118 [Calibration] Vibration Testing Calibration Complete")
 
     def update_config_file(self, axis, frequency):
         """Update resonance_compensation.cfg with new frequency value"""
