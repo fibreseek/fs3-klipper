@@ -81,9 +81,9 @@ class xyz_align:
     def cmd_XYZ_ALIGN_TEST(self, gcmd):
         self.align_start_cmd.send([self.oid, 1])
        #self.gcode.respond_info("xyz_align: %d" % (self.oid))
-    def get_z_press_val(self):
+    def get_z_press_val(self, t):
         z_offset = 1;
-        while(z_offset < 15):
+        while(z_offset <= (10 - t*3)):
             self.gcode.run_script_from_command("G1 Z%d\n" % (self.offset_z - z_offset))
             self.gcode.run_script_from_command("M400\n")
             self.z_value = 1
@@ -112,7 +112,7 @@ class xyz_align:
                 "G1 X%d Y%d\n"
                 % (self.offset_z, self.t0_offset_x, self.t0_offset_y))
 
-            self.get_z_press_val()    
+            self.get_z_press_val(0)    
             if (self.z_value == 1):
                 self.gcode.respond_info("Z press value not found, aborting alignment")
                 return
@@ -148,7 +148,7 @@ class xyz_align:
                 "G1 X%d Y%d\n"
                 % (self.offset_z, self.t1_offset_x, self.t1_offset_y))
                 
-            self.get_z_press_val()    
+            self.get_z_press_val(1)    
             if (self.z_value == 1):
                 self.gcode.respond_info("Z press value not found, aborting alignment")
                 return

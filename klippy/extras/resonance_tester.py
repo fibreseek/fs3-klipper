@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # A utility class to test resonances of the printer
 #
 # Copyright (C) 2020-2024  Dmitry Butyugin <dmbutyugin@google.com>
@@ -232,6 +233,8 @@ class ResonanceTester:
                   accel_chips=None, test_point=None):
         toolhead = self.printer.lookup_object('toolhead')
         calibration_data = {axis: None for axis in axes}
+        
+        self.gcode.run_script_from_command("M118 Start Vibration Testing Calibration")
 
         self.generator.prepare_test(gcmd)
 
@@ -401,6 +404,9 @@ class ResonanceTester:
                     calibration_data[axis], all_shapers, max_freq=max_freq)
             gcmd.respond_info(
                     "Shaper calibration data written to %s file" % (csv_name,))
+                    
+        self.gcode.run_script_from_command("M118 Vibration Testing Calibration Complete")
+        
         gcmd.respond_info(
             "The SAVE_CONFIG command will update the printer config file\n"
             "with these parameters and restart the printer.")
@@ -432,19 +438,16 @@ class ResonanceTester:
 
     def get_filename(self, base, name_suffix, axis=None,
                      point=None, chip_name=None):
+        """Generate simplified filename without timestamp"""
         name = base
         if axis:
             name += '_' + axis.get_name()
-        if chip_name:
-            name += '_' + chip_name.replace(" ", "_")
-        if point:
-            name += "_%.3f_%.3f_%.3f" % (point[0], point[1], point[2])
-        name += '_' + name_suffix
         return os.path.join("/tmp", name + ".csv")
 
     def save_calibration_data(self, base_name, name_suffix, shaper_calibrate,
                               axis, calibration_data,
                               all_shapers=None, point=None, max_freq=None):
+        """Save calibration data with simplified filename"""
         output = self.get_filename(base_name, name_suffix, axis, point)
         shaper_calibrate.save_calibration_data(output, calibration_data,
                                                all_shapers, max_freq)

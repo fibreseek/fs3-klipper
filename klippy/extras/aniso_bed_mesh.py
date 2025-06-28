@@ -51,6 +51,8 @@ class aniso_bed_mesh:
             self.revop = 6    
         
     def cmd_probe_align(self, gcmd):
+        curtime = self.printer.get_reactor().monotonic()
+        status = self.printer.lookup_object('toolhead').get_status(curtime)['homed_axes']
         self.sendop = 0
         self.revop = 0
         wait_count = 0;
@@ -62,17 +64,15 @@ class aniso_bed_mesh:
         self.sendop = 1
         self.gcode.run_script_from_command("G90")
         self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=5 VELOCITY=10")
-
-        self.gcode.run_script_from_command("G28.1 y")
-        self.gcode.run_script_from_command("G1 y5")
-        self.gcode.run_script_from_command("M400")
-        self.gcode.run_script_from_command("G4 P2000")
-        self.gcode.run_script_from_command("G28.1 x")
-        self.gcode.run_script_from_command("G1 x5")
-        self.gcode.run_script_from_command("T0")
-        self.gcode.run_script_from_command("M400")
-        
-
+        if status != 'xyz' and status != 'xy':
+            self.gcode.run_script_from_command("G28.1 y")
+            self.gcode.run_script_from_command("G1 y5")
+            self.gcode.run_script_from_command("M400")
+            self.gcode.run_script_from_command("G4 P2000")
+            self.gcode.run_script_from_command("G28.1 x")
+            self.gcode.run_script_from_command("G1 x5")
+            self.gcode.run_script_from_command("T0")
+            self.gcode.run_script_from_command("M400")
 
         pin_num = (self.pin4_num << 24) | (self.pin3_num << 16) | (self.pin2_num << 8) | self.pin1_num
         self.update_uart_cmd.send([self.oid, self.sendop, pin_num])
@@ -98,9 +98,9 @@ class aniso_bed_mesh:
 
             if self.sendop == 3:
                 self.gcode.run_script_from_command("G1 X150 Y150 F3000")
-                for i in range(3):
-                    self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=3 VELOCITY=15")
-                    self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=-3 VELOCITY=15")
+                for i in range(10):
+                    self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=1 VELOCITY=13")
+                    self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=-1 VELOCITY=13")
                 self.gcode.run_script_from_command("M400")
                 self.update_uart_cmd.send([self.oid, 3, 0])
                 while wait_count < 10:
@@ -125,7 +125,8 @@ class aniso_bed_mesh:
                         self.gcode.run_script_from_command("G1 Z8")
                         self.gcode.run_script_from_command("G28.1 Z")
                         self.gcode.run_script_from_command("M400")
-
+                        self.gcode.run_script_from_command("G4 P2000")
+                        self.gcode.run_script_from_command("G1 Z8")
                         self.update_uart_cmd.send([self.oid, 6, 0])
                         while wait_count < 10:
                             self.gcode.run_script_from_command("G4 P300")
