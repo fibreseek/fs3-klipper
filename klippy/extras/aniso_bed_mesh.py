@@ -71,9 +71,10 @@ class aniso_bed_mesh:
             self.gcode.run_script_from_command("G4 P2000")
             self.gcode.run_script_from_command("G28.1 x")
             self.gcode.run_script_from_command("G1 x5")
-            self.gcode.run_script_from_command("T0")
-            self.gcode.run_script_from_command("M400")
-
+            
+        self.gcode.run_script_from_command("T0")
+        self.gcode.run_script_from_command("M400")
+        
         pin_num = (self.pin4_num << 24) | (self.pin3_num << 16) | (self.pin2_num << 8) | self.pin1_num
         self.update_uart_cmd.send([self.oid, self.sendop, pin_num])
         #self.gcode.respond_info("aniso bed mesh init 0x%x",(self.pin4_num << 24) | (self.pin3_num << 16) | (self.pin2_num << 8) | self.pin1_num]) 
@@ -97,7 +98,7 @@ class aniso_bed_mesh:
             wait_count = 0
 
             if self.sendop == 3:
-                self.gcode.run_script_from_command("G1 X150 Y150 F3000")
+                self.gcode.run_script_from_command("G1 X65 Y50 F3000")
                 for i in range(10):
                     self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=1 VELOCITY=13")
                     self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=-1 VELOCITY=13")
