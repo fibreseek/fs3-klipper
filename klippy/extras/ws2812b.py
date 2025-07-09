@@ -37,6 +37,9 @@ class LEDController:
         self.current_layer = 0    # Current completed layer number (M532 L)
         self.progress_percent = 0.0  # Track progress percentage
         
+        # NEW: Progress bar color mode variable
+        self.progress_color_mode = 0  # Default to green (0 = green, 1 = red, etc.)
+        
         # Printer state variables
         self.printer_state = "idle"  # "idle", "paused", "error"
         self.pre_pause_state = "idle"
@@ -133,6 +136,9 @@ class MySerial:
         # Register M2000 command for printer state
         self.gcode.register_command("M2000", self.cmd_M2000,
                                    desc="Set printer state: M2000 L<state> R<red> G<green> B<blue>")
+        # NEW: Register M2001 command for progress color mode
+        self.gcode.register_command("M2001", self.cmd_M2001,
+                                   desc="Set progress bar color mode: M2001 S<mode> (0=green, 1=red, 2=Purple.)")
             
     def cmd_set_led_mode(self, gcmd):
         # Parse G-code command arguments
@@ -182,17 +188,29 @@ class MySerial:
         self.led.total_layers = max(1, total_layers)  # Ensure at least 1 layer
         gcmd.respond_info(f"Total layers set to: {total_layers}")
 
-    # M532 command handler - Set current layer and display green progress bar
+    # M532 command handler - Set current layer and display progress bar
     def cmd_M532(self, gcmd):
         current_layer = gcmd.get_int('L', minval=0)
         self.led.progress_percent = gcmd.get_float('P', 0.0, minval=0.0, maxval=100.0)
+        
+        # NEW: Select color based on progress_color_mode
+        color_modes = [
+            (0, 255, 0),   # Green - mode 0
+            (255, 50, 0), # Orange - mode 1
+            (108, 28, 193)  # Purple - mode 2
+        ]
+        
+        # Ensure mode is within valid range
+        mode = min(self.led.progress_color_mode, len(color_modes) - 1)
+        mode = max(mode, 0)
+        progress_color = color_modes[mode]
         
         # Special case: when current_layer equals total_layers, light all LEDs
         if current_layer == self.led.total_layers:
             self.led.current_layer = self.led.total_layers
             self.led.led_count = 37  # Light all LEDs
             self.led.active_mode = 0
-            self.led.current_color = (0, 255, 0)  # Green
+            self.led.current_color = progress_color  # Green (completion color)
         else:
             # Normal case: calculate completed layers (current_layer - 1)
             completed_layers = max(0, current_layer - 1)
@@ -205,7 +223,7 @@ class MySerial:
                 self.led.led_count = self.led.calculate_led_count()
             
             self.led.active_mode = 0
-            self.led.current_color = (0, 255, 0)  # Green
+            self.led.current_color = progress_color  # Use selected progress color
         
         # Update and send LED data
         self.update_led_data()
@@ -215,7 +233,13 @@ class MySerial:
         progress_percent = (self.led.current_layer / self.led.total_layers) * 100 if self.led.total_layers > 0 else 0
         gcmd.respond_info(f"Started layer: {current_layer}/{self.led.total_layers} | "
                          f"Completed: {self.led.current_layer} layers | "
-                         f"LEDs lit: {self.led.led_count} (green)")
+                         f"LEDs lit: {self.led.led_count} (color mode: {self.led.progress_color_mode})")
+
+    # NEW: M2001 command handler - Set progress bar color mode
+    def cmd_M2001(self, gcmd):
+        mode = gcmd.get_int('S', minval=0, maxval=8)
+        self.led.progress_color_mode = mode
+        gcmd.respond_info(f"Progress bar color mode set to: {mode}")
 
     # M2000 command handler - Set printer state
     def cmd_M2000(self, gcmd):
@@ -255,7 +279,7 @@ class MySerial:
         elif new_state == "paused":
             color = self.led.state_colors["paused"]
             self.gcode.run_script_from_command(
-                f"SET_LED_MODE MODE=0 R={color[0]} G={color[1]} B={color[2]} COUNT=37"
+                f"SET_LED_MODE MODE=5 R={color[0]} G={color[1]} B={color[2]} COUNT=37"
             )
         elif new_state == "error":
             color = self.led.state_colors["error"]

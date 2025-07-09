@@ -30,6 +30,9 @@ class VirtualSD:
         self.must_pause_work = self.cmd_from_sd = False
         self.next_file_position = 0
         self.work_timer = None
+        # wait Pause 
+        self.waiting_pause_request = False
+        self.cutting_completed_detected = False
         # Error handling
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.on_error_gcode = gcode_macro.load_template(
@@ -113,6 +116,20 @@ class VirtualSD:
             self.must_pause_work = True
             while self.work_timer is not None and not self.cmd_from_sd:
                 self.reactor.pause(self.reactor.monotonic() + .001)
+
+        toolhead = self.printer.lookup_object('toolhead', None)
+        if toolhead is not None:
+            self.must_pause_work = True
+            return
+        
+        extruder = toolhead.get_extruder()
+        extruder_name = extruder.get_name() if extruder is not None else "extruder"
+
+        if extruder_name == "extruder1":
+            self.must_pause_work = True
+        else:
+            self.waiting_pause_request = True
+            self.cutting_completed_detected = False
     def do_resume(self):
         if self.work_timer is not None:
             raise self.gcode.error("SD busy")
@@ -237,6 +254,12 @@ class VirtualSD:
         lines = []
         error_message = None
         while not self.must_pause_work:
+            if self.waiting_pause_request and self.cutting_completed_detected:
+                self.must_pause_work = True
+                self.waiting_pause_request = False
+                self.cutting_completed_detected = False
+                break
+
             if not lines:
                 # Read more data
                 try:
@@ -264,6 +287,15 @@ class VirtualSD:
             # Dispatch command
             self.cmd_from_sd = True
             line = lines.pop()
+
+            if "Cutting completed" in line:
+                self.cutting_completed_detected = True
+
+                if self.waiting_pause_request:
+                    self.must_pause_work = True
+                    self.waiting_pause_request = False
+                    break
+
             if sys.version_info.major >= 3:
                 next_file_position = self.file_position + len(line.encode()) + 1
             else:

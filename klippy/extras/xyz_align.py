@@ -51,11 +51,11 @@ class xyz_align:
             y1 = params['y1']
             x_rotation_distance = self.session_x.getfloat('rotation_distance')
             x_microsteps =self.session_x.getfloat('microsteps')
-            z_rotation_distance = self.session_z.getfloat('rotation_distance')
+            z_rotation_distance = self.session_z.getfloat('rotation_distance') 
             z_microsteps = self.session_z.getfloat('microsteps')
             z_offset = ((z1 - z0)*z_rotation_distance)/(z_microsteps*200)
-            x_offset = x1*x_rotation_distance/(x_microsteps*200) - (x0*x_rotation_distance/(x_microsteps*200)) + self.t0_offset_x - self.t1_offset_x
-            y_offset = y1*x_rotation_distance/(x_microsteps*200) - (y0*x_rotation_distance/(x_microsteps*200)) + self.t0_offset_y - self.t1_offset_y
+            x_offset = (x0*x_rotation_distance/(x_microsteps*200)) - (x1*x_rotation_distance/(x_microsteps*200))+ self.t0_offset_x - self.t1_offset_x
+            y_offset = (y0*x_rotation_distance/(x_microsteps*200)) - (y1*x_rotation_distance/(x_microsteps*200)) + self.t0_offset_y - self.t1_offset_y
             
             #self.gcode.respond_info("handle_align_end offset : x=%f y=%f z=%f" % (x_offset,y_offset,z_offset))
             self.gcode.run_script_from_command("M118 XYZ_ALIGN=1 x_offset=%f y_offset=%f z_offset=%f"% (x_offset,y_offset,z_offset))
@@ -63,7 +63,8 @@ class xyz_align:
             self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (0-x_offset))
             self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (0-y_offset))
             self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=zoffset VALUE=%f" % (0-z_offset))
-
+            self.gcode.respond_info("handle_align_end: res = %d x0 = %d x1 = %d y0 = %d y1 = %d z0 = %d z1 = %d" % (res,x0,x1,y0,y1,z0,z1))
+            
         elif(res == 0):
             z0 = params['z0']
             z1 = params['z1']
@@ -91,7 +92,7 @@ class xyz_align:
             time.sleep(1.0) 
             #self.gcode.run_script_from_command("G4 P1000\n")
             if (self.z_value == 0):
-                self.offset_z_press = self.offset_z - z_offset -0.1
+                self.offset_z_press = self.offset_z - z_offset -0.3
                 break
             z_offset += 1    
             
