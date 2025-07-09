@@ -19,6 +19,8 @@ class aniso_bed_mesh:
         self.gcode.register_command('PROBE_ALIGN', self.cmd_probe_align)
         self.sendop = 0
         self.revop = 0
+        self.step0 = 0
+        self.step1 = 0
         self.printer.add_object("aniso_bed_mesh ", self)
 
     # val 0 success
@@ -46,9 +48,11 @@ class aniso_bed_mesh:
             self.gcode.respond_info("aniso bed mesh val:%d" % val)    
         elif op == 5:
             self.gcode.respond_info("aniso bed mesh record z zero step success! step:%d" % val)
+            self.step0 = val
             self.revop = 5
         elif op == 6:
             self.gcode.respond_info("aniso bed mesh re record z zero step success! step:%d" % val)
+            self.step1 = val
             #self.gcode.run_script_from_command("G1 Z8")
             self.revop = 6  
         elif op == 8:  
@@ -144,6 +148,9 @@ class aniso_bed_mesh:
                             if self.revop == 6:
                                 break;
                         wait_count = 0
+                        if abs(self.step0 - self.step1) > 400:
+                            self.gcode.respond_info("aniso bed mesh step align failed, step0:%d step1:%d , retry!!!" % (self.step0, self.step1))
+                            self.gcode.run_script_from_command("PROBE_ALIGN T=%f" % self.adc_trigger_val) 
 
 
     #op 0 none

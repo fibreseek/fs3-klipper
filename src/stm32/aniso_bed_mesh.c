@@ -260,7 +260,7 @@ void aniso_bed_mesh_cmd(uint32_t *args)
         gPF[2] = gpio_adc_setup(val&0xFF);
         val = (val >> 8);
         gPF[3] = gpio_adc_setup(val&0xFF);
-        sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, op, 0);
+        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, op, 0);
     }
     else if(op == 2)   
     {
@@ -285,12 +285,12 @@ void aniso_bed_mesh_cmd(uint32_t *args)
             g_adc_trigge = val;
         #endif
         Z_STEP = 0xFFFFFFFF;
-        sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, op, res);
+        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, op, res);
     }
     else if(op == 3)   
     {
         startb = 0;
-        sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, op, 0);
+        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, op, 0);
         for(i = 0; i < 4; i++)
         {
             printf_("adc_val_min[%d]=%d, adc_val_max[%d]=%d\r\n", i, adc_val_min[i], i, adc_val_max[i]);
@@ -298,10 +298,10 @@ void aniso_bed_mesh_cmd(uint32_t *args)
     }
     else if(op == 4)   
     {
-        sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, 4, 10000+adc_val_min[val]);
-        sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, 4, 20000+adc_val_max[val]);
-        sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, 4, 30000+adc_val_min_t[val]);
-        sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, 4, 40000+adc_val_max_t[val]);
+        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, 4, 10000+adc_val_min[val]);
+        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, 4, 20000+adc_val_max[val]);
+        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, 4, 30000+adc_val_min_t[val]);
+        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, 4, 40000+adc_val_max_t[val]);
         // if(val == 0)
         // {
         //      memset(index_array, 0, sizeof(index_array));
@@ -309,7 +309,7 @@ void aniso_bed_mesh_cmd(uint32_t *args)
         // }
         while(i < 30 )
         { 
-            sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, 4, my_buf.data[i]);
+            sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, 4, my_buf.data[i]);
             i++;
         }
         for(i=0;i<4;i++)
@@ -325,30 +325,22 @@ void aniso_bed_mesh_cmd(uint32_t *args)
         {
             printf_("index=%d, adc_val=%d, step=%d, trigger=%d\n", index, adc_data[index][i].adc_val, adc_data[index][i].step, adc_data[index][i].trigger);
         }
-
-        // sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, 4, 10000+val1);
-        // sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, 4, 20000+val2);
-        // sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, 4, 50000+val3);
-        // sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, 4, 10000+val_max[val]);
-        // sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, 4, 20000+val_min[val]);
-
-
     }
     else if(op == 5)   
     {
         Z_STEP = get_step_count_z();
         ticks = 0;
-        sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, 5, Z_STEP);
+        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, 5, Z_STEP);
     }
     else if(op == 6)   
     {
         Z_STEP = get_step_count_z();
         ticks = 0;
-        sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, 6, Z_STEP);
+        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, 6, Z_STEP);
     }
     else if(op == 7)
     {
-        //printf_("aniso_bed_mesh oid=%d op=%d val=%u\r\n", goid, 7, val);
+        //printf_("aniso_bed_mesh oid=%d op=%d val=%i\r\n", goid, 7, val);
         memset(step_align_array,0,sizeof(step_align_array));
         align_flag = val;
         step_align_count = 0;
@@ -356,12 +348,12 @@ void aniso_bed_mesh_cmd(uint32_t *args)
     else if(op == 8)
     {
         //printf_("aniso_bed_mesh oid=%d op=%d val=%u\r\n", goid, 8, gen_step_align_data());
-        sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, 8, gen_step_align_data());
+        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, 8, gen_step_align_data());
     }
 
 
    
-	//sendf("aniso_bed_mesh oid=%c op=%c val=%u", goid, op, val);
+	//sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, op, val);
 }
 
 
