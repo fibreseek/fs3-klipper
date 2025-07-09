@@ -1692,6 +1692,11 @@ class ProfileManager:
             for p in line:
                 z_values += "%.6f, " % p
             z_values = z_values[:-2]
+
+        with open('zdata_bedmesh.txt', 'a') as file:
+            file.write("%s \n" % (z_values))
+
+
         configfile.set(cfg_name, 'version', PROFILE_VERSION)
         configfile.set(cfg_name, 'points', z_values)
         for key, value in mesh_params.items():

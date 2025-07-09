@@ -100,7 +100,7 @@ command_config_endstop(uint32_t *args)
     }
 }
 DECL_COMMAND(command_config_endstop, "config_endstop oid=%c pin=%c pull_up=%c");
-
+extern void init_step_align(void);
 // Home an axis
 void
 command_endstop_home(uint32_t *args)
@@ -123,6 +123,7 @@ command_endstop_home(uint32_t *args)
     e->ts = trsync_oid_lookup(args[6]);
     e->trigger_reason = args[7];
     sched_add_timer(&e->time);
+    init_step_align();
 }
 DECL_COMMAND(command_endstop_home,
              "endstop_home oid=%c clock=%u sample_ticks=%u sample_count=%c"

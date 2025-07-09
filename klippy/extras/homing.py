@@ -183,9 +183,14 @@ class Homing:
                 thcoord[i] = coord[i]
         return thcoord
     def set_homed_position(self, pos):
+        self.gcode.respond_info("set_homed_position pos:%d" % pos)  
         self.toolhead.set_position(self._fill_coord(pos))
     def home_rails(self, rails, forcepos, movepos):
         # Notify of upcoming homing operation
+        # add for anisoprint bedmesh start
+        aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
+        aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 7, 0])
+        # add for anisoprint bedmesh end
         self.printer.send_event("homing:home_rails_begin", self, rails)
         # Alter kinematics class to think printer is at forcepos
         force_axes = [axis for axis in range(3) if forcepos[axis] is not None]
@@ -220,6 +225,7 @@ class Homing:
                 raise self.printer.command_error(
                     "Endstop %s still triggered after retract"
                     % (hmove.check_no_movement(),))
+                            
         # Signal home operation complete
         self.toolhead.flush_step_generation()
         self.trigger_mcu_pos = {sp.stepper_name: sp.trig_pos

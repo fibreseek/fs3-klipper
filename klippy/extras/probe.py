@@ -6,6 +6,7 @@
 import logging
 import pins
 from . import manual_probe
+import time
 
 HINT_TIMEOUT = """
 If the probe did not move far enough to trigger, then
@@ -337,14 +338,20 @@ class ProbeSessionHelper:
             self._probe_state_error()
         params = self.get_probe_params(gcmd)
         gcode = self.printer.lookup_object('gcode')
+        aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
         toolhead = self.printer.lookup_object('toolhead')
         probexy = toolhead.get_position()[:2]
         retries = 0
         positions = []
         sample_count = params['samples']
+
+        if sample_count != 4:
+            raise gcmd.error("Probe samples must be 4 for anisoprint bed mesh")
+            return
         #gcode.run_script_from_command("M530 L%d" % (sample_count,))
         while len(positions) < sample_count:
             # Probe position
+            #gcode.run_script_from_command("G4 P300")
             pos = self._probe(params['probe_speed'])
             positions.append(pos)
             # Check samples tolerance
@@ -356,7 +363,7 @@ class ProbeSessionHelper:
                 gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
                 
                 for i in range(10):
-                    gcode.run_script_from_command("G1 Z3")
+                    gcode.run_script_from_command("G1 Z2")
                     gcode.run_script_from_command("G1 Z1")
                 
                 retries += 1
@@ -368,6 +375,20 @@ class ProbeSessionHelper:
                     probexy + [pos[2] + params['sample_retract_dist']],
                     params['lift_speed'])
             else:
+                ## aniso add start
+                aniso_bed_mesh.refresh = 0
+                aniso_bed_mesh.align3 = 0
+                aniso_bed_mesh.align2 = 0
+                aniso_bed_mesh.align1 = 0
+                aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 8, 0])
+                waitcount = 0
+                while(waitcount < 10):
+                    time.sleep(0.3) 
+                    if aniso_bed_mesh.refresh == 1:   
+                        break
+                    waitcount += 1    
+                ## aniso add end
+
                 if len(positions) > 1:
                     gcmd.respond_info("Result is zmax=%.6f zmin=%.6f z_offset=%.6f" % (max(z_positions),min(z_positions),(max(z_positions)-min(z_positions)))) 
                     with open('zdata_res.txt', 'a') as file:
@@ -375,6 +396,11 @@ class ProbeSessionHelper:
                         
         # Calculate result
         if sample_count > 1:
+            if sample_count == 4:   
+                positions[1][2] += aniso_bed_mesh.align1 * 0.00165
+                positions[2][2] += aniso_bed_mesh.align2 * 0.00165
+                positions[3][2] += aniso_bed_mesh.align3 * 0.00165
+
             epos = calc_probe_z_average(positions[1:], params['samples_result'])
         else:    
             epos = calc_probe_z_average(positions, params['samples_result'])
@@ -457,6 +483,7 @@ class ProbePointsHelper:
         # Lookup objects
         probe = self.printer.lookup_object('probe', None)
         gcode = self.printer.lookup_object('gcode')
+        aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
         method = gcmd.get('METHOD', 'automatic').lower()
         def_move_z = self.default_horizontal_move_z
         self.horizontal_move_z = gcmd.get_float('HORIZONTAL_MOVE_Z',
@@ -477,7 +504,9 @@ class ProbePointsHelper:
         probe_session = probe.start_probe_session(gcmd)
         probe_num = 0
         gcode.run_script_from_command("M530 L%d" % (len(self.probe_points),))
+        
         while 1:
+            aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 7, 1])
             gcode.run_script_from_command("M532 L%d" % (probe_num+1,))
             self._raise_tool(not probe_num)
             if probe_num >= len(self.probe_points):
