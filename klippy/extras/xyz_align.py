@@ -83,7 +83,7 @@ class xyz_align:
        #self.gcode.respond_info("xyz_align: %d" % (self.oid))
     def get_z_press_val(self, t):
         z_offset = 1;
-        while(z_offset <= (10 - t*3)):
+        while(z_offset <= (15 - t*3)):
             self.gcode.run_script_from_command("G1 Z%d\n" % (self.offset_z - z_offset))
             self.gcode.run_script_from_command("M400\n")
             self.z_value = 1
