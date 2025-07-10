@@ -63,6 +63,8 @@ static uint8_t trigge_flag[4] = {0, 0, 0, 0};
 static uint8_t adc_flag = 0;
 static uint8_t align_start_flag = 0; // 用于标记是否开始对齐
 static int32_t align_start_step = 0; // 用于记录对齐开始时的步进计数
+static int8_t trigge_count = 0; // 用于记录触发次数
+#define MAX_TRIGGE_COUNT 5 // 最大触发次数
 typedef struct {
     uint32_t data[50];
     uint8_t count;  // 当前已有数据个数（最大到20）
@@ -84,6 +86,7 @@ void init_step_align(void)
     step_align = STEP_ALIGN_INIT_VAL;
     memset(adc_data, 0, sizeof(adc_data));
     align_start_flag = 1;
+    trigge_count = 0;
     //memset(step_align_array,0,sizeof(step_align_array));
     printf_("init_step_align\r\n");
 }
@@ -451,18 +454,32 @@ uint8_t gpio_in_read_pre1(void)
                 adc_val_max_t[i] = 0;
             }
         }
+        trigge_count = 0;
         align_start_step = get_step_count_z();
         return 0;
     }
-
-    if(ticks != 0)
+    
+    if(trigge_count > 1)
     {
-        if(tick_is_earlier(ticks  + timer_from_us(500), timer_read_time()) == 0)
-        {
-            return 1;
-        }
+        //printf_("1");
+        trigge_count --;
+        return 1; // 如果已经触发过，则直接返回
     }
-    ticks = 0;
+    else if(trigge_count == 1)
+    {
+        // 如果只触发过一次，则检查是否需要继续触发
+        //printf_("2");
+        return 0;
+    }
+    //printf_("3");
+    // if(ticks != 0)
+    // {
+    //     if(tick_is_earlier(ticks  + timer_from_us(500), timer_read_time()) == 0)
+    //     {
+    //         return 1;
+    //     }
+    // }
+    // ticks = 0;
 
     for(i = 0; i < 4; i++)
     {
@@ -474,7 +491,8 @@ uint8_t gpio_in_read_pre1(void)
             {
                 if(val > (ADC_MAX(adc_val_max[i],ADC_MAX_OFFSET))||val < (ADC_MIN(adc_val_min[i],ADC_MAX_OFFSET)))
                 {
-                    ticks = timer_read_time();
+                    //ticks = timer_read_time();
+                    trigge_count = MAX_TRIGGE_COUNT;
                     Z_STEP = get_step_count_z();
                     u8buffer_push(3);
                     return 1;
@@ -493,8 +511,9 @@ uint8_t gpio_in_read_pre1(void)
                 
                 if(val > (ADC_MAX(adc_val_max[i],ADC_MAX_OFFSET))||val < (ADC_MIN(adc_val_min[i],ADC_MAX_OFFSET)))
                 {
-                    ticks = timer_read_time();
+                    //ticks = timer_read_time();
                     //u8buffer_push(3);
+                    trigge_count = MAX_TRIGGE_COUNT;
                     Z_STEP = get_step_count_z();
                     return 1;
                 }
@@ -510,7 +529,8 @@ uint8_t gpio_in_read_pre1(void)
                 {
                     if(val > (ADC_MAX(adc_val_max[i],ADC_MAX_OFFSET))||val < (ADC_MIN(adc_val_min[i],ADC_MAX_OFFSET)))
                     {
-                        ticks = timer_read_time();
+                        //ticks = timer_read_time();
+                        trigge_count = MAX_TRIGGE_COUNT;
                         Z_STEP = get_step_count_z();
                         //u8buffer_push(3);
                         return 1;
@@ -522,7 +542,8 @@ uint8_t gpio_in_read_pre1(void)
                     {
                         insert_adc_data_to_group(i, (struct adc_buff){.adc_val = val, .step = get_step_count_z(),. trigger = 1});
                         //u8buffer_push(1);
-                        ticks = timer_read_time();
+                        //ticks = timer_read_time();
+                        trigge_count = MAX_TRIGGE_COUNT;
                         return 1;
                     }
                 }
