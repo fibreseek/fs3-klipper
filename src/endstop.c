@@ -123,7 +123,9 @@ command_endstop_home(uint32_t *args)
     e->ts = trsync_oid_lookup(args[6]);
     e->trigger_reason = args[7];
     sched_add_timer(&e->time);
+#ifndef __linux__    
     init_step_align();
+#endif    
 }
 DECL_COMMAND(command_endstop_home,
              "endstop_home oid=%c clock=%u sample_ticks=%u sample_count=%c"
