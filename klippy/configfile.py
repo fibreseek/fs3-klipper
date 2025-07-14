@@ -352,6 +352,11 @@ class ConfigAutoSave:
     def cmd_SAVE_CONFIG(self, gcmd):
         if not self.fileconfig.sections():
             return
+
+        #aniso add
+        restart_flag = gcmd.get_float('R', 1)
+        #aniso add
+
         # Create string containing autosave data
         cfgrdr = ConfigFileReader()
         autosave_data = cfgrdr.build_config_string(self.fileconfig)
@@ -405,8 +410,10 @@ class ConfigAutoSave:
             logging.exception(msg)
             raise gcmd.error(msg)
         # Request a restart
-        gcode = self.printer.lookup_object('gcode')
-        gcode.request_restart('restart')
+        #aniso add
+        if restart_flag == 1:
+            gcode = self.printer.lookup_object('gcode')
+            gcode.request_restart('restart')
 
 
 ######################################################################
