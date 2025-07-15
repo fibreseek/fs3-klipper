@@ -22,6 +22,7 @@ class aniso_bed_mesh:
         self.step0 = 0
         self.step1 = 0
         self.printer.add_object("aniso_bed_mesh ", self)
+        self.zmicrosteps = config.getsection('stepper_z').getfloat('microsteps',8)
 
     # val 0 success
     # val 1 error
@@ -116,7 +117,8 @@ class aniso_bed_mesh:
                     self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=1 VELOCITY=10")
                     self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=-1 VELOCITY=10")
                 self.gcode.run_script_from_command("M400")
-                self.update_uart_cmd.send([self.oid, 3, 0])
+                self.update_uart_cmd.send([self.oid, 3, round(self.zmicrosteps)])
+                self.gcode.respond_info("aniso bed mesh zmicrosteps val:%d" % self.zmicrosteps)  
                 while wait_count < 10:
                     self.gcode.run_script_from_command("G4 P300")
                     wait_count = wait_count + 1
@@ -140,8 +142,8 @@ class aniso_bed_mesh:
                         self.gcode.run_script_from_command("G1 Z5 F600")
                         self.gcode.run_script_from_command("G28.1 Z")
                         self.gcode.run_script_from_command("M400")
-                        #self.gcode.run_script_from_command("G4 P2000")
-                        #self.gcode.run_script_from_command("G1 Z5")
+                        self.gcode.run_script_from_command("G4 P2000")
+                        self.gcode.run_script_from_command("G1 Z0")
                         self.update_uart_cmd.send([self.oid, 6, 0])
                         while wait_count < 10:
                             self.gcode.run_script_from_command("G4 P300")

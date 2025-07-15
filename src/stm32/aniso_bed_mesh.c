@@ -40,7 +40,7 @@ int32_t val_delta = 0;
 #else
 static uint32_t g_adc_trigge = 0;
 #endif
-
+static uint32_t zmicrosteps = 8; // 默认微步数为8
 static int32_t Z_STEP = 0xFFFFFFFF;
 extern int32_t get_step_count_z(void);
 extern uint8_t get_step_dir_z(void);
@@ -293,6 +293,7 @@ void aniso_bed_mesh_cmd(uint32_t *args)
     else if(op == 3)   
     {
         startb = 0;
+        zmicrosteps = val; // 更新微步数
         sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, op, 0);
         for(i = 0; i < 4; i++)
         {
@@ -430,6 +431,26 @@ void u8buffer_push(uint32_t value)
 // }
 //8weibu  800 2000
 //64weibu  6400 16000
+uint32_t get_zmicrosteps_value(uint32_t step)
+{
+    switch(zmicrosteps)
+    {
+        case 8:
+            return step;              // 8微步，相当于 step << 0
+        case 16:
+            return step << 1;         // 16微步，step * 2
+        case 32:
+            return step << 2;         // 32微步，step * 4
+        case 64:        
+            return step << 3;         // 64微步，step * 8
+        case 128:
+            return step << 4;         // 128微步，step * 16
+        case 256:   
+            return step << 5;         // 256微步，step * 32
+        default:
+            return step;              // fallback，避免意外情况
+    }
+}
 
 uint8_t gpio_in_read_pre1(void)
 {
@@ -487,7 +508,7 @@ uint8_t gpio_in_read_pre1(void)
         {
             val = gpio_adc_read(gPF[i]);
             step = get_step_count_z() - align_start_step;
-            if(ABS(step) <= 1200)
+            if(ABS(step) <= get_zmicrosteps_value(1200))
             {
                 if(val > (ADC_MAX(adc_val_max[i],ADC_MAX_OFFSET))||val < (ADC_MIN(adc_val_min[i],ADC_MAX_OFFSET)))
                 {
@@ -499,7 +520,7 @@ uint8_t gpio_in_read_pre1(void)
                 }
                 return 0;
             }
-            else if(ABS(step) > 1200 && ABS(step) <2400)
+            else if(ABS(step) > get_zmicrosteps_value(1200) && ABS(step) <get_zmicrosteps_value(2400))
             {
                 if(adc_flag == 0)
                 {
