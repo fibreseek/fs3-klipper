@@ -110,6 +110,8 @@ class MySerial:
         self.led = LEDController()
         self.write_timer = None
         self.is_static_mode = True  # Initial static mode
+        self.vsd = None
+        self.last_active = False
 
         try:
             self.serial = serial.Serial(
@@ -125,6 +127,14 @@ class MySerial:
         # Register G-code commands
         self._register_commands()
 
+        try:
+            self.vsd = self.printer.lookup_object('virtual_sdcard')
+        except:
+            logging.exception("Failed to find virtual_sdcard")
+        
+        self.progress_timer = self.reactor.register_timer(
+            self._check_print_progress, self.reactor.monotonic() + 3.0)
+
     def _register_commands(self):
         self.gcode.register_command("SET_LED_MODE", self.cmd_set_led_mode,
                                     desc="Set LED mode parameters: MODE R G B COUNT")
@@ -139,7 +149,58 @@ class MySerial:
         # NEW: Register M2001 command for progress color mode
         self.gcode.register_command("M2001", self.cmd_M2001,
                                    desc="Set progress bar color mode: M2001 S<mode> (0=green, 1=red, 2=Purple.)")
+    
+    def _check_print_progress(self, eventtime):
+        if self.vsd is None:
+            try:
+                self.vsd = self.printer.lookup_object('virtual_sdcard')
+            except:
+                return eventtime + 1.0
             
+        try:
+            is_active = self.vsd.is_active()
+            progress = self.vsd.progress()
+            #self.gcode.run_script_from_command("M118 progress=%f"% (progress))
+        except:
+            logging.exception("Error getting print status")
+            return eventtime + 1.0
+        
+        if self.last_active and not is_active:
+            led_count = 37
+            color_modes = [
+                (0, 255, 0),
+                (255, 50, 0),
+                (108, 28, 193)
+            ]
+            mode = min(self.led.progress_color_mode, len(color_modes) - 1)
+            progress_color = color_modes[mode]
+            self.led.active_mode = 0
+            self.led.current_color = progress_color
+            self.led.led_count = led_count
+            self.update_led_data()
+            self._send_led_data()
+        if is_active and self.led.printer_state not in ["paused", "error"]:
+            led_count = int(round(progress * 37))
+            if progress >= 0.999:
+                led_count = 37
+                
+            color_modes = [
+                (0, 255, 0),
+                (255, 50, 0),
+                (108, 28, 193)
+            ]
+            mode = min(self.led.progress_color_mode, len(color_modes) - 1)
+            progress_color = color_modes[mode]
+            self.led.active_mode = 0
+            self.led.current_color = progress_color
+            self.led.led_count = led_count
+            self.update_led_data()
+            self._send_led_data()
+        
+        self.last_active = is_active
+        
+        return eventtime + 1.0
+
     def cmd_set_led_mode(self, gcmd):
         # Parse G-code command arguments
         mode = gcmd.get_int('MODE', 0, minval=0, maxval=37)
