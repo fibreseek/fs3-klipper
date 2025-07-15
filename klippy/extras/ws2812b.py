@@ -183,6 +183,8 @@ class MySerial:
             led_count = int(round(progress * 37))
             if progress >= 0.999:
                 led_count = 37
+            elif progress < 0.027:
+                led_count = 1
                 
             color_modes = [
                 (0, 255, 0),
