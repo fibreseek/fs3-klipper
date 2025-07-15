@@ -13,6 +13,8 @@ OUT_OF_RANGE = 99.9
 class EddyCalibration:
     def __init__(self, config):
         self.printer = config.get_printer()
+        #self.toolhead = self.printer.lookup_object('toolhead')
+        self.last_toolhead_pos = self.last_kinematics_pos = None
         self.name = config.get_name()
         self.drift_comp = DummyDriftCompensation()
         # Current calibration data
@@ -189,11 +191,29 @@ class EddyCalibration:
         configfile = self.printer.lookup_object('configfile')
         configfile.set(self.name, 'calibrate', ''.join(cal_contents))
     cmd_EDDY_CALIBRATE_help = "Calibrate eddy current probe"
+
+    def get_kinematics_pos(self):
+        self.toolhead = self.printer.lookup_object('toolhead')
+        toolhead_pos = self.toolhead.get_position()
+        if toolhead_pos == self.last_toolhead_pos:
+            return self.last_kinematics_pos
+        self.toolhead.flush_step_generation()
+        kin = self.toolhead.get_kinematics()
+        kin_spos = {s.get_name(): s.get_commanded_position()
+                    for s in kin.get_steppers()}
+        kin_pos = kin.calc_position(kin_spos)
+        self.last_toolhead_pos = toolhead_pos
+        self.last_kinematics_pos = kin_pos
+        return kin_pos
+
+
     def cmd_EDDY_CALIBRATE(self, gcmd):
         self.probe_speed = gcmd.get_float("PROBE_SPEED", 5., above=0.)
         # Start manual probe
-        manual_probe.ManualProbeHelper(self.printer, gcmd,
-                                       self.post_manual_probe)
+        # manual_probe.ManualProbeHelper(self.printer, gcmd,
+        #                                self.post_manual_probe)
+        kin_pos = self.get_kinematics_pos()
+        self.post_manual_probe(kin_pos)
     def register_drift_compensation(self, comp):
         self.drift_comp = comp
 
