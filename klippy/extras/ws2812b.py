@@ -139,10 +139,10 @@ class MySerial:
         self.gcode.register_command("SET_LED_MODE", self.cmd_set_led_mode,
                                     desc="Set LED mode parameters: MODE R G B COUNT")
         # Register M530 and M532 commands
-        self.gcode.register_command("M530", self.cmd_M530,
-                                   desc="Set total printing layers: M530 L<total>")
-        self.gcode.register_command("M532", self.cmd_M532,
-                                   desc="Set current printing layer: M532 L<current>")
+        # self.gcode.register_command("M530", self.cmd_M530,
+        #                            desc="Set total printing layers: M530 L<total>")
+        # self.gcode.register_command("M532", self.cmd_M532,
+        #                            desc="Set current printing layer: M532 L<current>")
         # Register M2000 command for printer state
         self.gcode.register_command("M2000", self.cmd_M2000,
                                    desc="Set printer state: M2000 L<state> R<red> G<green> B<blue>")
