@@ -182,7 +182,7 @@ class ControlBangBang:
 ######################################################################
 
 PID_SETTLE_DELTA = 2.
-PID_SETTLE_SLOPE = .1
+PID_SETTLE_SLOPE = .5
 
 class ControlPID:
     def __init__(self, heater, config):
