@@ -122,14 +122,14 @@ class ExtruderStepper:
         invert_dir, orig_invert_dir = self.stepper.get_dir_inverted()
         if invert_dir != orig_invert_dir:
             rotation_dist = -rotation_dist
-        gcmd.respond_info("Extruder '%s' rotation distance set to %0.6f"
-                          % (self.name, rotation_dist))
+        # gcmd.respond_info("Extruder '%s' rotation distance set to %0.6f"
+        #                   % (self.name, rotation_dist))
     cmd_SYNC_EXTRUDER_MOTION_help = "Set extruder stepper motion queue"
     def cmd_SYNC_EXTRUDER_MOTION(self, gcmd):
         ename = gcmd.get('MOTION_QUEUE')
         self.sync_to_extruder(ename)
-        gcmd.respond_info("Extruder '%s' now syncing with '%s'"
-                          % (self.name, ename))
+        # gcmd.respond_info("Extruder '%s' now syncing with '%s'"
+        #                   % (self.name, ename))
 
 # Tracking for hotend heater, extrusion motion queue, and extruder stepper
 class PrinterExtruder:
