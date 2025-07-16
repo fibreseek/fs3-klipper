@@ -76,6 +76,7 @@ class aniso_bed_mesh:
 
         self.gcode.respond_info("adc_trigger_val: %f" % self.adc_trigger_val)    
         self.sendop = 1
+        self.gcode.run_script_from_command("DISABLE_BED_MESH")
         self.gcode.run_script_from_command("G90")
         self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=5 VELOCITY=10")
         if status != 'xyz' and status != 'xy':
@@ -112,7 +113,8 @@ class aniso_bed_mesh:
             wait_count = 0
 
             if self.sendop == 3:
-                #self.gcode.run_script_from_command("G1 X65 Y50 F3000") replace by safe z home
+                self.gcode.run_script_from_command("G1 X65 Y50 F3000")
+                self.gcode.run_script_from_command("RESTORE_BED_MESH")
                 for i in range(10):
                     self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=1 VELOCITY=10")
                     self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=-1 VELOCITY=10")
