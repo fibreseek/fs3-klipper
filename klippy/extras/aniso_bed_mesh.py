@@ -112,7 +112,7 @@ class aniso_bed_mesh:
             wait_count = 0
 
             if self.sendop == 3:
-                self.gcode.run_script_from_command("G1 X65 Y50 F3000")
+                #self.gcode.run_script_from_command("G1 X65 Y50 F3000") replace by safe z home
                 for i in range(10):
                     self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=1 VELOCITY=10")
                     self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=-1 VELOCITY=10")
