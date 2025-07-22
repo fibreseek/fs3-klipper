@@ -23,7 +23,7 @@ enum { ESF_PIN_HIGH=1<<0, ESF_HOMING=1<<1 };
 
 static uint_fast8_t endstop_oversample_event(struct timer *t);
 
-//extern uint8_t gpio_in_read_pre1(void);
+extern uint8_t gpio_in_read_pre1(void);
 extern uint8_t get_step_dir_z(void);
 static uint32_t count = 0;
 struct endstop *zendstop = NULL;
@@ -101,7 +101,7 @@ command_config_endstop(uint32_t *args)
     }
 }
 DECL_COMMAND(command_config_endstop, "config_endstop oid=%c pin=%c pull_up=%c");
-//extern void init_step_align(void);
+extern void init_step_align(void);
 // Home an axis
 void
 command_endstop_home(uint32_t *args)
@@ -125,7 +125,7 @@ command_endstop_home(uint32_t *args)
     e->trigger_reason = args[7];
     sched_add_timer(&e->time);
 #ifndef __linux__    
-  //  init_step_align();
+    init_step_align();
 #endif    
 }
 DECL_COMMAND(command_endstop_home,
