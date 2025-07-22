@@ -149,7 +149,7 @@ class GCodeMove:
                 if 'P' in params:
                     p =  float(params['P'])
                     if self.proportion != p:
-                        gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % (p*V_rotation_distance))
+                        gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % (V_rotation_distance/p))
                         self.proportion = p
                 else:
                     gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % ((float(params['U'])/float(params['V']))*V_rotation_distance))
