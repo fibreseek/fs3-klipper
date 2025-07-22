@@ -37,7 +37,7 @@ uint8_t gpio_in_read_pre(struct gpio_in g)
 #ifndef __linux__
     if(g.bit == zendstop->pin.bit)  //z
     {
-        //val = gpio_in_read_pre1();
+        val = gpio_in_read_pre1();
         return val;
     }
     else   
