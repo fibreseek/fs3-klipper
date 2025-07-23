@@ -18,19 +18,26 @@ class PrinterHeaterFan:
         self.fan = fan.Fan(config, default_shutdown_speed=1.)
         self.fan_speed = config.getfloat("fan_speed", 1., minval=0., maxval=1.)
         self.last_speed = 0.
+
     def handle_ready(self):
         pheaters = self.printer.lookup_object('heaters')
         self.heaters = [pheaters.lookup_heater(n) for n in self.heater_names]
         reactor = self.printer.get_reactor()
         reactor.register_timer(self.callback, reactor.monotonic()+PIN_MIN_TIME)
+        
     def get_status(self, eventtime):
         return self.fan.get_status(eventtime)
     def callback(self, eventtime):
+        aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
         speed = 0.
         for heater in self.heaters:
             current_temp, target_temp = heater.get_temp(eventtime)
             if target_temp or current_temp > self.heater_temp:
                 speed = self.fan_speed
+
+        if aniso_bed_mesh.bed_mesh == 1: 
+            speed = 0.0       
+
         if speed != self.last_speed:
             self.last_speed = speed
             self.fan.set_speed(speed)

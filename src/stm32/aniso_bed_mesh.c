@@ -322,7 +322,7 @@ uint8_t gpio_in_read_pre1(void)
         else
         {
             adc_flag = 1;
-            val_delta = (adc_val_max_t -adc_val_min_t)*20/100;
+            val_delta = (adc_val_max_t -adc_val_min_t)*30/100;
             adc_buff_data.adc_val = val;
             adc_buff_data.step = step;
             adc_buff_data.trigger = 0;
@@ -331,6 +331,10 @@ uint8_t gpio_in_read_pre1(void)
             if(align_flag == 0) //第一次归零
             {
                 val_delta = val_delta * 3;
+                if(val_delta < 300) // 确保val_delta至少为60
+                {
+                    val_delta = 300;
+                }
             }
 
             val_delta = MAX(val_delta, 60); // 确保val_delta至少为60
