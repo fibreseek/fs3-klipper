@@ -86,7 +86,7 @@ int32_t gen_step_align_data(void)
     step_align_array[0] &= 0x3FF; // 0b0000001111111111
     step_align_array[1] &= 0x3FF;
     step_align_array[2] &= 0x3FF;
-
+    
     return (step_align_array[0] << 20) | (step_align_array[1] << 10) | step_align_array[2];
 }
 
@@ -124,7 +124,7 @@ uint32_t get_step_align(void)
         {
             for (int i = 0; i < VALUE_COUNT; i++)
             {
-                if((adc_data[i].adc_val < adc_data[i+1].adc_val) && (adc_data[i].adc_val < adc_val_max_t))
+                if((adc_data[i].adc_val < adc_data[i+1].adc_val)/* && (adc_data[i].adc_val < adc_val_max_t)*/)
                 {
                     step_align = adc_data[0].step - adc_data[i].step;
                     insert_at_front(step_align);
@@ -137,7 +137,7 @@ uint32_t get_step_align(void)
         {
             for (int i = 0; i < VALUE_COUNT; i++)
             {
-                if((adc_data[i].adc_val > adc_data[i+1].adc_val) && adc_data[i].adc_val > adc_val_min_t)
+                if((adc_data[i].adc_val > adc_data[i+1].adc_val)/* && adc_data[i].adc_val > adc_val_min_t*/)
                 {
                     step_align = adc_data[0].step - adc_data[i].step;
                     insert_at_front(step_align);
@@ -362,7 +362,7 @@ uint8_t gpio_in_read_pre1(void)
             val_delta = MAX(val_delta, 60); // 确保val_delta至少为60
             if(val > adc_val_max_t || val < adc_val_min_t)
             {
-                if(vib_count < 2)
+                if(vib_count < 3)
                 {
                     vib_count++;
                 }
@@ -370,7 +370,7 @@ uint8_t gpio_in_read_pre1(void)
                 {
                     vib_count1++;              
                 }
-                if((vib_count1+vib_count)>=3)
+                if((vib_count1+vib_count)>=4)
                 {
                     adc_buff_data.trigger = 1;
                     insert_adc_data_to_group(adc_buff_data);
