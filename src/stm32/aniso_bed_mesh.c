@@ -65,13 +65,15 @@ struct adc_buff {
     int32_t step; // 活动打印时间
     uint8_t trigger;
 };
-#define VALUE_COUNT 500
+#define VALUE_COUNT 300
 struct adc_buff adc_data[VALUE_COUNT];
+struct adc_buff adc_data_align[VALUE_COUNT];
 
 void init_step_align(void)
 {
     step_align = STEP_ALIGN_INIT_VAL;
     memset(adc_data, 0, sizeof(adc_data));
+    memset(adc_data_align, 0, sizeof(adc_data_align));
     align_start_flag = 1;
     trigge_count = 0;
     //memset(step_align_array,0,sizeof(step_align_array));
@@ -122,7 +124,7 @@ uint32_t get_step_align(void)
         {
             for (int i = 0; i < VALUE_COUNT; i++)
             {
-                if((adc_data[i].adc_val < adc_data[i+1].adc_val))
+                if((adc_data[i].adc_val < adc_data[i+1].adc_val) && (adc_data[i].adc_val < adc_val_max_t))
                 {
                     step_align = adc_data[0].step - adc_data[i].step;
                     insert_at_front(step_align);
@@ -135,7 +137,7 @@ uint32_t get_step_align(void)
         {
             for (int i = 0; i < VALUE_COUNT; i++)
             {
-                if(adc_data[i].adc_val > adc_data[i+1].adc_val)
+                if((adc_data[i].adc_val > adc_data[i+1].adc_val) && adc_data[i].adc_val > adc_val_min_t)
                 {
                     step_align = adc_data[0].step - adc_data[i].step;
                     insert_at_front(step_align);
@@ -159,6 +161,14 @@ void insert_adc_data_to_group(struct adc_buff new_data) {
         adc_data[i] = adc_data[i - 1];
     }
     adc_data[0] = new_data;
+}
+
+void insert_adc_data_align_to_group(struct adc_buff new_data) {
+    // 从后往前复制，避免数据覆盖
+    for (int i = VALUE_COUNT-1; i > 0; i--) {
+        adc_data_align[i] = adc_data_align[i - 1];
+    }
+    adc_data_align[0] = new_data;
 }
 
 
@@ -206,7 +216,14 @@ void aniso_bed_mesh_cmd(uint32_t *args)
         printf_("min=%d,max=%d\r\n", adc_val_min_t, adc_val_max_t);
         for(i=0;i<VALUE_COUNT;i++)
         {
-            printf_("%d\t%d\t%d\t\n", adc_data[i].adc_val, adc_data[i].step, adc_data[i].trigger);
+            if(val == 0)
+            {
+                printf_("%d\t%d\t%d\t\n", adc_data[i].adc_val, adc_data[i].step, adc_data[i].trigger);
+            }
+            else
+            {
+                printf_("%d\t%d\t%d\t\n", adc_data_align[i].adc_val, adc_data_align[i].step, adc_data_align[i].trigger);
+            }
         }
     }
     else if(op == 7)
@@ -215,6 +232,7 @@ void aniso_bed_mesh_cmd(uint32_t *args)
         memset(step_align_array,0,sizeof(step_align_array));
         align_flag = val;
         step_align_count = 0;
+        printf_("align_flag=%d\r\n", align_flag);
     }   
     else if(op == 8)
     {
@@ -266,7 +284,9 @@ uint8_t gpio_in_read_pre1(void)
     struct adc_buff adc_buff_data = {0};
     int32_t step; // = get_step_count_z() - Z_STEP;
     //int32_t delta_half = 0; // = get_step_count_z() - Z_STEP;
-    //static uint8_t trigge_count = 0;
+    static uint8_t vib_count = 0;
+    static uint8_t vib_count1 = 0;
+
 
     if(align_start_flag == 1)
     {
@@ -281,6 +301,8 @@ uint8_t gpio_in_read_pre1(void)
         }
         //printf_("1");
         trigge_count = 0;
+        vib_count = 0;
+        vib_count1 = 0;
         align_start_step = get_step_count_z();
         return 0;
     }
@@ -315,39 +337,52 @@ uint8_t gpio_in_read_pre1(void)
             adc_buff_data.adc_val = val;
             adc_buff_data.step = step;
             adc_buff_data.trigger = 2;
-            insert_adc_data_to_group(adc_buff_data);
+            insert_adc_data_align_to_group(adc_buff_data);
             adc_val_pre = val;
             return 0;
         }
         else
         {
             adc_flag = 1;
-            val_delta = (adc_val_max_t -adc_val_min_t)*30/100;
+            val_delta = (adc_val_max_t -adc_val_min_t)*20/100;
             adc_buff_data.adc_val = val;
             adc_buff_data.step = step;
             adc_buff_data.trigger = 0;
             insert_adc_data_to_group(adc_buff_data);
 
-            if(align_flag == 0) //第一次归零
-            {
-                val_delta = val_delta * 3;
-                if(val_delta < 300) // 确保val_delta至少为60
-                {
-                    val_delta = 300;
-                }
-            }
+            // if(align_flag == 0) //第一次归零
+            // {
+            //     val_delta = val_delta * 3;
+            //     if(val_delta < 200) // 确保val_delta至少为60
+            //     {
+            //         val_delta = 200;
+            //     }
+            // }
 
             val_delta = MAX(val_delta, 60); // 确保val_delta至少为60
-            if(val > adc_val_max_t+val_delta||val < adc_val_min_t-val_delta)
+            if(val > adc_val_max_t || val < adc_val_min_t)
             {
-                adc_buff_data.adc_val = val;
-                adc_buff_data.step = step;
-                adc_buff_data.trigger = 1;
-                insert_adc_data_to_group(adc_buff_data);
-                //u8buffer_push(1);
-                //printf_("7");
-                trigge_count = MAX_TRIGGE_COUNT;
-                return 1;
+                if(vib_count < 2)
+                {
+                    vib_count++;
+                }
+                if(val > adc_val_max_t+val_delta||val < adc_val_min_t-val_delta)
+                {
+                    vib_count1++;              
+                }
+                if((vib_count1+vib_count)>=3)
+                {
+                    adc_buff_data.trigger = 1;
+                    insert_adc_data_to_group(adc_buff_data);
+                    trigge_count = MAX_TRIGGE_COUNT;
+                    return 1;
+                }
+                return 0;
+            }
+            else
+            {
+                vib_count = 0;
+                vib_count1 = 0;
             }
         }
     }     
