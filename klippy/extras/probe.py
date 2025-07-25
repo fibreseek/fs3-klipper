@@ -237,6 +237,7 @@ class HomingViaProbeHelper:
 class ProbeSessionHelper:
     def __init__(self, config, mcu_probe):
         self.printer = config.get_printer()
+        self.session_z = config.getsection('stepper_z')
         self.mcu_probe = mcu_probe
         gcode = self.printer.lookup_object('gcode')
         self.dummy_gcode_cmd = gcode.create_gcode_command("", "", {})
@@ -391,9 +392,11 @@ class ProbeSessionHelper:
         # Calculate result
         if sample_count > 1:
             if sample_count == 4:   
-                positions[1][2] += aniso_bed_mesh.align1 * 0.00165
-                positions[2][2] += aniso_bed_mesh.align2 * 0.00165
-                positions[3][2] += aniso_bed_mesh.align3 * 0.00165
+                z_microsteps = self.session_z.getfloat('microsteps')
+                align_vlaue = (0.00165*8)/ z_microsteps
+                positions[1][2] += aniso_bed_mesh.align1 * align_vlaue
+                positions[2][2] += aniso_bed_mesh.align2 * align_vlaue
+                positions[3][2] += aniso_bed_mesh.align3 * align_vlaue
 
             epos = calc_probe_z_average(positions[1:], params['samples_result'])
         else:    
