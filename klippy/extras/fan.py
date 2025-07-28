@@ -103,7 +103,14 @@ class FanTachometer:
 
 class PrinterFan:
     def __init__(self, config):
+        self.config = config
+        self.printer = config.get_printer()
+        self.count = 0;
         self.fan = Fan(config)
+        if config.get_name() == 'fan':
+            self.reactor = self.printer.get_reactor()
+            self.reactor.register_timer(self.check_running_fans_rpm, self.reactor.NOW + 10)
+            
         # Register commands
         gcode = config.get_printer().lookup_object('gcode')
         gcode.register_command("M106", self.cmd_M106)
@@ -117,6 +124,30 @@ class PrinterFan:
     def cmd_M107(self, gcmd):
         # Turn fan off
         self.fan.set_speed_from_command(0.)
+    
+    def check_running_fans_rpm(self, eventtime):
+        fans = self.printer.lookup_objects('fan') + self.printer.lookup_objects('heater_fan')
+        if (self.count < 10):
+            self.count = self.count + 1
+            return eventtime + 1.0
+
+        for name, fan_obj in fans:
+            speed = fan_obj.get_status(eventtime)['speed']
+            if speed <= 0:
+                continue
+
+            if self.config.get('tachometer_pin', None) is None:
+                continue
+
+            rpm = fan_obj.get_status(eventtime)['rpm']
+            if rpm is None:
+                continue
+
+            if rpm < 100:
+                error_msg = f"Fan '{name}' RPM too low: {rpm:.1f} RPM (speed: {speed:.2f})"
+                self.printer.invoke_shutdown(error_msg)
+
+        return eventtime + 1.0
 
 def load_config(config):
     return PrinterFan(config)
