@@ -20,8 +20,8 @@
 uint32_t adc_val;
 uint32_t adc_val_min;
 uint32_t adc_val_max;
-uint32_t adc_val_min_t;
-uint32_t adc_val_max_t;
+volatile uint32_t adc_val_min_t;
+volatile uint32_t adc_val_max_t;
 
 static uint8_t goid = 0;
 static uint8_t startb = 0;
@@ -29,7 +29,8 @@ struct gpio_adc gPF;
 #define ADC_MAX_OFFSET  300
 #define ADC_MIN(a, b) ((a) > (b) ? ((a) - (b)) : (a))
 #define ADC_MAX(a, b) (((a) + (b)) > 4095 ? (a) : ((a) + (b)))
-
+#define ADC_MIN_TRIGGE  500 // 最小触发值
+#define ADC_MAX_TRIGGE  3600 // 最大触发值
 static uint32_t ticks = 0;
 
 static uint32_t adc_val_pre = {0};
@@ -52,6 +53,8 @@ static uint8_t align_start_flag = 0; // 用于标记是否开始对齐
 static int32_t align_start_step = 0; // 用于记录对齐开始时的步进计数
 static int8_t trigge_count = 0; // 用于记录触发次数
 #define MAX_TRIGGE_COUNT 5 // 最大触发次数
+#define MAX_TRIGGE_NUM   3
+
 typedef struct {
     uint32_t data[50];
     uint8_t count;  // 当前已有数据个数（最大到20）
@@ -65,15 +68,14 @@ struct adc_buff {
     int32_t step; // 活动打印时间
     uint8_t trigger;
 };
-#define VALUE_COUNT 300
+#define VALUE_COUNT 600
+#define ADC_ALIGN_COUNT 300 // 用于对齐的ADC数据数量
 struct adc_buff adc_data[VALUE_COUNT];
-struct adc_buff adc_data_align[VALUE_COUNT];
 
 void init_step_align(void)
 {
     step_align = STEP_ALIGN_INIT_VAL;
     memset(adc_data, 0, sizeof(adc_data));
-    memset(adc_data_align, 0, sizeof(adc_data_align));
     align_start_flag = 1;
     trigge_count = 0;
     //memset(step_align_array,0,sizeof(step_align_array));
@@ -122,7 +124,7 @@ uint32_t get_step_align(void)
         //step_align
         if(adc_data[0].adc_val > adc_val_max_t)
         {
-            for (int i = 0; i < VALUE_COUNT; i++)
+            for (int i = MAX_TRIGGE_NUM; i < VALUE_COUNT; i++)
             {
                 if((adc_data[i].adc_val < adc_data[i+1].adc_val)/* && (adc_data[i].adc_val < adc_val_max_t)*/)
                 {
@@ -135,7 +137,7 @@ uint32_t get_step_align(void)
         }
         else if(adc_data[0].adc_val < adc_val_min_t)
         {
-            for (int i = 0; i < VALUE_COUNT; i++)
+            for (int i = MAX_TRIGGE_NUM; i < VALUE_COUNT; i++)
             {
                 if((adc_data[i].adc_val > adc_data[i+1].adc_val)/* && adc_data[i].adc_val > adc_val_min_t*/)
                 {
@@ -157,20 +159,27 @@ uint32_t get_step_align(void)
 
 void insert_adc_data_to_group(struct adc_buff new_data) {
     // 从后往前复制，避免数据覆盖
+    uint16_t max = 0;
+    uint16_t min = 4096;
+
     for (int i = VALUE_COUNT-1; i > 0; i--) {
         adc_data[i] = adc_data[i - 1];
     }
     adc_data[0] = new_data;
-}
-
-void insert_adc_data_align_to_group(struct adc_buff new_data) {
-    // 从后往前复制，避免数据覆盖
-    for (int i = VALUE_COUNT-1; i > 0; i--) {
-        adc_data_align[i] = adc_data_align[i - 1];
+    for(int i = ADC_ALIGN_COUNT; i < VALUE_COUNT; i++)
+    {
+        if(adc_data[i].adc_val > max)
+        {
+            max = adc_data[i].adc_val;
+        }
+        if(adc_data[i].adc_val < min)
+        {
+            min = adc_data[i].adc_val;
+        }
     }
-    adc_data_align[0] = new_data;
+    adc_val_min_t = min;
+    adc_val_max_t = max;
 }
-
 
 void aniso_bed_mesh_cmd(uint32_t *args)
 {
@@ -178,6 +187,7 @@ void aniso_bed_mesh_cmd(uint32_t *args)
     uint32_t op;
     uint32_t val;
     uint16_t i=0;
+    uint16_t index = 0;
     uint8_t res = 0;
     //static uint8_t proportion = 0;
 
@@ -214,17 +224,16 @@ void aniso_bed_mesh_cmd(uint32_t *args)
         // }
 
         printf_("min=%d,max=%d\r\n", adc_val_min_t, adc_val_max_t);
-        for(i=0;i<VALUE_COUNT;i++)
+        if(val > 1)
         {
-            if(val == 0)
-            {
-                printf_("%d\t%d\t%d\t\n", adc_data[i].adc_val, adc_data[i].step, adc_data[i].trigger);
-            }
-            else
-            {
-                printf_("%d\t%d\t%d\t\n", adc_data_align[i].adc_val, adc_data_align[i].step, adc_data_align[i].trigger);
-            }
+            val = 1;
         }
+        for(i=0;i<ADC_ALIGN_COUNT;i++)
+        {
+            index = i + val * ADC_ALIGN_COUNT;
+            printf_("%d\t%d\t%d\t\n", adc_data[index].adc_val, adc_data[index].step, adc_data[index].trigger);
+        }
+        
     }
     else if(op == 7)
     {
@@ -331,13 +340,13 @@ uint8_t gpio_in_read_pre1(void)
         {
             //if(adc_flag == 0)
             //{
-                adc_val_min_t = MIN(adc_val_min_t, val);
-                adc_val_max_t = MAX(adc_val_max_t, val);
+            adc_val_min_t = MIN(adc_val_min_t, val);
+            adc_val_max_t = MAX(adc_val_max_t, val);
             //}
             adc_buff_data.adc_val = val;
             adc_buff_data.step = step;
             adc_buff_data.trigger = 2;
-            insert_adc_data_align_to_group(adc_buff_data);
+            insert_adc_data_to_group(adc_buff_data);
             adc_val_pre = val;
             return 0;
         }
@@ -358,7 +367,13 @@ uint8_t gpio_in_read_pre1(void)
             //         val_delta = 200;
             //     }
             // }
-
+            if(val > ADC_MAX_TRIGGE || val < ADC_MIN_TRIGGE)
+            {
+                adc_buff_data.trigger = 1;
+                insert_adc_data_to_group(adc_buff_data);
+                trigge_count = MAX_TRIGGE_COUNT;
+                return 1;
+            }
             val_delta = MAX(val_delta, 60); // 确保val_delta至少为60
             if(val > adc_val_max_t || val < adc_val_min_t)
             {
@@ -370,7 +385,7 @@ uint8_t gpio_in_read_pre1(void)
                 {
                     vib_count1++;              
                 }
-                if((vib_count1+vib_count)>=4)
+                if(vib_count1>=MAX_TRIGGE_NUM)
                 {
                     adc_buff_data.trigger = 1;
                     insert_adc_data_to_group(adc_buff_data);
