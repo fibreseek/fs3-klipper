@@ -53,7 +53,7 @@ static uint8_t align_start_flag = 0; // 用于标记是否开始对齐
 static int32_t align_start_step = 0; // 用于记录对齐开始时的步进计数
 static int8_t trigge_count = 0; // 用于记录触发次数
 #define MAX_TRIGGE_COUNT 5 // 最大触发次数
-#define MAX_TRIGGE_NUM   3
+#define MAX_TRIGGE_NUM   5
 
 typedef struct {
     uint32_t data[50];
@@ -353,7 +353,7 @@ uint8_t gpio_in_read_pre1(void)
         else
         {
             adc_flag = 1;
-            val_delta = (adc_val_max_t -adc_val_min_t)*20/100;
+            val_delta = (adc_val_max_t -adc_val_min_t)*30/100;
             adc_buff_data.adc_val = val;
             adc_buff_data.step = step;
             adc_buff_data.trigger = 0;
