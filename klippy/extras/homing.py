@@ -214,6 +214,7 @@ class Homing:
             retractpos = [hp - ad * retract_r
                           for hp, ad in zip(homepos, axes_d)]
             self.toolhead.move(retractpos, hi.retract_speed)
+            aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 7, 1])
             self.gcode.run_script_from_command("G4 P2000")
             # Home again
             startpos = [rp - ad * retract_r

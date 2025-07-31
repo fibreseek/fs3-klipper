@@ -30,32 +30,15 @@ class aniso_bed_mesh:
         op = params['op']
         val = params['val']
 
-        if op == 1:
+        if op == 2:
             if val == 0:
-                self.gcode.respond_info("aniso bed mesh init success!")
+                self.gcode.respond_info("aniso bed mesh init!") 
                 self.revop = op
-            else:
-                self.gcode.respond_info("aniso bed mesh init failed!")    
-        elif op == 2:
-            if val == 0:
-                self.gcode.respond_info("aniso bed mesh start vibrate!") 
-                self.revop = op
-            else:
-                self.gcode.respond_info("aniso bed mesh start vibrate failed!")     
         elif op == 3:
             self.gcode.respond_info("aniso bed mesh align finish!")
             self.revop = op
         elif op == 4:
-            self.gcode.respond_info("aniso bed mesh val:%d" % val)    
-        elif op == 5:
-            self.gcode.respond_info("aniso bed mesh record z zero step success! step:%d" % val)
-            self.step0 = val
-            self.revop = 5
-        elif op == 6:
-            self.gcode.respond_info("aniso bed mesh re record z zero step success! step:%d" % val)
-            self.step1 = val
-            #self.gcode.run_script_from_command("G1 Z8")
-            self.revop = 6  
+            self.gcode.respond_info("aniso bed mesh val:%d" % val)     
         elif op == 8:  
             self.align3 = (val >> 20) & 0x3FF
             self.align2 = (val >> 10) & 0x3FF
@@ -75,8 +58,7 @@ class aniso_bed_mesh:
             self.adc_trigger_val = self.adc_trigger
 
         self.gcode.respond_info("adc_trigger_val: %f" % self.adc_trigger_val)    
-        self.sendop = 1
-        self.gcode.run_script_from_command("DISABLE_BED_MESH")
+        #self.gcode.run_script_from_command("DISABLE_BED_MESH")
         self.gcode.run_script_from_command("G90")
         self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=5 VELOCITY=10")
         if status != 'xyz' and status != 'xy':
@@ -90,73 +72,34 @@ class aniso_bed_mesh:
         self.gcode.run_script_from_command("T0")
         self.gcode.run_script_from_command("M400")
         
-        pin_num = (self.pin4_num << 24) | (self.pin3_num << 16) | (self.pin2_num << 8) | self.pin1_num
-        self.update_uart_cmd.send([self.oid, self.sendop, pin_num])
-        #self.gcode.respond_info("aniso bed mesh init 0x%x",(self.pin4_num << 24) | (self.pin3_num << 16) | (self.pin2_num << 8) | self.pin1_num]) 
-        self.gcode.respond_info("aniso bed mesh val:%d" % pin_num)  
+        
+        self.sendop = 2
+        self.gcode.run_script_from_command("G1 X150 Y150 F3000")
+        #self.gcode.run_script_from_command("RESTORE_BED_MESH")
+        self.update_uart_cmd.send([self.oid, self.sendop, round(self.adc_trigger_val)])
         while wait_count < 10:
             self.gcode.run_script_from_command("G4 P300")
             wait_count = wait_count + 1
-            if self.revop == 1:
-                self.sendop = 2
+            if self.revop == 2:
+                self.sendop = 3
                 break;
         wait_count = 0
-        
-        if self.sendop == 2:
-            self.update_uart_cmd.send([self.oid, self.sendop, round(self.adc_trigger_val)])
+
+        if self.sendop == 3:
+            self.gcode.run_script_from_command("M400")
+            self.update_uart_cmd.send([self.oid, 3, round(self.zmicrosteps)])
+            self.gcode.respond_info("aniso bed mesh zmicrosteps val:%d" % self.zmicrosteps)  
             while wait_count < 10:
                 self.gcode.run_script_from_command("G4 P300")
                 wait_count = wait_count + 1
-                if self.revop == 2:
-                    self.sendop = 3
+                if self.revop == 3:
+                    self.sendop = 4
                     break;
             wait_count = 0
-
-            if self.sendop == 3:
-                self.gcode.run_script_from_command("G1 X65 Y50 F3000")
-                self.gcode.run_script_from_command("RESTORE_BED_MESH")
-                for i in range(10):
-                    self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=1 VELOCITY=10")
-                    self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=-1 VELOCITY=10")
+            if self.sendop == 4:    
+                self.gcode.run_script_from_command("G28.1 Z")
                 self.gcode.run_script_from_command("M400")
-                self.update_uart_cmd.send([self.oid, 3, round(self.zmicrosteps)])
-                self.gcode.respond_info("aniso bed mesh zmicrosteps val:%d" % self.zmicrosteps)  
-                while wait_count < 10:
-                    self.gcode.run_script_from_command("G4 P300")
-                    wait_count = wait_count + 1
-                    if self.revop == 3:
-                        self.sendop = 4
-                        break;
-                wait_count = 0
-                if self.sendop == 4:    
-                    self.gcode.run_script_from_command("G28.1 Z")
-                    self.gcode.run_script_from_command("M400")
-                    self.update_uart_cmd.send([self.oid, 5, 0])
-                    while wait_count < 10:
-                        self.gcode.run_script_from_command("G4 P300")
-                        wait_count = wait_count + 1
-                        if self.revop == 5:
-                            self.sendop = 5
-                            break;
-                    wait_count = 0
-                    #self.gcode.run_script_from_command("G1 Z0")
-                    if self.sendop == 5:    
-                        self.gcode.run_script_from_command("G1 Z5 F600")
-                        self.gcode.run_script_from_command("G28.1 Z")
-                        self.gcode.run_script_from_command("M400")
-                        self.gcode.run_script_from_command("G4 P2000")
-                        self.gcode.run_script_from_command("G1 Z10")
-                        self.update_uart_cmd.send([self.oid, 6, 0])
-                        while wait_count < 10:
-                            self.gcode.run_script_from_command("G4 P300")
-                            wait_count = wait_count + 1
-                            if self.revop == 6:
-                                break;
-                        wait_count = 0
-                        if abs(self.step0 - self.step1) > 400:
-                            self.gcode.respond_info("aniso bed mesh step align failed, step0:%d step1:%d , waring!!!" % (self.step0, self.step1))
-                            #self.gcode.run_script_from_command("PROBE_ALIGN T=%f" % self.adc_trigger_val) 
-
+                
 
     #op 0 none
     #op 1 init          val=(b3 << 24) | (b2 << 16) | (b1 << 8) | b0

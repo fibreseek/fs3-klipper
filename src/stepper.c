@@ -388,7 +388,7 @@ stepper_stop(struct trsync_signal *tss, uint8_t reason)
     sched_del_timer(&s->time);
     s->next_step_time = s->time.waketime = 0;
 #ifndef __linux__    
-    if(gp_z == s && align_flag == 0)
+    if(gp_z == s && (align_flag == 0 || align_flag == 1))
     {
         s->position = -stepper_get_position(s) - get_step_align();
     }

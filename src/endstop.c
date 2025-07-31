@@ -79,6 +79,7 @@ endstop_oversample_event(struct timer *t)
         return SF_RESCHEDULE;
     }
     uint8_t count = e->trigger_count - 1;
+    count = 0;
     if (!count) {
         trsync_do_trigger(e->ts, e->trigger_reason);
         return SF_DONE;
