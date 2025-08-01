@@ -484,16 +484,16 @@ def git_version():
     return ver
 
 def build_version(extra, cleanbuild):
-    version = git_version()
-    if not version:
-        cleanbuild = False
-        version = "?"
-    elif 'dirty' in version:
-        cleanbuild = False
-    if not cleanbuild:
-        btime = time.strftime("%Y%m%d_%H%M%S")
-        hostname = socket.gethostname()
-        version = "%s-%s-%s" % (version, btime, hostname)
+    version = git_version()+'_'+time.strftime("%Y%m%d_%H%M%S")
+    # if not version:
+    #     cleanbuild = False
+    #     version = "?"
+    # elif 'dirty' in version:
+    #     cleanbuild = False
+    # if not cleanbuild:
+    #     btime = time.strftime("%Y%m%d_%H%M%S")
+    #     hostname = socket.gethostname()
+    #     version = "%s-%s-%s" % (version, btime, hostname)
     return version + extra
 
 # Run "tool --version" for each specified tool and extract versions
