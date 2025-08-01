@@ -366,7 +366,7 @@ stepper_get_position(struct stepper *s)
     return position;
 }
 
-// Report the current position of the stepper
+//Report the current position of the stepper
 void
 command_stepper_get_position(uint32_t *args)
 {
@@ -388,17 +388,17 @@ stepper_stop(struct trsync_signal *tss, uint8_t reason)
     sched_del_timer(&s->time);
     s->next_step_time = s->time.waketime = 0;
 #ifndef __linux__    
-    if(gp_z == s && (align_flag == 0 || align_flag == 1))
+    if(gp_z == s && (align_flag == 1 || align_flag == 0))
     {
         s->position = -stepper_get_position(s) - get_step_align();
-    }
-    else
-    {
+   }
+   else
+   {
        get_step_align(); 
        s->position = -stepper_get_position(s); 
-    }
+   }
 #else    
-    s->position = -stepper_get_position(s); 
+    //s->position = -stepper_get_position(s); 
 #endif
     s->count = 0;
     s->flags = ((s->flags & (SF_INVERT_STEP|SF_SINGLE_SCHED|SF_OPTIMIZED_PATH))
