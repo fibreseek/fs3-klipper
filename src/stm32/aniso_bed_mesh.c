@@ -47,6 +47,7 @@ uint32_t step_align_array[3] = {0, 0, 0}; // 用于存储对齐步数
 uint8_t step_align_count = 0;
 volatile uint8_t align_flag = 0;
 #define STEP_ALIGN_INIT_VAL 10000 // 初始值为10000，表示未计算对齐步数
+
 static uint8_t adc_flag = 0;
 static uint8_t align_start_flag = 0; // 用于标记是否开始对齐
 static int32_t align_start_step = 0; // 用于记录对齐开始时的步进计数
@@ -246,6 +247,9 @@ void aniso_bed_mesh_cmd(uint32_t *args)
     {
         sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, 8, gen_step_align_data());
     }
+
+
+   
 	//sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, op, val);
 }
 
@@ -402,14 +406,6 @@ uint8_t gpio_in_read_pre1(void)
 void adc3_gpio_init(void)
 {
     gPF = gpio_adc_setup(0x59);
-}
-
-void adc3_gpio_init(void)
-{
-    gPF[0] = gpio_adc_setup(0x55);
-    gPF[1] = gpio_adc_setup(0x56);
-    gPF[2] = gpio_adc_setup(0x59);
-    gPF[3] = gpio_adc_setup(0x5A);
 }
 
 DECL_COMMAND(aniso_bed_mesh_cmd,"aniso_bed_mesh_cmd oid=%u op=%u val=%u");
