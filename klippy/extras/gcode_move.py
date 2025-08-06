@@ -148,28 +148,37 @@ class GCodeMove:
                 if self.mode != 1:
                     gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder")
                     gcode.run_script_from_command("SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder")
+                    self.mode = 1
+
                 U_rotation_distance = self.config.getsection('extruder').getfloat('rotation_distance')
                 V_rotation_distance = self.config.getsection('extruder2').getfloat('rotation_distance')
+                # 因为gcode文件中的P参数是错误的，所以这里先忽略它。
+                '''
                 if 'P' in params:
                     p =  float(params['P'])
                     if self.proportion != p:
                         gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % (V_rotation_distance / p))
                         self.proportion = p
                 else:
-                    p = self.proportion
-                    if self.absolute_extrude:
-                        incrument_u = float(params['U']) + self.extruder_base_position[1] - self.extruder_last_position[1]
-                        incrument_v = float(params['V']) + self.extruder_base_position[2] - self.extruder_last_position[2]
-                        logging.info("incrument_u: %f, incrument_v: %f", incrument_u, incrument_v)
-                        if abs(incrument_u) < 0.0000001 or abs(incrument_v) < 0.0000001:
-                            logging.warning("U or V increment is too small, do not set proportion")
-                        else:
-                            p = incrument_v / incrument_u
-                    else:
-                        p = float(params['V']) / float(params['U'])
-                    if self.proportion != p:
-                        gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % (V_rotation_distance / p))
-                self.mode = 1
+                '''
+                p = self.proportion
+                incrument_u = 0.0
+                incrument_v = 0.0
+                if self.absolute_extrude:
+                    incrument_u = float(params['U']) + self.extruder_base_position[1] - self.extruder_last_position[1]
+                    incrument_v = float(params['V']) + self.extruder_base_position[2] - self.extruder_last_position[2]
+                else:
+                    incrument_u = float(params['U'])
+                    incrument_v = float(params['V'])
+
+                logging.debug("incrument_u: %f, incrument_v: %f", incrument_u, incrument_v)
+                if abs(incrument_u) < 0.0000001 or abs(incrument_v) < 0.0000001:
+                    logging.warning("U or V increment is too small, do not set proportion")
+                else:
+                    p = incrument_v / incrument_u
+
+                if self.proportion != p:
+                    gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % (V_rotation_distance / p))
             else:
                 if self.mode != 2:
                     gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder")
