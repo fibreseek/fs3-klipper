@@ -212,8 +212,10 @@ class GCodeMove:
                         # value relative to position of last move
                         self.last_position[pos] += val
 
+            need_extruder_work = False
             for pos, axis in enumerate('EUV'):
                 if axis in params:
+                    need_extruder_work = True
                     val = float(params[axis]) * self.extrude_factor
                     if self.absolute_extrude:
                         # value relative to base coordinate position
@@ -221,6 +223,24 @@ class GCodeMove:
                     else:
                         # value relative to position of last move
                         self.extruder_last_position[pos] += val
+            if need_extruder_work:
+                if self.mode == 0:
+                    # E mode
+                    self.last_position[3] = self.extruder_last_position[0]
+                elif self.mode == 1:
+                    # UV mode
+                    self.last_position[3] = self.extruder_last_position[1]
+                    # 因为在UV模式下，U挤出机内部的last_position在Move对象被加入梯形运动队列后会被更新，而V挤出机不会被更新，
+                    # 所以这里需要手动更新V挤出机的last_position。
+                    # 更好的做法是将U V解绑。
+                    extruder2 = self.printer.lookup_object('extruder2')
+                    extruder2.last_position = self.extruder_last_position[2]
+                elif self.mode == 2:
+                    # U mode
+                    self.last_position[3] = self.extruder_last_position[1]
+                elif self.mode == 3:
+                    # V mode
+                    self.last_position[3] = self.extruder_last_position[2]
 
             if 'F' in params:
                 gcode_speed = float(params['F'])
@@ -231,26 +251,9 @@ class GCodeMove:
         except ValueError as e:
             raise gcmd.error("Unable to parse move '%s'"
                              % (gcmd.get_commandline(),))
-        
-        if self.mode == 0:
-            # E mode
-            self.last_position[3] = self.extruder_last_position[0]
-        elif self.mode == 1:
-            # UV mode
-            self.last_position[3] = self.extruder_last_position[1]
-            # 因为在UV模式下，U挤出机内部的last_position在Move对象被加入梯形运动队列后会被更新，而V挤出机不会被更新，
-            # 所以这里需要手动更新V挤出机的last_position。
-            # 更好的做法是将U V解绑。
-            extruder2 = self.printer.lookup_object('extruder2')
-            extruder2.last_position = self.extruder_last_position[2]
-        elif self.mode == 2:
-            # U mode
-            self.last_position[3] = self.extruder_last_position[1]
-        elif self.mode == 3:
-            # V mode
-            self.last_position[3] = self.extruder_last_position[2]
 
         self.move_with_transform(self.last_position, self.speed)
+
     # G-Code coordinate manipulation
     def cmd_G20(self, gcmd):
         # Set units to inches
