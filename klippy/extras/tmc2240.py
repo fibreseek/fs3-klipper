@@ -274,6 +274,7 @@ class TMC2240CurrentHelper:
         self.name = config.get_name().split()[-1]
         self.mcu_tmc = mcu_tmc
         self.fields = mcu_tmc.get_fields()
+        self.force_current_range_zero = False
         self.Rref = config.getfloat('rref', 12000.,
                                     minval=12000., maxval=60000.)
         max_cur = self._get_ifs_rms(3)
@@ -287,16 +288,25 @@ class TMC2240CurrentHelper:
         self.fields.set_field("globalscaler", gscaler)
         self.fields.set_field("ihold", ihold)
         self.fields.set_field("irun", irun)
+        
+        
     def _get_ifs_rms(self, current_range=None):
         if current_range is None:
             current_range = self.fields.get_field("current_range")
         KIFS = [11750., 24000., 36000., 36000.]
         return (KIFS[current_range] / self.Rref) / math.sqrt(2.)
+    
     def _calc_current_range(self, current):
+        """Calculate the appropriate current range setting"""
+        if self.force_current_range_zero:
+            return 0
+        
+        # Otherwise calculate normally
         for current_range in range(4):
             if current <= self._get_ifs_rms(current_range):
                 break
         return current_range
+    
     def _calc_globalscaler(self, current):
         ifs_rms = self._get_ifs_rms()
         globalscaler = int(((current * 256.) / ifs_rms) + .5)
@@ -304,17 +314,20 @@ class TMC2240CurrentHelper:
         if globalscaler >= 256:
             globalscaler = 0
         return globalscaler
+    
     def _calc_current_bits(self, current, globalscaler):
         ifs_rms = self._get_ifs_rms()
         if not globalscaler:
             globalscaler = 256
         cs = int((current * 256. * 32.) / (globalscaler * ifs_rms) - 1. + .5)
         return max(0, min(31, cs))
+    
     def _calc_current(self, run_current, hold_current):
         gscaler = self._calc_globalscaler(run_current)
         irun = self._calc_current_bits(run_current, gscaler)
         ihold = self._calc_current_bits(min(hold_current, run_current), gscaler)
         return gscaler, irun, ihold
+    
     def _calc_current_from_field(self, field_name):
         ifs_rms = self._get_ifs_rms()
         globalscaler = self.fields.get_field("globalscaler")
@@ -322,11 +335,13 @@ class TMC2240CurrentHelper:
             globalscaler = 256
         bits = self.fields.get_field(field_name)
         return globalscaler * (bits + 1) * ifs_rms / (256. * 32.)
+    
     def get_current(self):
         ifs_rms = self._get_ifs_rms()
         run_current = self._calc_current_from_field("irun")
         hold_current = self._calc_current_from_field("ihold")
         return (run_current, hold_current, self.req_hold_current, ifs_rms)
+    
     def set_current(self, run_current, hold_current, print_time):
         self.req_hold_current = hold_current
         gscaler, irun, ihold = self._calc_current(run_current, hold_current)
@@ -335,6 +350,22 @@ class TMC2240CurrentHelper:
         self.fields.set_field("ihold", ihold)
         val = self.fields.set_field("irun", irun)
         self.mcu_tmc.set_register("IHOLD_IRUN", val, print_time)
+    
+    def set_force_current_range_zero(self, enable):
+        """Enable/disable forcing current_range to 0 mode"""
+        # self.force_current_range_zero = bool(enable)
+        if enable:
+            self.force_current_range_zero = True
+            force_range = 0
+        else:
+            self.force_current_range_zero = False
+            force_range = 2
+    
+        run_current, hold_current, _, _ = self.get_current()
+        new_range = force_range
+    
+        drv_conf_val = self.fields.set_field("current_range", new_range)
+        self.mcu_tmc.set_register("DRV_CONF", drv_conf_val, None)
 
 
 ######################################################################
@@ -343,6 +374,7 @@ class TMC2240CurrentHelper:
 
 class TMC2240:
     def __init__(self, config):
+        self.printer = config.get_printer()
         # Setup mcu communication
         self.fields = tmc.FieldHelper(Fields, SignedFields, FieldFormatters)
         if config.get("uart_pin", None) is not None:
@@ -356,11 +388,20 @@ class TMC2240:
         # Allow virtual pins to be created
         tmc.TMCVirtualPinHelper(config, self.mcu_tmc)
         # Register commands
-        current_helper = TMC2240CurrentHelper(config, self.mcu_tmc)
-        cmdhelper = tmc.TMCCommandHelper(config, self.mcu_tmc, current_helper)
+        self.current_helper = TMC2240CurrentHelper(config, self.mcu_tmc)
+        cmdhelper = tmc.TMCCommandHelper(config, self.mcu_tmc, self.current_helper)
         cmdhelper.setup_register_dump(ReadRegisters)
         self.get_phase_offset = cmdhelper.get_phase_offset
         self.get_status = cmdhelper.get_status
+        
+        # Register custom G-code command
+        gcode = self.printer.lookup_object('gcode')
+        gcode.register_mux_command(
+            "SET_TMC_FORCE_CURRENT_RANGE_ZERO", "DRIVER", self.current_helper.name,
+            self.cmd_SET_TMC_FORCE_CURRENT_RANGE_ZERO,
+            desc=self.cmd_SET_TMC_FORCE_CURRENT_RANGE_ZERO_help
+        )
+        
         # Setup basic register values
         tmc.TMCWaveTableHelper(config, self.mcu_tmc)
         self.fields.set_config_field(config, "offset_sin90", 0)
@@ -410,6 +451,24 @@ class TMC2240:
         set_config_field(config, "sg4_angle_offset", 1)
         #   DRV_CONF
         set_config_field(config, "slope_control", 0)
+
+    cmd_SET_TMC_FORCE_CURRENT_RANGE_ZERO_help = (
+        "Force TMC2240 driver to always use current_range=0 mode"
+    )
+    
+    def cmd_SET_TMC_FORCE_CURRENT_RANGE_ZERO(self, gcmd):
+        enable = gcmd.get_int('ENABLE', 1)
+    
+        self.current_helper.set_force_current_range_zero(enable)
+    
+        run_current, hold_current, _, _ = self.current_helper.get_current()
+        self.current_helper.set_current(run_current, hold_current, None)  # 立即执行
+    
+        state = "enabled" if enable else "disabled"
+        gcmd.respond_info(
+            "Force current_range=0 mode %s for %s" %
+            (state, self.current_helper.name)
+        )
 
 def load_config_prefix(config):
     return TMC2240(config)
