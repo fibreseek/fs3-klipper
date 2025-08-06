@@ -28,15 +28,11 @@ class PrinterHeaterFan:
     def get_status(self, eventtime):
         return self.fan.get_status(eventtime)
     def callback(self, eventtime):
-        aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
         speed = 0.
         for heater in self.heaters:
             current_temp, target_temp = heater.get_temp(eventtime)
             if target_temp or current_temp > self.heater_temp:
                 speed = self.fan_speed
-
-        if aniso_bed_mesh.bed_mesh == 1: 
-            speed = 0.0       
 
         if speed != self.last_speed:
             self.last_speed = speed

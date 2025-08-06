@@ -17,21 +17,13 @@ class aniso_bed_mesh:
         self.gcode.register_command('MY_ADC_QUERY', self.cmd_my_custom_adc)
         self.mcu.register_response(self.handle_aniso_bed_mesh_msg,"aniso_bed_mesh", self.oid)
         self.gcode.register_command('PROBE_ALIGN', self.cmd_probe_align)
-        self.gcode.register_command('PROBE_START', self.cmd_probe_start)
-        self.gcode.register_command('PROBE_END', self.cmd_probe_end)
         self.sendop = 0
         self.revop = 0
         self.step0 = 0
         self.step1 = 0
         self.printer.add_object("aniso_bed_mesh ", self)
         self.zmicrosteps = config.getsection('stepper_z').getfloat('microsteps',8)
-        self.bed_mesh = 0
 
-    def cmd_probe_start(self, gcmd): 
-        self.bed_mesh = 1
-
-    def cmd_probe_end(self, gcmd):    
-        self.bed_mesh = 0
     # val 0 success
     # val 1 error
     def handle_aniso_bed_mesh_msg(self, params):
