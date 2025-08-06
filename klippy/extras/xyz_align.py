@@ -31,7 +31,7 @@ class xyz_align:
 
         self.printer.add_object('xyz_align', self)
         self.gcode.register_command('XYZ_ALIGN', self.cmd_XYZ_ALIGN, desc=self.cmd_XYZ_ALIGN_help)
-        self.gcode.register_command('XYZ_ALGIN_TEST', self.cmd_XYZ_ALIGN_TEST, desc=self.cmd_XYZ_ALIGN_help)
+        self.gcode.register_command('XYZ_ALGIN_CLEAR', self.cmd_XYZ_ALIGN_TEST, desc=self.cmd_XYZ_ALIGN_help)
         self.mcu.register_response(self.handle_align_end,"xyz_align_end", self.oid)
         
    
@@ -54,8 +54,8 @@ class xyz_align:
             z_rotation_distance = self.session_z.getfloat('rotation_distance') 
             z_microsteps = self.session_z.getfloat('microsteps')
             z_offset = ((z1 - z0)*z_rotation_distance)/(z_microsteps*200)
-            x_offset = (x0*x_rotation_distance/(x_microsteps*200)) - (x1*x_rotation_distance/(x_microsteps*200))+ self.t0_offset_x - self.t1_offset_x
-            y_offset = (y0*x_rotation_distance/(x_microsteps*200)) - (y1*x_rotation_distance/(x_microsteps*200)) + self.t0_offset_y - self.t1_offset_y
+            x_offset = (x1*x_rotation_distance/(x_microsteps*200)) - (x0*x_rotation_distance/(x_microsteps*200))+ self.t0_offset_x - self.t1_offset_x
+            y_offset = (y1*x_rotation_distance/(x_microsteps*200)) - (y0*x_rotation_distance/(x_microsteps*200)) + self.t0_offset_y - self.t1_offset_y
             
             #self.gcode.respond_info("handle_align_end offset : x=%f y=%f z=%f" % (x_offset,y_offset,z_offset))
             self.gcode.run_script_from_command("M118 XYZ_ALIGN=1 x_offset=%f y_offset=%f z_offset=%f"% (x_offset,y_offset,z_offset))
@@ -80,7 +80,7 @@ class xyz_align:
             self.gcode.respond_info("handle_align_end: z = %d" % (self.z_value))
 
     def cmd_XYZ_ALIGN_TEST(self, gcmd):
-        self.align_start_cmd.send([self.oid, 1])
+        self.align_start_cmd.send([self.oid, 0])
        #self.gcode.respond_info("xyz_align: %d" % (self.oid))
     def get_z_press_val(self, t):
         z_offset = 1;
