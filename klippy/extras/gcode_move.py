@@ -45,6 +45,10 @@ class GCodeMove:
         self.base_position = [0.0, 0.0, 0.0, 0.0]
         self.last_position = [0.0, 0.0, 0.0, 0.0]
         self.homing_position = [0.0, 0.0, 0.0, 0.0]
+        # G-Code extruder E U V position
+        # TODO 更好的实现方式是在extruder类中加入挤出机的基点坐标和上一次的坐标
+        self.extruder_base_position = [0.0, 0.0, 0.0]
+        self.extruder_last_position = [0.0, 0.0, 0.0]
         self.speed = 25.
         self.speed_factor = 1. / 60.
         self.extrude_factor = 1.
@@ -124,7 +128,7 @@ class GCodeMove:
     # extruder carbon fibre
     # extruder1 plastics
     # extruder2 carbon fibre adhesive
-    # mode 0: E 1: UV 2: U 3: V
+    # mode 0:E, 1:UV, 2:U, 3:V
     def aniso_extruder_switch(self, gcmd):
         gcode = self.printer.lookup_object('gcode')
         params = gcmd.get_command_parameters()
@@ -138,23 +142,43 @@ class GCodeMove:
             self.proportion = 0
         elif 'U' in params:
             if self.absolute_extrude:
-                raise gcmd.error("M83 MODE ONLY!")
+                logging.info("absolute extrude")
             
             if 'V' in params:
                 if self.mode != 1:
                     gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder")
                     gcode.run_script_from_command("SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder")
+                    self.mode = 1
+
                 U_rotation_distance = self.config.getsection('extruder').getfloat('rotation_distance')
                 V_rotation_distance = self.config.getsection('extruder2').getfloat('rotation_distance')
+                # 因为gcode文件中的P参数是错误的，所以这里先忽略它。
+                '''
                 if 'P' in params:
                     p =  float(params['P'])
                     if self.proportion != p:
-                        gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % (V_rotation_distance/p))
+                        gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % (V_rotation_distance / p))
                         self.proportion = p
                 else:
-                    gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % ((float(params['U'])/float(params['V']))*V_rotation_distance))
-                    self.proportion = float(params['U'])/float(params['V'])
-                self.mode = 1
+                '''
+                p = self.proportion
+                incrument_u = 0.0
+                incrument_v = 0.0
+                if self.absolute_extrude:
+                    incrument_u = float(params['U']) + self.extruder_base_position[1] - self.extruder_last_position[1]
+                    incrument_v = float(params['V']) + self.extruder_base_position[2] - self.extruder_last_position[2]
+                else:
+                    incrument_u = float(params['U'])
+                    incrument_v = float(params['V'])
+
+                logging.debug("incrument_u: %f, incrument_v: %f", incrument_u, incrument_v)
+                if abs(incrument_u) < 0.0000001 or abs(incrument_v) < 0.0000001:
+                    logging.warning("U or V increment is too small, do not set proportion")
+                else:
+                    p = incrument_v / incrument_u
+
+                if self.proportion != p:
+                    gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % (V_rotation_distance / p))
             else:
                 if self.mode != 2:
                     gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder")
@@ -164,7 +188,8 @@ class GCodeMove:
         elif 'V' in params: 
             if self.mode != 3:
                 if self.absolute_extrude:
-                    raise gcmd.error("M83 MODE ONLY!")
+                    logging.info("absolute extrude")
+
                 gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder2")
                 V_rotation_distance = self.config.getsection('extruder2').getfloat('rotation_distance')
                 gcode.run_script_from_command("SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder2")
@@ -179,37 +204,44 @@ class GCodeMove:
         try:
             for pos, axis in enumerate('XYZ'):
                 if axis in params:
-                    v = float(params[axis])
-                    if not self.absolute_coord:
-                        # value relative to position of last move
-                        self.last_position[pos] += v
-                    else:
+                    val = float(params[axis])
+                    if self.absolute_coord:
                         # value relative to base coordinate position
-                        self.last_position[pos] = v + self.base_position[pos]
-            if 'E' in params:
-                v = float(params['E']) * self.extrude_factor
-                if not self.absolute_coord or not self.absolute_extrude:
-                    # value relative to position of last move
-                    self.last_position[3] += v
-                else:
-                    # value relative to base coordinate position
-                    self.last_position[3] = v + self.base_position[3]
-            if 'U' in params:
-                v = float(params['U']) * self.extrude_factor
-                if not self.absolute_coord or not self.absolute_extrude:
-                    # value relative to position of last move
-                    self.last_position[3] += v
-                else:
-                    # value relative to base coordinate position
-                    self.last_position[3] = v + self.base_position[3]
-            elif 'V' in params:
-                val = float(params['V']) * self.extrude_factor
-                if not self.absolute_coord or not self.absolute_extrude:
-                    # value relative to position of last move
-                    self.last_position[3] += val
-                else:
-                    # value relative to base coordinate position
-                    self.last_position[3] = val + self.base_position[3]
+                        self.last_position[pos] = val + self.base_position[pos]
+                    else:
+                        # value relative to position of last move
+                        self.last_position[pos] += val
+
+            need_extruder_work = False
+            for pos, axis in enumerate('EUV'):
+                if axis in params:
+                    need_extruder_work = True
+                    val = float(params[axis]) * self.extrude_factor
+                    if self.absolute_extrude:
+                        # value relative to base coordinate position
+                        self.extruder_last_position[pos] = val + self.extruder_base_position[pos]
+                    else:
+                        # value relative to position of last move
+                        self.extruder_last_position[pos] += val
+            if need_extruder_work:
+                if self.mode == 0:
+                    # E mode
+                    self.last_position[3] = self.extruder_last_position[0]
+                elif self.mode == 1:
+                    # UV mode
+                    self.last_position[3] = self.extruder_last_position[1]
+                    # 因为在UV模式下，U挤出机内部的last_position在Move对象被加入梯形运动队列后会被更新，而V挤出机不会被更新，
+                    # 所以这里需要手动更新V挤出机的last_position。
+                    # 更好的做法是将U V解绑。
+                    extruder2 = self.printer.lookup_object('extruder2')
+                    extruder2.last_position = self.extruder_last_position[2]
+                elif self.mode == 2:
+                    # U mode
+                    self.last_position[3] = self.extruder_last_position[1]
+                elif self.mode == 3:
+                    # V mode
+                    self.last_position[3] = self.extruder_last_position[2]
+
             if 'F' in params:
                 gcode_speed = float(params['F'])
                 if gcode_speed <= 0.:
@@ -219,7 +251,9 @@ class GCodeMove:
         except ValueError as e:
             raise gcmd.error("Unable to parse move '%s'"
                              % (gcmd.get_commandline(),))
+
         self.move_with_transform(self.last_position, self.speed)
+
     # G-Code coordinate manipulation
     def cmd_G20(self, gcmd):
         # Set units to inches
@@ -239,16 +273,28 @@ class GCodeMove:
     def cmd_G91(self, gcmd):
         # Use relative coordinates
         self.absolute_coord = False
+
     def cmd_G92(self, gcmd):
         # Set position
-        offsets = [ gcmd.get_float(a, None) for a in 'XYZE' ]
-        for i, offset in enumerate(offsets):
+
+        offsets_space = [ gcmd.get_float(a, None) for a in 'XYZ' ]
+        for i, offset in enumerate(offsets_space):
             if offset is not None:
-                if i == 3:
-                    offset *= self.extrude_factor
                 self.base_position[i] = self.last_position[i] - offset
-        if offsets == [None, None, None, None]:
+
+        offsets_extrude = [ gcmd.get_float(a, None) for a in 'EUV' ]
+        for i, offset in enumerate(offsets_extrude):
+            if offset is not None:
+                offset *= self.extrude_factor
+                self.base_position[3] = self.last_position[3] - offset
+                self.extruder_base_position[i] = self.extruder_last_position[i] - offset     
+
+        if offsets_space == [None, None, None] and offsets_extrude == [None, None, None]:
             self.base_position = list(self.last_position)
+            # Reset the extruder base position
+            self.extruder_base_position = list(self.extruder_last_position)
+            logging.info("G92: Reset base position to last position, extruder_base_position:%s", self.extruder_base_position)
+
     def cmd_M114(self, gcmd):
         # Get Current Position
         p = self._get_gcode_position()
