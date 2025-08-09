@@ -373,9 +373,15 @@ class MySerial:
 
         color_data = []
 
-        # Handle paused and error states
         if state in ["paused", "error"]:
-            color_data = [r, g, b] * 37
+            if mode == 5:
+                color_data = self.mode_blink_next(r, g, b)
+            else:
+                for i in range(37):
+                    if i < led_count:
+                        color_data.extend([r, g, b])
+                    else:
+                        color_data.extend([0, 0, 0])
             self.led.build_frame_data(color_data)
             return
             

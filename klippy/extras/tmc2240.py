@@ -288,7 +288,7 @@ class TMC2240CurrentHelper:
         self.fields.set_field("globalscaler", gscaler)
         self.fields.set_field("ihold", ihold)
         self.fields.set_field("irun", irun)
-        
+        self.config = config
         
     def _get_ifs_rms(self, current_range=None):
         if current_range is None:
@@ -393,6 +393,10 @@ class TMC2240:
         cmdhelper.setup_register_dump(ReadRegisters)
         self.get_phase_offset = cmdhelper.get_phase_offset
         self.get_status = cmdhelper.get_status
+
+        self.name = config.get_name().split()[-1]
+        self.printer.add_object("tmc2240 "+self.name, self)
+        self.config = config
         
         # Register custom G-code command
         gcode = self.printer.lookup_object('gcode')
@@ -400,6 +404,12 @@ class TMC2240:
             "SET_TMC_FORCE_CURRENT_RANGE_ZERO", "DRIVER", self.current_helper.name,
             self.cmd_SET_TMC_FORCE_CURRENT_RANGE_ZERO,
             desc=self.cmd_SET_TMC_FORCE_CURRENT_RANGE_ZERO_help
+        )
+
+        gcode.register_mux_command(
+            "SET_STEALTHCHOP_THRESHOLD", "STEPPER", self.current_helper.name,
+            self.cmd_SET_STEALTHCHOP_THRESHOLD,
+            desc=self.cmd_SET_STEALTHCHOP_THRESHOLD_help
         )
         
         # Setup basic register values
@@ -455,6 +465,10 @@ class TMC2240:
     cmd_SET_TMC_FORCE_CURRENT_RANGE_ZERO_help = (
         "Force TMC2240 driver to always use current_range=0 mode"
     )
+
+    cmd_SET_STEALTHCHOP_THRESHOLD_help = (
+        "Set and apply stealthchop_threshold for TMC2240 driver (immediate effect)"
+    )
     
     def cmd_SET_TMC_FORCE_CURRENT_RANGE_ZERO(self, gcmd):
         enable = gcmd.get_int('ENABLE', 1)
@@ -462,12 +476,32 @@ class TMC2240:
         self.current_helper.set_force_current_range_zero(enable)
     
         run_current, hold_current, _, _ = self.current_helper.get_current()
-        self.current_helper.set_current(run_current, hold_current, None)  # 立即执行
+        self.current_helper.set_current(run_current, hold_current, None)
     
         state = "enabled" if enable else "disabled"
         gcmd.respond_info(
             "Force current_range=0 mode %s for %s" %
             (state, self.current_helper.name)
+        )
+
+    def cmd_SET_STEALTHCHOP_THRESHOLD(self, gcmd):
+        threshold = gcmd.get_float('THRESHOLD', None, minval=0.)
+        stepper = gcmd.get("STEPPER")
+        stepper_o = self.printer.lookup_object(f"tmc2240 {stepper}", None)
+        if stepper_o is None:
+            gcmd.respond_info(f"Driver tmc2240 {stepper} not found")
+            return
+            
+        stepper_o.stealthchop_threshold = threshold
+        tpwmthrs_val = tmc.TMCtstepHelper(
+            stepper_o.mcu_tmc, threshold, config=stepper_o.config
+        )
+        stepper_o.fields.set_field("tpwmthrs", int(tpwmthrs_val))
+        stepper_o.mcu_tmc.set_register("TPWMTHRS", int(tpwmthrs_val), None)
+        stepper_o.fields.set_field("en_pwm_mode", 1 if threshold > 0 else 0)
+        stepper_o.mcu_tmc.set_register("GCONF", stepper_o.mcu_tmc.get_register("GCONF"))
+        gcmd.respond_info(
+            f"stealthchop_threshold set to {threshold}, tpwmthrs={int(tpwmthrs_val)}"
         )
 
 def load_config_prefix(config):
