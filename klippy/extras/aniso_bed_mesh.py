@@ -39,12 +39,15 @@ class aniso_bed_mesh:
             self.revop = op
         elif op == 4:
             self.gcode.respond_info("aniso bed mesh val:%d" % val)     
-        elif op == 8:  
-            self.align3 = (val >> 20) & 0x3FF
-            self.align2 = (val >> 10) & 0x3FF
-            self.align1 = val & 0x3FF
+        elif op == 8: 
+            self.align5 = val & 0x3F
+            self.align4 = (val >> 6) & 0x3F
+            self.align3 = (val >> 12) & 0x3F
+            self.align2 = (val >> 18) & 0x3F
+            self.align1 = (val >> 24) & 0x3F
+
             self.refresh = 1
-            self.gcode.respond_info("aniso bed mesh step align data: %d %d %d" % (self.align1, self.align2, self.align3))
+            self.gcode.respond_info("aniso bed mesh step align data: %d %d %d %d %d" % (self.align1, self.align2, self.align3, self.align4, self.align5))
 
         
     def cmd_probe_align(self, gcmd):

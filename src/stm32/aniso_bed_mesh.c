@@ -42,8 +42,10 @@ extern int32_t get_step_count_z(void);
 extern uint8_t get_step_dir_z(void);
 uint8_t gpio_in_read_pre1(void);
 
+#define MAX_PROBE_COUNT 5
 volatile uint32_t step_align = 0; // 用于补偿步进计数
-uint32_t step_align_array[3] = {0, 0, 0}; // 用于存储对齐步数
+uint32_t step_align_array[MAX_PROBE_COUNT] = {0, 0, 0}; // 用于存储对齐步数
+
 uint8_t step_align_count = 0;
 volatile uint8_t align_flag = 0;
 #define STEP_ALIGN_INIT_VAL 10000 // 初始值为10000，表示未计算对齐步数
@@ -85,17 +87,19 @@ void init_step_align(void)
 int32_t gen_step_align_data(void) 
 {
     // 限制输入最大为1023（10位）
-    step_align_array[0] &= 0x3FF; // 0b0000001111111111
-    step_align_array[1] &= 0x3FF;
-    step_align_array[2] &= 0x3FF;
+    int32_t res = 0;
     
-    return (step_align_array[0] << 20) | (step_align_array[1] << 10) | step_align_array[2];
+    for (int i = 0; i < MAX_PROBE_COUNT; i++) {
+        res |= ((uint32_t)(step_align_array[i] & 0x3F)) << (i * 6);
+    }
+    
+    return res;
 }
 
 
 void insert_at_front(int value) {
     // 先将数组中已有的值往后移动
-    for (int i = 3 - 1; i > 0; i--) {
+    for (int i = MAX_PROBE_COUNT - 1; i > 0; i--) {
         step_align_array[i] = step_align_array[i - 1];
     }
     // 将新值插入到第一个位置
