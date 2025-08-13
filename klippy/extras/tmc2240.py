@@ -359,7 +359,7 @@ class TMC2240CurrentHelper:
             force_range = 0
         else:
             self.force_current_range_zero = False
-            force_range = 2
+            force_range = 1
     
         run_current, hold_current, _, _ = self.get_current()
         new_range = force_range
