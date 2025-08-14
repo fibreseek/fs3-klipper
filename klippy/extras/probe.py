@@ -453,9 +453,9 @@ class ProbePointsHelper:
         self.printer.lookup_object('toolhead').manual_move(coord, speed)
     def _raise_tool(self, is_first=False):
         speed = self.lift_speed
-        if is_first:
-            # Use full speed to first probe position
-            speed = self.speed
+        # if is_first:
+        #     # Use full speed to first probe position
+        #     speed = self.speed
         self._move([None, None, self.horizontal_move_z], speed)
     def _invoke_callback(self, results):
         # Flush lookahead queue
