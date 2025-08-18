@@ -272,6 +272,7 @@ class VirtualSD:
                     self.current_file.close()
                     self.current_file = None
                     logging.info("Finished SD card print")
+                    self.gcode.run_script("PRINT_COMPLETED")
                     self.gcode.respond_raw("Done printing file")
                     break
                 lines = data.split('\n')
