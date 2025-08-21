@@ -2,10 +2,22 @@ import logging
 import serial
 from serial import SerialException
 import struct
+from reactor import Reactor
+from gcode import GCodeCommand
 
 class LEDController:
-    def __init__(self):
-        # Initialize a 129-byte buffer for the LED data frame
+    def __init__(self, config):
+        # Klipper
+        self.printer = config.get_printer()
+        self.reactor = self.printer.get_reactor()
+        self.gcode = self.printer.lookup_object('gcode')
+        
+        # 串口配置
+        self.serial_port = config.get("serial")
+        self.baud = config.getint("baud", default=115200)
+        self.serial = None
+        
+        # LED控制相关变量
         self.led_data = bytearray(129)
         self.brightness = 30
         self.direction = 1
@@ -28,8 +40,8 @@ class LEDController:
         # Fixed color mappings
         self.mode_colors = {
             0: (0, 255, 0),      # Green - 常规模式
-            1: (255, 50, 0),     # Orange - 增强模式
-            2: (108, 28, 193),   # Purple - 超强模式
+            1: (255, 165, 0),    # Orange - 增强模式
+            2: (128, 0, 128),    # Purple - 超强模式
             3: (255, 255, 255),  # White - 空闲
             4: (255, 0, 0)       # Red - 错误
         }  # 顺序为RGB
@@ -39,10 +51,36 @@ class LEDController:
         self.last_non_pause_color = (255, 0, 0)  # 默认红色
         self.last_non_pause_mode = 0  # 默认常规模式
         
+        # 打印进度相关
+        self.write_timer = None
+        self.vsd = None
+        self.last_active = False
+        self.print_progress = 0.0
+        self.progress_timer = None
+        
+        # 初始化串口
+        try:
+            self.serial = serial.Serial(
+                self.serial_port,
+                self.baud,
+                timeout=0,
+                write_timeout=0,
+                dsrdtr=False
+            )
+            logging.info(f"UART initialized on {self.serial_port} at {self.baud} baud")
+        except SerialException as e:
+            logging.error(f"UART initialization failed: {str(e)}")
+        
         # Initialize the fixed part of the frame header
         self.init_frame_header()
         # Initialize LED data
         self.update_led_data()
+        
+        self.gcode.register_command("M2000", self.cmd_M2000,
+                                   desc="Set LED mode: M2000 L<mode> [S<print_mode>] [R<red> G<green> B<blue>]")
+        
+        self.progress_timer = self.reactor.register_timer(
+            self._check_print_progress, self.reactor.monotonic() + 1.0)
 
     def init_frame_header(self):
         """Initialize the fixed part of the LED control frame header"""
@@ -108,7 +146,7 @@ class LEDController:
                 scaled_g = int(g * scale)
                 scaled_b = int(b * scale)
                 # Apply to all LEDs (RGB顺序)
-                color_data = [scaled_r, scaled_g, scaled_b] * 37  # RGB顺序
+                color_data = [scaled_r, scaled_g, scaled_b] * 37
             elif self.printer_state == "blinking":
                 # Blinking effect
                 self.blink_counter += 1
@@ -117,12 +155,12 @@ class LEDController:
                     self.blink_counter = 0
                 # Apply to all LEDs (RGB顺序)
                 if self.blink_toggle:
-                    color_data = [r, g, b] * 37  # RGB顺序
+                    color_data = [r, g, b] * 37
                 else:
                     color_data = [0, 0, 0] * 37
             elif self.printer_state == "solid":
                 # Solid light (RGB顺序)
-                color_data = [r, g, b] * 37  # RGB顺序
+                color_data = [r, g, b] * 37
             else:  # idle or error
                 color_data = [0, 0, 0] * 37
         
@@ -144,43 +182,9 @@ class LEDController:
         self.current_color = self.last_non_pause_color
         self.print_mode = self.last_non_pause_mode
 
-
-class MySerial:
-    def __init__(self, config):
-        self.printer = config.get_printer()
-        self.reactor = self.printer.get_reactor()
-        self.gcode = self.printer.lookup_object('gcode')
-        self.serial_port = config.get("serial")
-        self.baud = config.getint("baud", default=115200)
-        self.led = LEDController()
-        self.write_timer = None
-        self.vsd = None
-        self.last_active = False
-        self.print_progress = 0.0
-
-        try:
-            self.serial = serial.Serial(
-                self.serial_port,
-                self.baud,
-                timeout=0,
-                write_timeout=0,
-                dsrdtr=False
-            )
-            logging.info(f"UART initialized on {self.serial_port} at {self.baud} baud")
-        except SerialException as e:
-            logging.error(f"UART initialization failed: {str(e)}")
-
-        # Register M2000 command
-        self.gcode.register_command("M2000", self.cmd_M2000,
-                                   desc="Set LED mode: M2000 L<mode> [S<print_mode>] [R<red> G<green> B<blue>]")
-        
-        # Setup progress timer
-        self.progress_timer = self.reactor.register_timer(
-            self._check_print_progress, self.reactor.monotonic() + 1.0)
-
     def _check_print_progress(self, eventtime):
         """Check print progress and update LEDs if in printing mode"""
-        if self.led.printer_state == "printing":
+        if self.printer_state == "printing":
             try:
                 if self.vsd is None:
                     self.vsd = self.printer.lookup_object('virtual_sdcard')
@@ -194,7 +198,7 @@ class MySerial:
                 self.print_progress = 0.0
             
             # Update LEDs with current progress
-            self.led.update_led_data(self.print_progress)
+            self.update_led_data(self.print_progress)
             self._send_led_data()
         
         return eventtime + 1.0
@@ -210,8 +214,8 @@ class MySerial:
         
         # Handle restore command (L2)
         if mode == 2:
-            self.led.restore_previous_state()
-            new_state = self.led.printer_state
+            self.restore_previous_state()
+            new_state = self.printer_state
             # Cancel existing timer if not needed
             if self.write_timer is not None:
                 self.reactor.unregister_timer(self.write_timer)
@@ -223,7 +227,7 @@ class MySerial:
                     self._run_write, self.reactor.NOW + 0.1)
             
             # Update LED data and send immediately
-            self.led.update_led_data()
+            self.update_led_data()
             self._send_led_data()
             
             # Send response
@@ -235,12 +239,12 @@ class MySerial:
                 "idle": "空闲"
             }
             mode_name = state_names.get(new_state, "未知")
-            gcmd.respond_info(f"已恢复LED状态: {mode_name}, 颜色: {self.led.current_color}")
+            gcmd.respond_info(f"已恢复LED状态: {mode_name}, 颜色: {self.current_color}")
             return
         
         # Save current state for future restoration
         if mode != 6:  # Don't save printing state for restoration
-            self.led.save_current_state()
+            self.save_current_state()
         
         # Determine new state based on mode
         if mode == 0:
@@ -252,24 +256,22 @@ class MySerial:
         elif mode == 6:
             new_state = "printing"
         else:
-            new_state = "idle"
+            new_state = "solid"
         
         # Update printer state
-        self.led.printer_state = new_state
+        self.printer_state = new_state
         
         # Update print mode if specified
         if print_mode >= 0:
-            self.led.print_mode = print_mode
+            self.print_mode = print_mode
         
         # Set color based on parameters
-        if mode == 0 and r < 0 and g < 0 and b < 0:
-            self.led.current_color = (0, 0, 0)
+        if print_mode >= 0:
+            self.current_color = self.mode_colors.get(print_mode, (0, 0, 0))
         elif r >= 0 and g >= 0 and b >= 0:
-            # Use specified RGB color
-            self.led.current_color = (r, g, b)
+            self.current_color = (r, g, b)
         else:
-            # Use color based on print mode
-            self.led.current_color = self.led.mode_colors.get(self.led.print_mode, (0, 0, 0))
+            pass
         
         # Cancel existing timer if not needed
         if self.write_timer is not None:
@@ -282,11 +284,11 @@ class MySerial:
                 self._run_write, self.reactor.NOW + 0.1)
         
         # Update LED data and send immediately
-        self.led.update_led_data()
+        self.update_led_data()
         self._send_led_data()
         
         # Log the command details
-        logging.info(f"M2000 command: mode={mode}, state={new_state}, color={self.led.current_color}")
+        logging.info(f"M2000 command: mode={mode}, state={new_state}, color={self.current_color}")
         
         # Send response
         state_names = {
@@ -297,13 +299,13 @@ class MySerial:
             "idle": "空闲"
         }
         mode_name = state_names.get(new_state, "未知")
-        gcmd.respond_info(f"LED模式已设置: {mode_name}, 颜色: {self.led.current_color}")
+        gcmd.respond_info(f"LED模式已设置: {mode_name}, 颜色: {self.current_color}")
 
     def _send_led_data(self):
         """Send LED data to serial device"""
         if self.serial and self.serial.is_open:
             try:
-                self.serial.write(bytes(self.led.led_data))
+                self.serial.write(bytes(self.led_data))
                 logging.debug("LED data sent successfully")
             except SerialException as e:
                 logging.error(f"UART写入失败: {str(e)}")
@@ -316,7 +318,7 @@ class MySerial:
             return self.reactor.NEVER
 
         try:
-            self.led.update_led_data()
+            self.update_led_data()
             self._send_led_data()
         except SerialException as e:
             logging.error(f"UART写入失败: {str(e)}")
@@ -324,4 +326,4 @@ class MySerial:
         return eventtime + 0.1
 
 def load_config(config):
-    return MySerial(config)
+    return LEDController(config)
