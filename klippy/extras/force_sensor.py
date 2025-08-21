@@ -113,6 +113,9 @@ class MySerial:
         self.polling_enabled = False
 
     def _polling_loop(self):
+        if not hasattr(self, 'block_recover_count'):
+            self.block_recover_count = 0
+
         while getattr(self, 'polling_enabled', False):
             weight = self._send_and_get_weight()
             if weight is not None:
@@ -133,6 +136,18 @@ class MySerial:
                             self.block_count = 0
                             self.block_status = False
                 self.last_weight = weight
+
+                if getattr(self, 'block_status', False) and self.last_weight is not None:
+                    diff_recover = abs(self.last_weight - weight)
+                    if diff_recover < 20:
+                        self.block_recover_count += 1
+                        if self.block_recover_count >= 5:
+                            self.block_status = False
+                            self.block_count = 0
+                            self.weight_before_drop = None
+                            self.block_recover_count = 0
+                    else:
+                        self.block_recover_count = 0
             time.sleep(1)
 
     def _send_and_get_weight(self):
