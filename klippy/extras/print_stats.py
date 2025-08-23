@@ -6,21 +6,74 @@
 
 class PrintStats:
     def __init__(self, config):
-        printer = config.get_printer()
+        self.printer = printer = config.get_printer()
         self.gcode_move = printer.load_object(config, 'gcode_move')
         self.reactor = printer.get_reactor()
+        # Track individual extruder usage
+        self.e_filament_used = 0.  # extruder1 (E)
+        self.u_filament_used = 0.  # extruder (U) 
+        self.v_filament_used = 0.  # extruder2 (V)
+        self.last_e_pos = 0.
+        self.last_u_pos = 0.
+        self.last_v_pos = 0.
+        self.current_extruder = None
         self.reset()
         # Register commands
         self.gcode = printer.lookup_object('gcode')
         self.gcode.register_command(
             "SET_PRINT_STATS_INFO", self.cmd_SET_PRINT_STATS_INFO,
             desc=self.cmd_SET_PRINT_STATS_INFO_help)
+            
+        # Delay toolhead lookup until it's actually needed
+        self._toolhead = None
+        # Register event handler for extruder activation
+        printer.register_event_handler("extruder:activate_extruder",
+                                      self._handle_activate_extruder)
+    
+    def _handle_activate_extruder(self):
+        # Get the current extruder name
+        if self._toolhead is None:
+            self._toolhead = self.printer.lookup_object('toolhead')
+        extruder = self._toolhead.get_extruder()
+        self.current_extruder = extruder.get_name()
+        # self.printer.get_logger().info(f"Activated extruder: {self.current_extruder}")
+
+        # Update last positions for all extruders
+        eventtime = self.reactor.monotonic()
+        gc_status = self.gcode_move.get_status(eventtime)
+        cur_epos = gc_status['position'].e
+        
+        if self.current_extruder == 'extruder':
+            self.last_u_pos = cur_epos
+        elif self.current_extruder == 'extruder1':
+            self.last_e_pos = cur_epos
+        elif self.current_extruder == 'extruder2':
+            self.last_v_pos = cur_epos
+    
     def _update_filament_usage(self, eventtime):
         gc_status = self.gcode_move.get_status(eventtime)
         cur_epos = gc_status['position'].e
-        self.filament_used += (cur_epos - self.last_epos) \
-            / gc_status['extrude_factor']
+        extrude_factor = gc_status['extrude_factor']
+        
+        # Calculate total filament used (backward compatibility)
+        delta = (cur_epos - self.last_epos) / extrude_factor
+        self.filament_used += delta
         self.last_epos = cur_epos
+        
+        # Update individual extruder usage based on current extruder
+        if self.current_extruder == 'extruder':
+            u_delta = (cur_epos - self.last_u_pos) / extrude_factor
+            self.u_filament_used += u_delta
+            self.last_u_pos = cur_epos
+        elif self.current_extruder == 'extruder1':
+            e_delta = (cur_epos - self.last_e_pos) / extrude_factor
+            self.e_filament_used += e_delta
+            self.last_e_pos = cur_epos
+        elif self.current_extruder == 'extruder2':
+            v_delta = (cur_epos - self.last_v_pos) / extrude_factor
+            self.v_filament_used += v_delta
+            self.last_v_pos = cur_epos
+        
     def set_current_file(self, filename):
         self.reset()
         self.filename = filename
@@ -87,6 +140,9 @@ class PrintStats:
         self.state = "standby"
         self.prev_pause_duration = self.last_epos = 0.
         self.filament_used = self.total_duration = 0.
+        self.e_filament_used = self.u_filament_used = self.v_filament_used = 0.
+        self.last_e_pos = self.last_u_pos = self.last_v_pos = 0.
+        self.current_extruder = None
         self.print_start_time = self.last_pause_time = None
         self.init_duration = 0.
         self.info_total_layer = None
@@ -110,6 +166,9 @@ class PrintStats:
             'total_duration': self.total_duration,
             'print_duration': print_duration,
             'filament_used': self.filament_used,
+            'e_filament_used': self.e_filament_used,
+            'u_filament_used': self.u_filament_used,
+            'v_filament_used': self.v_filament_used,
             'state': self.state,
             'message': self.error_message,
             'info': {'total_layer': self.info_total_layer,
