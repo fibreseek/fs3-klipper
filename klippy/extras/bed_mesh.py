@@ -5,6 +5,9 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging, math, json, collections
 from . import probe
+import configparser
+import os
+
 
 PROFILE_VERSION = 1
 PROFILE_OPTIONS = {
@@ -1262,6 +1265,17 @@ class MoveSplitter:
         self.z_mesh = None
         self.fade_offset = 0.
         self.gcode = gcode
+
+        self.printer = config.get_printer()
+        self.variables = config.getsection('save_variables')
+          
+        cfg_path = os.path.expanduser(self.variables_path.get('filename'))
+        config = configparser.ConfigParser()
+        config.read(cfg_path)
+        self.xoffset = config.getfloat('Variables', 'xoffset')
+        self.yoffset = config.getfloat('Variables', 'yoffset')
+        logging.info("offset:  X:%f, Y:%f"  % (self.xoffset, self.yoffset)) 
+
     def initialize(self, mesh, fade_offset):
         self.z_mesh = mesh
         self.fade_offset = fade_offset
@@ -1277,7 +1291,16 @@ class MoveSplitter:
         self.total_move_length = math.sqrt(sum([d*d for d in axes_d[:3]]))
         self.axis_move = [not isclose(d, 0., abs_tol=1e-10) for d in axes_d]
     def _calc_z_offset(self, pos):
-        z = self.z_mesh.calc_z(pos[0], pos[1])
+        #logging.info("bed_mesh11:  X:%d, Y:%d"  % (pos[0], pos[1])) 
+        self.toolhead = self.printer.lookup_object('toolhead')
+        x = pos[0]
+        y = pos[1]
+        if(self.toolhead.get_extruder().get_name() == "extruder1"):
+            x = x - self.xoffset
+            y = y - self.yoffset
+        
+        z = self.z_mesh.calc_z(x, y)
+        logging.info("bed_mesh11: X:%f, Y:%f, Z:%f"  % (x, y,z)) 
         offset = self.fade_offset
         return self.z_factor * (z - offset) + offset
     def _set_next_move(self, distance_from_prev):
