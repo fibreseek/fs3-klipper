@@ -1269,7 +1269,7 @@ class MoveSplitter:
         self.printer = config.get_printer()
         self.variables = config.getsection('save_variables')
           
-        cfg_path = os.path.expanduser(self.variables_path.get('filename'))
+        cfg_path = os.path.expanduser(self.variables.get('filename'))
         config = configparser.ConfigParser()
         config.read(cfg_path)
         self.xoffset = config.getfloat('Variables', 'xoffset')
