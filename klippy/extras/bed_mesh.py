@@ -1300,7 +1300,6 @@ class MoveSplitter:
             y = y - self.yoffset
         
         z = self.z_mesh.calc_z(x, y)
-        logging.info("bed_mesh11: X:%f, Y:%f, Z:%f"  % (x, y,z)) 
         offset = self.fade_offset
         return self.z_factor * (z - offset) + offset
     def _set_next_move(self, distance_from_prev):
