@@ -105,7 +105,7 @@ class PrinterFan:
     def __init__(self, config):
         self.config = config
         self.printer = config.get_printer()
-        self.count = 0;
+        self.fan_delay_count = {}
         self.fan = Fan(config)
         if config.get_name() == 'fan':
             self.reactor = self.printer.get_reactor()
@@ -127,26 +127,25 @@ class PrinterFan:
     
     def check_running_fans_rpm(self, eventtime):
         fans = self.printer.lookup_objects('fan') + self.printer.lookup_objects('heater_fan')
-        if (self.count < 10):
-            self.count = self.count + 1
-            return eventtime + 1.0
-
         for name, fan_obj in fans:
             speed = fan_obj.get_status(eventtime)['speed']
             if speed <= 0:
+                self.fan_delay_count[name] = 0
                 continue
+
+            count = self.fan_delay_count.get(name, 0)
+            if count < 10:
+                self.fan_delay_count[name] = count + 1
+                continue  
 
             if self.config.get('tachometer_pin', None) is None:
                 continue
-
             rpm = fan_obj.get_status(eventtime)['rpm']
             if rpm is None:
                 continue
-
             if rpm < 100:
                 error_msg = f"Fan '{name}' RPM too low: {rpm:.1f} RPM (speed: {speed:.2f})"
                 self.printer.invoke_shutdown(error_msg)
-
         return eventtime + 1.0
 
 def load_config(config):
