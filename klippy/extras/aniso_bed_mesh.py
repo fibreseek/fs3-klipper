@@ -4,10 +4,7 @@ import logging
 class aniso_bed_mesh:
     def __init__(self, config):
         self.printer = config.get_printer()
-        self.pin1_num = stm32_pin_to_number(config.get('pin1', 'PF10'))
-        self.pin2_num = stm32_pin_to_number(config.get('pin2', 'PF9'))
-        self.pin3_num = stm32_pin_to_number(config.get('pin3', 'PF6'))
-        self.pin4_num = stm32_pin_to_number(config.get('pin4', 'PF5'))
+        self.pin_num = stm32_pin_to_number(config.get('pin', 'PF5'))
         self.adc_trigger = config.getfloat('adc_trigger', 180)
         self.mcu = self.printer.lookup_object('mcu')
         self.oid = self.mcu.create_oid()
@@ -60,7 +57,7 @@ class aniso_bed_mesh:
         if self.adc_trigger_val == 0:
             self.adc_trigger_val = self.adc_trigger
 
-        self.gcode.respond_info("adc_trigger_val: %f" % self.adc_trigger_val)    
+        self.gcode.respond_info("adc_pin: %d" % self.pin_num)    
         self.gcode.run_script_from_command("DISABLE_BED_MESH")
         self.gcode.run_script_from_command("G90")
         self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=5 VELOCITY=10")
@@ -79,7 +76,7 @@ class aniso_bed_mesh:
         self.sendop = 2
         self.gcode.run_script_from_command("G1 X150 Y150 F3000")
         self.gcode.run_script_from_command("RESTORE_BED_MESH")
-        self.update_uart_cmd.send([self.oid, self.sendop, round(self.adc_trigger_val)])
+        self.update_uart_cmd.send([self.oid, self.sendop, round(self.pin_num)])
         while wait_count < 10:
             self.gcode.run_script_from_command("G4 P300")
             wait_count = wait_count + 1

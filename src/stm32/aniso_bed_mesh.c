@@ -202,13 +202,14 @@ void aniso_bed_mesh_cmd(uint32_t *args)
     if(op == 2)   
     {
 
-        adc_val_min = 4095;
-        adc_val_max = 0;
-        adc_val_min_t = 4095;
-        adc_val_max_t = 0;
-        adc_val_pre = 0;
-        delta = val;
-        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, op, res);
+        // adc_val_min = 4095;
+        // adc_val_max = 0;
+        // adc_val_min_t = 4095;
+        // adc_val_max_t = 0;
+        // adc_val_pre = 0;
+        // delta = val;
+        gPF = gpio_adc_setup(val);
+        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, op, 0);
     }
     else if(op == 3)   
     {
@@ -371,14 +372,14 @@ uint8_t gpio_in_read_pre1(void)
             //         val_delta = 200;
             //     }
             // }
-            if(val > ADC_MAX_TRIGGE || val < ADC_MIN_TRIGGE)
-            {
-                adc_buff_data.trigger = 1;
-                insert_adc_data_to_group(adc_buff_data);
-                trigge_count = MAX_TRIGGE_COUNT;
-                return 1;
-            }
-            val_delta = MAX(val_delta, 60); // 确保val_delta至少为60
+            // if(val > ADC_MAX_TRIGGE || val < ADC_MIN_TRIGGE)
+            // {
+            //     adc_buff_data.trigger = 1;
+            //     insert_adc_data_to_group(adc_buff_data);
+            //     trigge_count = MAX_TRIGGE_COUNT;
+            //     return 1;
+            // }
+            //val_delta = MAX(val_delta, 60); // 确保val_delta至少为60
             if(val > adc_val_max_t || val < adc_val_min_t)
             {
                 if(vib_count < 3)
@@ -414,4 +415,4 @@ void adc3_gpio_init(void)
 
 DECL_COMMAND(aniso_bed_mesh_cmd,"aniso_bed_mesh_cmd oid=%u op=%u val=%u");
 //DECL_TASK(bed_mesh_task);
-DECL_INIT(adc3_gpio_init);
+// DECL_INIT(adc3_gpio_init);
