@@ -41,7 +41,7 @@ class LEDController:
         self.mode_colors = {
             0: (0, 255, 0),      # Green - 常规模式
             1: (255, 50, 0),    # Orange - 增强模式
-            2: (128, 0, 128),    # Purple - 超强模式
+            2: (108, 28, 193),    # Purple - 超强模式
             3: (255, 255, 255),  # White - 空闲
             4: (255, 0, 0)       # Red - 错误
         }  # 顺序为RGB
