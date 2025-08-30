@@ -172,7 +172,7 @@ class ResonanceTestExecutor:
             else:
                 toolhead.move([nX, nY, Z, E], max(abs_v, abs_last_v))
             if math.floor(freq) > math.floor(last_freq):
-                gcmd.respond_info("Testing frequency %.0f Hz" % (freq,))
+                gcmd.respond_info("[SHAPER_CALIBRATION] Testing frequency %.0f Hz" % (freq,))
                 reactor.pause(reactor.monotonic() + 0.01)
             X, Y = nX, nY
             last_t = next_t
@@ -233,8 +233,6 @@ class ResonanceTester:
                   accel_chips=None, test_point=None):
         toolhead = self.printer.lookup_object('toolhead')
         calibration_data = {axis: None for axis in axes}
-        
-        self.gcode.run_script_from_command("M118 Start Vibration Testing Calibration")
 
         self.generator.prepare_test(gcmd)
 
@@ -249,7 +247,7 @@ class ResonanceTester:
                 toolhead.wait_moves()
                 toolhead.dwell(0.500)
                 if len(axes) > 1:
-                    gcmd.respond_info("Testing axis %s" % axis.get_name())
+                    gcmd.respond_info("[SHAPER_CALIBRATION] Testing axis %s" % axis.get_name())
 
                 raw_values = []
                 if accel_chips is None:
@@ -379,7 +377,7 @@ class ResonanceTester:
         for axis in calibrate_axes:
             axis_name = axis.get_name()
             gcmd.respond_info(
-                    "Calculating the best input shaper parameters for %s axis"
+                    "[SHAPER_CALIBRATION] Calculating the best input shaper parameters for %s axis"
                     % (axis_name,))
             calibration_data[axis].normalize_to_frequencies()
             systime = self.printer.get_reactor().monotonic()
@@ -420,7 +418,7 @@ class ResonanceTester:
             gcmd.respond_info(
                     "Shaper calibration data written to %s file" % (csv_name,))
                     
-        self.gcode.run_script_from_command("M118 Vibration Testing Calibration Complete")
+        self.gcode.run_script_from_command("M118 [SHAPER_CALIBRATION] Vibration Testing Calibration Complete")
         
         gcmd.respond_info(
             "The SAVE_CONFIG command will update the printer config file\n"
