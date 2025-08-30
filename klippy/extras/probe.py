@@ -30,6 +30,38 @@ def calc_probe_z_average(positions, method='average'):
     # even number of samples
     return calc_probe_z_average(z_sorted[middle-1:middle+1], 'average')
 
+# 通过线性插值法，计算给定分位数的取值
+def calc_percentile(data, percentile):
+    # 计算位置索引
+    pos = (len(data) - 1) * percentile / 100
+    # 整数部分和小数部分
+    int_part = int(pos)
+    frac_part = pos - int_part
+    
+    # 如果位置是整数，直接返回该位置的值
+    if frac_part == 0:
+        return data[int_part]
+    # 否则进行线性插值
+    lower = data[int_part]
+    upper = data[int_part + 1]
+    return lower + frac_part * (upper - lower)
+    
+# 通过iqr计算，祛除异常离散点，返回干净数据的平均值/中位值
+def calc_probe_z_clean(positions, coeff = 0.3, reseult = 'average'):
+    z_sorted = sorted([p[2] for p in positions]) #仅提取z轴数据，并对数据排序
+    q1 = calc_percentile(z_sorted, 25) #计算第1四分位数
+    q3 = calc_percentile(z_sorted, 75) #计算第3四分位数
+    iqr = q3 - q1
+
+    # 计算异常值边界
+    lower_bound = q1 - coeff * iqr
+    upper_bound = q3 + coeff * iqr
+
+    # 获取边界范围内的干净数据
+    clean_positions = [p for p in positions if p[2] >= lower_bound and p[2] <= upper_bound]
+    
+    # 返回平均值坐标点
+    return calc_probe_z_average(clean_positions, reseult)
 
 ######################################################################
 # Probe device implementation helpers
@@ -261,6 +293,8 @@ class ProbeSessionHelper:
                                                  minval=0.)
         self.samples_retries = config.getint('samples_tolerance_retries', 0,
                                              minval=0)
+        # retry到最大次数依旧不通过时，使用iqr评估历史缓存，samples_coeff是iqr边界调整系数，取值[0,∞)，取值越小边界越窄
+        self.samples_coeff = config.getfloat('samples_coeff', 0.3, minval=0.0)
         # Session state
         self.multi_probe_pending = False
         self.results = []
@@ -302,13 +336,15 @@ class ProbeSessionHelper:
         samples_retries = gcmd.get_int("SAMPLES_TOLERANCE_RETRIES",
                                        self.samples_retries, minval=0)
         samples_result = gcmd.get("SAMPLES_RESULT", self.samples_result)
+        samples_coeff = gcmd.get_float("SAMPLES_COEFF", self.samples_coeff, minval=0.0)
         return {'probe_speed': probe_speed,
                 'lift_speed': lift_speed,
                 'samples': samples,
                 'sample_retract_dist': sample_retract_dist,
                 'samples_tolerance': samples_tolerance,
                 'samples_tolerance_retries': samples_retries,
-                'samples_result': samples_result}
+                'samples_result': samples_result,
+                'samples_coeff': samples_coeff}
     def _probe(self, speed):
         toolhead = self.printer.lookup_object('toolhead')
         curtime = self.printer.get_reactor().monotonic()
@@ -342,6 +378,7 @@ class ProbeSessionHelper:
         retries = 0
         positions = []
         sample_count = params['samples']
+        sample_cache = [] #采样结果历史缓存初始化
 
         if sample_count != 5:
             raise gcmd.error("Probe samples must be 5 for anisoprint bed mesh")
@@ -385,8 +422,16 @@ class ProbeSessionHelper:
                 positions.sort(key=lambda p: p[2])
                 z_positions = [p[2] for p in positions]
                 if max(z_positions[1:-1])-min(z_positions[1:-1]) > params['samples_tolerance']:
-                    if retries >= params['samples_tolerance_retries']:
-                        raise gcmd.error("Probe samples exceed samples_tolerance")
+                    sample_cache.extend(positions) #缓存未通过的采样结果
+                    if retries >= params['samples_tolerance_retries']: #达到最大尝试次数
+                        # raise gcmd.error("Probe samples exceed samples_tolerance")
+                        epos = calc_probe_z_clean(sample_cache, params['samples_coeff'], params['samples_result']) #利用iqr滤除采样缓存中的异常结果，获取干净的z特征结果
+                        self.results.append(epos) #保存特征结果
+                        sample_cache = [] #清空缓存
+                        gcode.respond_info("Probe samples exceed samples_tolerance") #一般通知
+                        gcode.respond_info("probe res ave=%.6f" % (epos[2])) #显示结果
+                        return
+                    
                     gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
                     retries += 1
                     positions = []
@@ -394,6 +439,7 @@ class ProbeSessionHelper:
                         probexy + [pos[2] + params['sample_retract_dist']],
                         params['lift_speed'])  
 
+        sample_cache = [] #可通过极差校验时，及时清空缓存
         epos = calc_probe_z_average(positions[1:-1], params['samples_result'])
         gcode.respond_info("probe res %.6f,%.6f,%.6f,%.6f,%.6f ave=%.6f"
                             % (z_positions[0], z_positions[1], z_positions[2],z_positions[3], z_positions[4], epos[2]))
