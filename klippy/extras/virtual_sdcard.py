@@ -112,28 +112,37 @@ class VirtualSD:
     def is_active(self):
         return self.work_timer is not None
     def do_pause(self):
-        if self.work_timer is not None:
-            self.must_pause_work = True
-            while self.work_timer is not None and not self.cmd_from_sd:
-                self.reactor.pause(self.reactor.monotonic() + .001)
-
-        toolhead = self.printer.lookup_object('toolhead', None)
-        if toolhead is not None:
-            self.must_pause_work = True
-            return
-        
+        toolhead = self.printer.lookup_object('toolhead')
         extruder = toolhead.get_extruder()
         extruder_name = extruder.get_name() if extruder is not None else "extruder"
 
         if extruder_name == "extruder1":
-            self.must_pause_work = True
-        else:
-            self.waiting_pause_request = True
+            if self.work_timer is not None:
+                self.must_pause_work = True
+                while self.work_timer is not None and not self.cmd_from_sd:
+                    self.reactor.pause(self.reactor.monotonic() + .001)
+            self.waiting_pause_request = False
             self.cutting_completed_detected = False
+            self.gcode.run_script_from_command("PAUSE_AFTER_DELAY")
+        else:
+            if not self.waiting_pause_request:
+                self.waiting_pause_request = True
+                self.cutting_completed_detected = False
+
+            if self.cutting_completed_detected:
+                if self.work_timer is not None:
+                    self.must_pause_work = True
+                    while self.work_timer is not None and not self.cmd_from_sd:
+                        self.reactor.pause(self.reactor.monotonic() + .001)
+
+                self.waiting_pause_request = False
+                self.cutting_completed_detected = False
     def do_resume(self):
         if self.work_timer is not None:
             raise self.gcode.error("SD busy")
         self.must_pause_work = False
+        self.waiting_pause_request = False
+        self.cutting_completed_detected = False
         self.work_timer = self.reactor.register_timer(
             self.work_handler, self.reactor.NOW)
     def do_cancel(self):
@@ -289,12 +298,14 @@ class VirtualSD:
             self.cmd_from_sd = True
             line = lines.pop()
 
-            if "Cutting completed" in line:
+            if "Cutting completed" in line or "; Cutting completed." in line:
                 self.cutting_completed_detected = True
 
                 if self.waiting_pause_request:
                     self.must_pause_work = True
                     self.waiting_pause_request = False
+                    self.cutting_completed_detected = False
+                    self.gcode.run_script_from_command("PAUSE_AFTER_DELAY")
                     break
 
             if sys.version_info.major >= 3:
