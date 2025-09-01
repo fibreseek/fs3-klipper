@@ -130,17 +130,19 @@ class xyz_align:
        #self.gcode.respond_info("xyz_align: %d" % (self.oid))
     def get_z_press_val(self, t):
         z_offset = 1
+        self.z_value = 1
         while(z_offset <= (15 - t*3)):
-            self.gcode.run_script_from_command("G1 Z%d\n" % (self.offset_z - z_offset))
+            self.gcode.run_script_from_command("G1 Z%d F80\n" % (self.offset_z - z_offset))
             self.gcode.run_script_from_command("M400\n")
-            self.z_value = 1
             self.align_start_cmd.send([self.oid, 2])
-            time.sleep(1.0) 
+            #time.sleep(0.1) 
             #self.gcode.run_script_from_command("G4 P1000\n")
+            self.printer.get_reactor().pause(0.1)
+
             if (self.z_value == 0):
                 self.offset_z_press = self.offset_z - z_offset -0.3
                 break
-            z_offset += 1    
+            z_offset += 0.3    
             
     def cmd_XYZ_ALIGN(self, gcmd):
         curtime = self.printer.get_reactor().monotonic()
