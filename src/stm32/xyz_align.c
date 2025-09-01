@@ -70,6 +70,10 @@ void command_align_start(uint32_t *args)
             sendf("xyz_align_end oid=%c res=%c z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i", oid, 2, PG11_VALUE, 0, 0,0,0,0);
         break;
 
+        case 3:
+            offset_index = 0;
+            printf_("z:%d, xy: %d %d %d %d %d\r\n",offset_z0, offset_xy[0], offset_xy[1], offset_xy[2], offset_xy[3], offset_xy[4]);
+        break;
     }
 }    //sendf("uart_get_cmd oid=%c val=%c", oid, val);
 
