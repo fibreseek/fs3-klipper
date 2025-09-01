@@ -285,7 +285,7 @@ def get_config_file_by_hw_version():
         configfile += "printer_v16.cfg"
     elif(hw_version <= 938):
         configfile += "printer_v17.cfg"
-    elif(hw_version <= 1023):   ######################## 初始版本ADC读数为1023.这个选项默认使用printer.cfg
+    elif(hw_version <= 1023):   ########################  :printer.cfg
         configfile += "printer.cfg"
     else:
         configfile += "printer.cfg"
