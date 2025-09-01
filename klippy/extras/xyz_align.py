@@ -33,11 +33,57 @@ class xyz_align:
         self.gcode.register_command('XYZ_ALIGN', self.cmd_XYZ_ALIGN, desc=self.cmd_XYZ_ALIGN_help)
         self.gcode.register_command('XYZ_ALGIN_CLEAR', self.cmd_XYZ_ALIGN_TEST, desc=self.cmd_XYZ_ALIGN_help)
         self.mcu.register_response(self.handle_align_end,"xyz_align_end", self.oid)
-        
-   
+        self.printer.register_event_handler("klippy:ready", self.xyz_init_offset)
+
+
+    def xyz_init_offset(self):
+        config_file = 'xyz_offset.ini'
+        config = configparser.ConfigParser()
+        config.read(config_file)
+        section = 'offset'
+        if section in config:
+            x_offset = config.getfloat(section, 'x_offset', fallback=0.0)
+            y_offset = config.getfloat(section, 'y_offset', fallback=0.0)
+            z_offset = config.getfloat(section, 'z_offset', fallback=0.0)
+            self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (x_offset))
+            self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (y_offset))
+            self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=zoffset VALUE=%f" % (z_offset))
+            logging.info("init xyz_offset.ini file success")
+        else:
+            x_offset = 0.0
+            y_offset = 0.0
+            z_offset = 0.0
+            logging.info("init xyz_offset.ini file failed")
+
+
     def build_config(self):
         self.mcu.add_config_cmd("align_start oid=%d val=%d" % (self.oid, 0))
         self.align_start_cmd = self.mcu.lookup_command("align_start oid=%c val=%c", cq=self.cmd_queue)
+        #self.xyz_init_offset()
+
+    def xyz_update_offset(self, x_offset, y_offset, z_offset):
+        config_file = 'xyz_offset.ini'
+        config = configparser.ConfigParser()
+        config.read(config_file)
+        section = 'offset'
+        if section not in config:
+            config[section] = {}
+
+        config[section]['x_offset'] = str(x_offset)
+        config[section]['y_offset'] = str(y_offset)
+        config[section]['z_offset'] = str(z_offset)
+
+        try:
+            with open(config_file, 'w') as configfile:
+                config.write(configfile)
+            self.gcode.respond_info("update xyz_offset.ini file success")
+        except Exception as e:
+            self.gcode.respond_info("update xyz_offset.ini file failed")
+
+        self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (x_offset))
+        self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (y_offset))
+        self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=zoffset VALUE=%f" % (z_offset))
+        
 
     def handle_align_end(self, params):
         # Expand the message ack_count from 8-bit
@@ -59,10 +105,10 @@ class xyz_align:
             
             #self.gcode.respond_info("handle_align_end offset : x=%f y=%f z=%f" % (x_offset,y_offset,z_offset))
             self.gcode.run_script_from_command("M118 [NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=1 x_offset=%f y_offset=%f z_offset=%f"% (x_offset,y_offset,z_offset))
-            
-            self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (0-x_offset))
-            self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (0-y_offset))
-            self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=zoffset VALUE=%f" % (0-z_offset))
+            xyz_update_offset(self, (0-x_offset), (0-y_offset), (0-z_offset))
+            # self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (0-x_offset))
+            # self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (0-y_offset))
+            # self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=zoffset VALUE=%f" % (0-z_offset))
             self.gcode.respond_info("handle_align_end: res = %d x0 = %d x1 = %d y0 = %d y1 = %d z0 = %d z1 = %d" % (res,x0,x1,y0,y1,z0,z1))
             
         elif(res == 0):
