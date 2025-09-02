@@ -255,6 +255,46 @@ def arg_dictionary(option, opt_str, value, parser):
         parser.values.dictionary = {}
     parser.values.dictionary[key] = fname
 
+def read_adc_raw(channel=7):
+    path = f"/sys/bus/iio/devices/iio:device0/in_voltage{channel}_raw"
+    with open(path, "r") as f:
+        return int(f.read().strip())
+
+# voltage7          ADC 0-1.8V     hw_version
+# 0.244113264       138             V1.2
+# 0.450050184       256             V1.3
+# 0.737755102       419             V1.4
+# 1.05              597             V1.5
+# 1.352459016       768             V1.6
+# 1.652459016       938             V1.7
+# 1.8               1023            V1.8
+
+def get_config_file_by_hw_version():
+    hw_version = read_adc_raw(7)
+
+    configfile = "/home/anisoprint/printer_data/config/"
+    if(hw_version <= 138):
+        configfile += "printer_v12.cfg"
+    elif(hw_version <= 256):
+        configfile += "printer_v13.cfg"
+    elif(hw_version <= 419):
+        configfile += "printer_v14.cfg"
+    elif(hw_version <= 597):
+        configfile += "printer_v15.cfg"
+    elif(hw_version <= 768):
+        configfile += "printer_v16.cfg"
+    elif(hw_version <= 938):
+        configfile += "printer_v17.cfg"
+    elif(hw_version <= 1023):   ########################  :printer.cfg
+        configfile += "printer.cfg"
+    else:
+        configfile += "printer.cfg"
+
+    if os.path.exists(configfile):
+        return configfile
+    else:
+        return "/home/anisoprint/printer_data/config/printer.cfg"
+
 def main():
     usage = "%prog [options] <config file>"
     opts = optparse.OptionParser(usage)
@@ -281,7 +321,7 @@ def main():
         import_test()
     if len(args) != 1:
         opts.error("Incorrect number of arguments")
-    start_args = {'config_file': args[0], 'apiserver': options.apiserver,
+    start_args = {'config_file': get_config_file_by_hw_version(), 'apiserver': options.apiserver,
                   'start_reason': 'startup'}
 
     debuglevel = logging.INFO
@@ -302,7 +342,7 @@ def main():
         bglogger = queuelogger.setup_bg_logging(options.logfile, debuglevel)
     else:
         logging.getLogger().setLevel(debuglevel)
-    logging.info("Starting Klippy...")
+    logging.info("Starting Klippy... with config file :%s" % (get_config_file_by_hw_version()))
     git_info = util.get_git_version()
     git_vers = git_info["version"]
     extra_files = [fname for code, fname in git_info["file_status"]
