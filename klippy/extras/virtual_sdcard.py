@@ -123,7 +123,6 @@ class VirtualSD:
                     self.reactor.pause(self.reactor.monotonic() + .001)
             self.waiting_pause_request = False
             self.cutting_completed_detected = False
-            self.gcode.run_script_from_command("PAUSE_AFTER_DELAY")
         else:
             if not self.waiting_pause_request:
                 self.waiting_pause_request = True
