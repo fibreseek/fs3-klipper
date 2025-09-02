@@ -245,7 +245,11 @@ def get_mtimes(filelist):
 def check_build_code(sources, target):
     src_times = get_mtimes(sources)
     obj_times = get_mtimes([target])
-    return not obj_times or max(src_times) > min(obj_times)
+    # Check if target file exists and has non-zero size
+    target_exists = os.path.exists(target)
+    target_size_ok = target_exists and os.path.getsize(target) > 0
+    return (not obj_times or max(src_times) > min(obj_times) 
+            or not target_exists or not target_size_ok)
 
 # Check if the current gcc version supports a particular command-line option
 def check_gcc_option(option):
