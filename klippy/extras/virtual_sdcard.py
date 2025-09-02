@@ -32,7 +32,6 @@ class VirtualSD:
         self.work_timer = None
         # wait Pause 
         self.waiting_pause_request = False
-        self.cutting_completed_detected = False
         # Error handling
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.on_error_gcode = gcode_macro.load_template(
@@ -49,6 +48,20 @@ class VirtualSD:
         self.gcode.register_command(
             "SDCARD_PRINT_FILE", self.cmd_SDCARD_PRINT_FILE,
             desc=self.cmd_SDCARD_PRINT_FILE_help)
+
+        self.gcode.register_command(
+            "WAITTING_PAUSE", self.cmd_WAITTING_PAUSE,
+            desc=self.cmd_WAITTING_PAUSE_help)
+
+
+    def cmd_WAITTING_PAUSE(self, gcmd):
+        F = gcmd.get_int('F', 0)
+        self.waiting_pause_request = F
+        gcmd.respond_raw("WAITTING_PAUSE %d" % (self.waiting_pause_request))
+
+    cmd_WAITTING_PAUSE_help = "WAITTING_PAUSE COMMAND  eg: WAITTING_PAUSE F=1 force puase"
+
+
     def handle_shutdown(self):
         if self.work_timer is not None:
             self.must_pause_work = True
@@ -112,36 +125,14 @@ class VirtualSD:
     def is_active(self):
         return self.work_timer is not None
     def do_pause(self):
-        toolhead = self.printer.lookup_object('toolhead')
-        extruder = toolhead.get_extruder()
-        extruder_name = extruder.get_name() if extruder is not None else "extruder"
-
-        if extruder_name == "extruder1":
-            if self.work_timer is not None:
-                self.must_pause_work = True
-                while self.work_timer is not None and not self.cmd_from_sd:
-                    self.reactor.pause(self.reactor.monotonic() + .001)
-            self.waiting_pause_request = False
-            self.cutting_completed_detected = False
-        else:
-            if not self.waiting_pause_request:
-                self.waiting_pause_request = True
-                self.cutting_completed_detected = False
-
-            if self.cutting_completed_detected:
-                if self.work_timer is not None:
-                    self.must_pause_work = True
-                    while self.work_timer is not None and not self.cmd_from_sd:
-                        self.reactor.pause(self.reactor.monotonic() + .001)
-
-                self.waiting_pause_request = False
-                self.cutting_completed_detected = False
+        if self.work_timer is not None:
+            self.must_pause_work = True
+            while self.work_timer is not None and not self.cmd_from_sd:
+                self.reactor.pause(self.reactor.monotonic() + .001)
     def do_resume(self):
         if self.work_timer is not None:
             raise self.gcode.error("SD busy")
         self.must_pause_work = False
-        self.waiting_pause_request = False
-        self.cutting_completed_detected = False
         self.work_timer = self.reactor.register_timer(
             self.work_handler, self.reactor.NOW)
     def do_cancel(self):
@@ -262,12 +253,6 @@ class VirtualSD:
         lines = []
         error_message = None
         while not self.must_pause_work:
-            if self.waiting_pause_request and self.cutting_completed_detected:
-                self.must_pause_work = True
-                self.waiting_pause_request = False
-                self.cutting_completed_detected = False
-                break
-
             if not lines:
                 # Read more data
                 try:
@@ -298,14 +283,10 @@ class VirtualSD:
             line = lines.pop()
 
             if "Cutting completed" in line or "; Cutting completed." in line:
-                self.cutting_completed_detected = True
-
-                if self.waiting_pause_request:
-                    self.must_pause_work = True
-                    self.waiting_pause_request = False
-                    self.cutting_completed_detected = False
-                    self.gcode.run_script_from_command("PAUSE_AFTER_DELAY")
-                    break
+                if self.waiting_pause_request == 1:
+                    self.gcode.run_script("M400")
+                    self.gcode.run_script("PAUSE F=1")
+                    self.gcode.run_script("WAITTING_PAUSE F=0")
 
             if sys.version_info.major >= 3:
                 next_file_position = self.file_position + len(line.encode()) + 1
