@@ -22,6 +22,9 @@ class xyz_align:
         self.speed = config.getfloat('speed',3000)
         self.offset_z = 10
         self.z_value = 1
+        self.x_offset = []
+        self.y_offset = []
+        self.z_offset = []
         ppins = self.printer.lookup_object('pins')
         pin_params = ppins.lookup_pin(config.get('pin'))
         self.mcu = pin_params['chip']
@@ -91,6 +94,7 @@ class xyz_align:
         # Expand the message ack_count from 8-bit
         res = params['res']
         if(res == 1):
+            self.count += 1
             z0 = params['z0']
             z1 = params['z1']
             x0 = params['x0']
@@ -104,16 +108,22 @@ class xyz_align:
             z_offset = ((z1 - z0)*z_rotation_distance)/(z_microsteps*200)
             x_offset = (x1*x_rotation_distance/(x_microsteps*200)) - (x0*x_rotation_distance/(x_microsteps*200))+ self.t0_offset_x - self.t1_offset_x
             y_offset = (y1*x_rotation_distance/(x_microsteps*200)) - (y0*x_rotation_distance/(x_microsteps*200)) + self.t0_offset_y - self.t1_offset_y
+            self.x_offset.append(0-x_offset)
+            self.y_offset.append(0-y_offset)
+            self.z_offset.append(0-z_offset)
+            if(self.count >= 4):
+                x_offset = (sum(self.x_offset)-max(self.x_offset)-min(self.x_offset))/(len(self.x_offset)-2)
+                y_offset = (sum(self.y_offset)-max(self.y_offset)-min(self.y_offset))/(len(self.y_offset)-2)
+                z_offset = (sum(self.z_offset)-max(self.z_offset)-min(self.z_offset))/(len(self.z_offset)-2)
+                self.gcode.run_script_from_command("M118 [NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=1 x_offset=%f y_offset=%f z_offset=%f"% (x_offset,y_offset,z_offset))
             
-            #self.gcode.respond_info("handle_align_end offset : x=%f y=%f z=%f" % (x_offset,y_offset,z_offset))
-            self.gcode.run_script_from_command("M118 [NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=1 x_offset=%f y_offset=%f z_offset=%f"% (x_offset,y_offset,z_offset))
-            xyz_update_offset(self, (0-x_offset), (0-y_offset), (0-z_offset))
-            # self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (0-x_offset))
-            # self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (0-y_offset))
-            # self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=zoffset VALUE=%f" % (0-z_offset))
-            self.gcode.respond_info("handle_align_end: res = %d x0 = %d x1 = %d y0 = %d y1 = %d z0 = %d z1 = %d" % (res,x0,x1,y0,y1,z0,z1))
-            
+                self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (x_offset))
+                self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (y_offset))
+                self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=zoffset VALUE=%f" % (z_offset))
+                self.gcode.respond_info("handle_align_end: res = %d x0 = %d x1 = %d y0 = %d y1 = %d z0 = %d z1 = %d" % (res,x0,x1,y0,y1,z0,z1))
+                
         elif(res == 0):
+            self.align_flag = 0
             z0 = params['z0']
             z1 = params['z1']
             x0 = params['x0']
@@ -144,9 +154,22 @@ class xyz_align:
             if (self.z_value == 0):
                 self.offset_z_press = self.offset_z - z_offset -0.3
                 break
-            z_offset += 0.3    
+            z_offset += 1    
             
     def cmd_XYZ_ALIGN(self, gcmd):
+        self.count = 0;
+        self.align_flag = 1
+        self.x_offset.clear()
+        self.y_offset.clear()
+        self.z_offset.clear()
+        for i in range(4):
+            self.cmd_XYZ_ALIGN_ONCE(gcmd)
+            time.sleep(1)
+            if(self.align_flag == 0):
+                break
+        self.gcode.run_script_from_command("T0")        
+
+    def cmd_XYZ_ALIGN_ONCE(self, gcmd):
         curtime = self.printer.get_reactor().monotonic()
         status = self.printer.lookup_object('toolhead').get_status(curtime)['homed_axes']
         if status != 'xyz':
