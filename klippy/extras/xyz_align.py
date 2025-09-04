@@ -32,6 +32,7 @@ class xyz_align:
         self.printer.add_object('xyz_align', self)
         self.gcode.register_command('XYZ_ALIGN', self.cmd_XYZ_ALIGN, desc=self.cmd_XYZ_ALIGN_help)
         self.gcode.register_command('XYZ_ALIGN_T1', self.cmd_XYZ_ALIGN_T1, desc=self.cmd_XYZ_ALIGN_help)
+        self.gcode.register_command('XYZ_ALIGN_T0', self.cmd_XYZ_ALIGN_T0, desc=self.cmd_XYZ_ALIGN_help)
         self.gcode.register_command('XYZ_ALGIN_CLEAR', self.cmd_XYZ_ALIGN_TEST, desc=self.cmd_XYZ_ALIGN_help)
         self.mcu.register_response(self.handle_align_end,"xyz_align_end", self.oid)
         self.printer.register_event_handler("klippy:ready", self.xyz_init_offset)
@@ -187,7 +188,8 @@ class xyz_align:
                 "G1 Y%d\n"
                 "G1 Z%d\n"
                 "G1 Y%d\n"
-                "G1 Z%d\n"   
+                "G1 Z%d\n"
+                "M400\n"   
                 % (self.t0_offset_x+self.move_offset,self.offset_z,self.t0_offset_x,self.offset_z_press,self.t0_offset_x-self.move_offset,self.offset_z,self.t0_offset_x,self.offset_z_press,self.t0_offset_y+self.move_offset,self.offset_z,self.t0_offset_y,self.offset_z_press,self.t0_offset_y-self.move_offset,self.offset_z))
                 #add change to t1
             # self.gcode.run_script_from_command("G1 F3000")    
@@ -223,6 +225,7 @@ class xyz_align:
                 "G1 Z%d\n"
                 "G1 Y%d\n"
                 "G1 Z%d\n"
+                "M400\n"
                 "RESTORE_GCODE_STATE NAME=pre_offset_state\n"
                 % (self.speed,self.offset_z,self.offset_z_press,self.t1_offset_x+self.move_offset,self.offset_z,self.t1_offset_x,self.offset_z_press,self.t1_offset_x-self.move_offset,self.offset_z,self.t1_offset_x,self.offset_z_press,self.t1_offset_y+self.move_offset-2,self.offset_z,self.t1_offset_y,self.offset_z_press,self.t1_offset_y-self.move_offset,self.offset_z))
             self.gcode.run_script_from_command("G1 Z10 F600")
@@ -272,11 +275,60 @@ class xyz_align:
                 "G1 Z%d\n"
                 "G1 Y%d\n"
                 "G1 Z%d\n"
+                "M400\n"
                 % (self.speed,self.offset_z,self.offset_z_press,self.t1_offset_x+self.move_offset,self.offset_z,self.t1_offset_x,self.offset_z_press,self.t1_offset_x-self.move_offset,self.offset_z,self.t1_offset_x,self.offset_z_press,self.t1_offset_y+self.move_offset-2,self.offset_z,self.t1_offset_y,self.offset_z_press,self.t1_offset_y-self.move_offset,self.offset_z))
             self.gcode.run_script_from_command("G1 Z10 F600")
             self.gcode.run_script_from_command("G1 Y280 F3000")
             # self.gcode.run_script_from_command("T0")
             self.gcode.run_script_from_command("M400") 
+            self.align_start_cmd.send([self.oid, 3])
+
+
+    def cmd_XYZ_ALIGN_T0(self, gcmd):
+        curtime = self.printer.get_reactor().monotonic()
+        status = self.printer.lookup_object('toolhead').get_status(curtime)['homed_axes']
+        if status != 'xyz':
+            raise self.printer.command_error("Must home before probe")
+        else:
+            self.align_start_cmd.send([self.oid, 0])
+            self.gcode.run_script_from_command(
+                "G90\n"
+                "G1 Z%d\n"
+                "G1 F3000\n"
+                #"T0\n"
+                # "G1 X100 Y100 F3000\n"
+                "G1 X%d Y%d F3000\n"
+                % (self.offset_z, self.t0_offset_x, self.t0_offset_y))
+
+            self.get_z_press_val(0)    
+            if (self.z_value == 1):
+                self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] Error: Z press value not found, aborting alignment")
+                return
+
+            self.gcode.run_script_from_command("M118 [NOZZLE_OFFSET_CALIBRATION] Positioning the left nozzle location...")
+            self.gcode.run_script_from_command(
+                "G1 F%d\n"
+                "G1 Z%d\n"
+                "G1 Z%d\n"
+                % (self.speed,self.offset_z,self.offset_z_press))
+            self.gcode.run_script_from_command(
+                "G1 X%d\n"
+                "G1 Z%d\n"
+                "G1 X%d\n"
+                "G1 Z%d\n"
+                "G1 X%d\n"
+                "G1 Z%d\n"
+                "G1 X%d\n"
+                "G1 Z%d\n"
+                "G1 Y%d\n"
+                "G1 Z%d\n"
+                "G1 Y%d\n"
+                "G1 Z%d\n"
+                "G1 Y%d\n"
+                "G1 Z%d\n"   
+                "M400\n"
+                % (self.t0_offset_x+self.move_offset,self.offset_z,self.t0_offset_x,self.offset_z_press,self.t0_offset_x-self.move_offset,self.offset_z,self.t0_offset_x,self.offset_z_press,self.t0_offset_y+self.move_offset,self.offset_z,self.t0_offset_y,self.offset_z_press,self.t0_offset_y-self.move_offset,self.offset_z))
+               
             self.align_start_cmd.send([self.oid, 3])
 
 
