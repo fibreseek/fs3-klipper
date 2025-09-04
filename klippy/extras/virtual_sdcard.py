@@ -287,6 +287,7 @@ class VirtualSD:
                     self.gcode.run_script("M400")
                     self.gcode.run_script("PAUSE F=1")
                     self.gcode.run_script("WAITTING_PAUSE F=0")
+                    self.gcode.run_script("M118 [PAUSE] pause completed")
 
             if sys.version_info.major >= 3:
                 next_file_position = self.file_position + len(line.encode()) + 1
