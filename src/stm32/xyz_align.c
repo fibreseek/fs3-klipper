@@ -15,20 +15,34 @@
 #include "sched.h" // DECL_INIT
 #include "board/misc.h"
 
-static int32_t offset_z0 = 0;
-static int32_t offset_z1 = 0;
-static int32_t offset_xy[10] = {0};
+static int32_t offset_z[10] = {0};
+static int32_t offset_xy[10][5] = {0};
 static uint8_t offset_index = 0;
 extern int32_t get_step_count_x(void);
 extern int32_t get_step_count_z(void);
 #define PG11_VALUE (GPIOG->IDR & (1 << 11)) ? 1 : 0
 #define ABS(x) ((x) < 0 ? -(x) : (x))
 
+void sort_array(int arr[], int n) {
+    int i, j, temp;
+    for (i = 0; i < n - 1; i++) {
+        for (j = 0; j < n - 1 - i; j++) {
+            if (arr[j] > arr[j + 1]) {
+                temp = arr[j];
+                arr[j] = arr[j + 1];
+                arr[j + 1] = temp;
+            }
+        }
+    }
+}
+
+
 void command_align_start(uint32_t *args)
 {
     uint8_t res = 0;
     uint8_t oid = args[0];
     uint8_t val = args[1];
+    uint8_t i = 0, j = 0 ;
     switch(val)
     {
       case 0:
@@ -36,7 +50,7 @@ void command_align_start(uint32_t *args)
         //printf_("command_align_start\r\n");
         break;
       case 1:
-        if(offset_index == 10)
+        if(offset_index == 50)
         {
             res = 1;
         }
@@ -47,23 +61,25 @@ void command_align_start(uint32_t *args)
         //sendf("xyz_align_end oid=%c val=%c", oid, val);
         //printf_("xyz_align_end oid=%d val=%d", oid, val);
         //((x1-x0) - (x0-x2))/2
-        sendf("xyz_align_end oid=%c res=%c z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i", oid, res, offset_z0, offset_z1, 
-             (ABS(offset_xy[0] - offset_xy[2])-ABS(offset_xy[1] - offset_xy[0]))/2, 
-             (ABS(offset_xy[0] - offset_xy[4])-ABS(offset_xy[3] - offset_xy[0]))/2, 
-             (ABS(offset_xy[5] - offset_xy[7])-ABS(offset_xy[6] - offset_xy[5]))/2, 
-             (ABS(offset_xy[5] - offset_xy[9])-ABS(offset_xy[8] - offset_xy[5]))/2
+        for(i = 0; i < 10; i++)
+        {
+            sort_array(offset_xy[i], 5);
+        }
+        sort_array(offset_z, 5);
+        sort_array(offset_z+5, 5);
+
+        sendf("xyz_align_end oid=%c res=%c z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i", oid, res, offset_z[2], offset_z[7], 
+             (ABS(offset_xy[0][2] - offset_xy[2][2])-ABS(offset_xy[1][2] - offset_xy[0][2])), 
+             (ABS(offset_xy[0][2] - offset_xy[4][2])-ABS(offset_xy[3][2] - offset_xy[0][2])), 
+             (ABS(offset_xy[5][2] - offset_xy[7][2])-ABS(offset_xy[6][2] - offset_xy[5][2])), 
+             (ABS(offset_xy[5][2] - offset_xy[9][2])-ABS(offset_xy[8][2] - offset_xy[5][2]))
          );
-         printf_("z0=%d z1=%d\r\n", offset_z0, offset_z1);
-         for(int i = 0; i < 10; i++)
+         for(i = 0; i < 10; i++)
          {
-            printf_("offset_xy[%d]=%d\r\n", i, offset_xy[i]);
+            printf_("offset_xy[%d]=%d \r\n", i, offset_xy[i][2]);
          }
-        // printf_("xyz_align_end res=%d z0=%d z1=%d x0=%d y0=%d x1=%d y1=%d", res, offset_z0, offset_z1, 
-        //     ((offset_xy[0] - offset_xy[2])-(offset_xy[1] - offset_xy[0]))/2, 
-        //     ((offset_xy[0] - offset_xy[4])-(offset_xy[3] - offset_xy[0]))/2, 
-        //     ((offset_xy[5] - offset_xy[7])-(offset_xy[6] - offset_xy[5]))/2, 
-        //     ((offset_xy[5] - offset_xy[9])-(offset_xy[8] - offset_xy[5]))/2
-        // );
+         printf_("z0=%d z1=%d\r\n", offset_z[2], offset_z[7]);
+
         break;
 
         case 2:
@@ -72,8 +88,22 @@ void command_align_start(uint32_t *args)
 
         case 3:
             offset_index = 0;
-            printf_("z:%d, xy: %d %d %d %d %d\r\n",offset_z0, offset_xy[0], offset_xy[1], offset_xy[2], offset_xy[3], offset_xy[4]);
+            printf_("z:%d, xy: %d %d %d %d %d\r\n",offset_z[0], offset_xy[0][0], offset_xy[0][1], offset_xy[0][2], offset_xy[0][3], offset_xy[0][4]);
         break;
+
+        case 4:
+            for(i = 0; i < 10; i++)
+            {
+                
+                for(j = 0; j < 5; j++)
+                {
+                    printf_("%d ", offset_xy[i][j]);
+                }
+                printf_("%d \r\n",offset_z[i]);
+            }
+            
+        break;
+
     }
 }    //sendf("uart_get_cmd oid=%c val=%c", oid, val);
 
@@ -81,24 +111,29 @@ void command_align_start(uint32_t *args)
 void EXTI15_10_IRQHandler(void)
 {
     int32_t x,z;
+    int32_t index;
     if (EXTI->PR1 & (1UL << 11))  // 检查是否是 EXTI10 触发
     {
         EXTI->PR1 = (1UL << 11);  // 清除挂起标志（写 1 清除）
         x = get_step_count_x();
         z = get_step_count_z();
-        if(offset_index == 0)
+
+        if(offset_index %5==0)
         {
-            offset_z0 = z;
+            offset_z[offset_index/5] = z;
         }
-        else if(offset_index == 5)
+        
+        if(offset_index < 25)
         {
-            offset_z1 = z;
+            offset_xy[offset_index%5][offset_index/5] = x;
         }
-        if(offset_index < 10)
+        else if(offset_index < 50)
         {
-            offset_xy[offset_index] = x;
+            index = offset_index - 25;
+            offset_xy[(index%5) + 5][index/5] = x;
         }
         offset_index ++;
+        //printf_("%d\r\n", offset_index);
         // 处理逻辑
     }
 }
