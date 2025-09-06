@@ -64,11 +64,11 @@ class xyz_align:
     def rm_xyz_offset_ini(self):
         file_path = "xyz_offset.ini"
 
-        if os.path.exists(file_path):  # 先确认文件存在
-            os.remove(file_path)       # 删除文件
-            print(f"{file_path} 已删除")
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            print(f"{file_path} xyz_offset.ini deleted successfully.")
         else:
-            print("文件不存在")
+            print("xyz_offset.ini file does not exist.")
 
     def xyz_update_offset(self, x0, y0, x1, y1):
         x_rotation_distance = self.session_x.getfloat('rotation_distance')
