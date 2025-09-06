@@ -58,7 +58,6 @@ class aniso_bed_mesh:
             self.adc_trigger_val = self.adc_trigger
 
         self.gcode.respond_info("adc_pin: %d" % self.pin_num)    
-        self.gcode.run_script_from_command("DISABLE_BED_MESH")
         self.gcode.run_script_from_command("G90")
         self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z DISTANCE=5 VELOCITY=10")
         if status != 'xyz' and status != 'xy':
@@ -75,7 +74,6 @@ class aniso_bed_mesh:
         
         self.sendop = 2
         self.gcode.run_script_from_command("G1 X150 Y150 F3000")
-        self.gcode.run_script_from_command("RESTORE_BED_MESH")
         self.update_uart_cmd.send([self.oid, self.sendop, round(self.pin_num)])
         while wait_count < 10:
             self.gcode.run_script_from_command("G4 P300")
