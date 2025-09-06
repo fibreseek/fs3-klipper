@@ -13,6 +13,7 @@
 #include "sched.h" // struct timer
 #include "stepper.h" // stepper_event
 #include "trsync.h" // trsync_add_signal
+#include <string.h> //memcpy
 
 DECL_CONSTANT("STEPPER_STEP_BOTH_EDGE", 1);
 
