@@ -196,7 +196,8 @@ class xyz_align:
             for i in range(5):
                 if(self.t0_offset_z == self.z_init_value):
                     self.get_z_press_val(0)  
-                    self.t0_offset_z = self.offset_z_press
+                    if(self.z_value == 0)
+                        self.t0_offset_z = self.offset_z_press
                 else:
                     self.z_value = 0
                     self.offset_z_press = self.t0_offset_z  
