@@ -21,6 +21,7 @@ class xyz_align:
         self.speed = config.getfloat('speed',3000)
         self.offset_z = 10
         self.z_value = 1
+        self.ini_path = "../printer_data/config/xyz_offset.ini"
         ppins = self.printer.lookup_object('pins')
         pin_params = ppins.lookup_pin(config.get('pin'))
         self.mcu = pin_params['chip']
@@ -37,11 +38,9 @@ class xyz_align:
         self.mcu.register_response(self.handle_align_end,"xyz_align_end", self.oid)
         self.printer.register_event_handler("klippy:ready", self.xyz_init_offset)
 
-
     def xyz_init_offset(self):
-        config_file = 'xyz_offset.ini'
         config = configparser.ConfigParser()
-        config.read(config_file)
+        config.read(self.ini_path)
         
         if 't0_offset' in config:
             self.t0_offset_x = config.getfloat('t0_offset', 'x_offset', fallback=self.t0_offset_x)
@@ -62,7 +61,7 @@ class xyz_align:
         #self.xyz_init_offset()
 
     def rm_xyz_offset_ini(self):
-        file_path = "xyz_offset.ini"
+        file_path = self.ini_path
 
         if os.path.exists(file_path):
             os.remove(file_path)
@@ -75,9 +74,8 @@ class xyz_align:
         x_microsteps =self.session_x.getfloat('microsteps')
         z_rotation_distance = self.session_z.getfloat('rotation_distance') 
         z_microsteps = self.session_z.getfloat('microsteps')
-        config_file = 'xyz_offset.ini'
         config = configparser.ConfigParser()
-        config.read(config_file)
+        config.read(self.ini_path)
 
         if 't0_offset' not in config and 't1_offset' not in config:
             config['t0_offset'] = {}
@@ -95,7 +93,7 @@ class xyz_align:
             config['t1_offset']['z_offset'] = str(self.t1_offset_z)
 
             try:
-                with open(config_file, 'w') as configfile:
+                with open(self.ini_path, 'w') as configfile:
                     config.write(configfile)
                 self.gcode.respond_info("update xyz_offset.ini file success")
             except Exception as e:
