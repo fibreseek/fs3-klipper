@@ -106,9 +106,10 @@ class xyz_align:
 
     def handle_align_end(self, params):
         # Expand the message ack_count from 8-bit
-        
         res = params['res']
-        if(res == 1):
+        self.gcode.respond_info("handle_align_end: res = %d" % (res))
+        
+        if(res == 50):
             z0 = params['z0']
             z1 = params['z1']
             x0 = params['x0']/2
@@ -139,17 +140,17 @@ class xyz_align:
                 file.write("%f %f %f \n" % ((0-x_offset), (0-y_offset), (0-z_offset)))
 
 
-        elif(res == 0):
-            z0 = params['z0']
-            z1 = params['z1']
-            x0 = params['x0']
-            y0 = params['y0']
-            x1 = params['x1']
-            y1 = params['y1']
-            self.t0_offset_z = self.z_init_value
-            self.t1_offset_z = self.z_init_value
-            self.gcode.run_script_from_command("M118 [NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=0")
-            self.gcode.respond_info("handle_align_end: res = %d x0 = %d x1 = %d y0 = %d y1 = %d z0 = %d z1 = %d" % (res,x0,x1,y0,y1,z0,z1))
+        # elif(res == 0):
+        #     z0 = params['z0']
+        #     z1 = params['z1']
+        #     x0 = params['x0']
+        #     y0 = params['y0']
+        #     x1 = params['x1']
+        #     y1 = params['y1']
+        #     self.t0_offset_z = self.z_init_value
+        #     self.t1_offset_z = self.z_init_value
+        #     self.gcode.run_script_from_command("M118 [NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=0")
+        #     self.gcode.respond_info("handle_align_end: res = %d x0 = %d x1 = %d y0 = %d y1 = %d z0 = %d z1 = %d" % (res,x0,x1,y0,y1,z0,z1))
 
         elif(res == 2):
             self.z_value = params['z0']

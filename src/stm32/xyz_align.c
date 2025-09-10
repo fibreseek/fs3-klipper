@@ -68,7 +68,7 @@ void command_align_start(uint32_t *args)
         sort_array(offset_z, 5);
         sort_array(offset_z+5, 5);
 
-        sendf("xyz_align_end oid=%c res=%c z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i", oid, res, offset_z[2], offset_z[7], 
+        sendf("xyz_align_end oid=%c res=%c z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i", oid, offset_index, offset_z[2], offset_z[7], 
              (ABS(offset_xy[0][2] - offset_xy[2][2])-ABS(offset_xy[1][2] - offset_xy[0][2])), 
              (ABS(offset_xy[0][2] - offset_xy[4][2])-ABS(offset_xy[3][2] - offset_xy[0][2])), 
              (ABS(offset_xy[5][2] - offset_xy[7][2])-ABS(offset_xy[6][2] - offset_xy[5][2])), 
