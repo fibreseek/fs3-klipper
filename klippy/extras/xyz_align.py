@@ -203,7 +203,7 @@ class xyz_align:
                     self.gcode.run_script_from_command("G1 Z%d F80\n" % (self.offset_z))  
 
                 if (self.z_value == 1):
-                    self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] Error: Z press value not found, aborting alignment")
+                    self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] Error: The left nozzle cannot locate the offset calibration sensor.")
                     self.rm_xyz_offset_ini()
                     return
 
@@ -252,7 +252,7 @@ class xyz_align:
 
                 if (self.z_value == 1):
                     self.rm_xyz_offset_ini()
-                    self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] Error: Z press value not found, aborting alignment")
+                    self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] Error: The right nozzle cannot locate the offset calibration sensor.")
                     return
 
                 self.gcode.run_script_from_command("M118 [NOZZLE_OFFSET_CALIBRATION] Positioning the right nozzle location...")
