@@ -22,6 +22,7 @@ extern int32_t get_step_count_x(void);
 extern int32_t get_step_count_z(void);
 #define PG11_VALUE (GPIOG->IDR & (1 << 11)) ? 1 : 0
 #define ABS(x) ((x) < 0 ? -(x) : (x))
+volatile uint8_t debounce = 0; // xiaodou
 
 void sort_array(int arr[], int n) {
     int i, j, temp;
@@ -115,6 +116,13 @@ void EXTI15_10_IRQHandler(void)
     if (EXTI->PR1 & (1UL << 11))  // 检查是否是 EXTI10 触发
     {
         EXTI->PR1 = (1UL << 11);  // 清除挂起标志（写 1 清除）
+
+        if(debounce != 0)         //xiaodou
+        {
+            return;
+        }
+        debounce = 2;
+
         x = get_step_count_x();
         z = get_step_count_z();
 
@@ -176,8 +184,17 @@ void gpio_irq_init_pg11(void) // PG11
     NVIC->IP[irq_number] = (priority_group << 4) | 7; // 设置 4-bit 优先级分组和优先级
 }
 
+void xyz_task(void)
+{
+    if(debounce > 0)
+    {
+        debounce--;
+    }
+
+}
 
 DECL_COMMAND(command_align_start, "align_start oid=%c val=%c");
 //DECL_ARMCM_IRQ(EXTI0_IRQHandler, EXTI0_IRQn);
 DECL_ARMCM_IRQ(EXTI15_10_IRQHandler, EXTI15_10_IRQn);
 DECL_INIT(gpio_irq_init_pg11);
+DECL_TASK(xyz_task);
