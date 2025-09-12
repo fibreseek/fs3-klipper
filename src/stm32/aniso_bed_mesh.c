@@ -55,7 +55,7 @@ static uint8_t align_start_flag = 0; // 用于标记是否开始对齐
 static int32_t align_start_step = 0; // 用于记录对齐开始时的步进计数
 static int8_t trigge_count = 0; // 用于记录触发次数
 #define MAX_TRIGGE_COUNT 5 // 最大触发次数
-#define MAX_TRIGGE_NUM   3
+#define MAX_TRIGGE_NUM   5
 
 typedef struct {
     uint32_t data[50];
@@ -70,8 +70,8 @@ struct adc_buff {
     int32_t step; // 活动打印时间
     uint8_t trigger;
 };
-#define VALUE_COUNT 150
-#define ADC_ALIGN_COUNT 50 // 判定数量
+#define VALUE_COUNT 600
+#define ADC_ALIGN_COUNT 300 // 用于对齐的ADC数据数量
 struct adc_buff adc_data[VALUE_COUNT];
 
 void init_step_align(void)
@@ -134,6 +134,7 @@ uint32_t get_step_align(void)
                 {
                     step_align = adc_data[0].step - adc_data[i].step;
                     insert_at_front(step_align);
+                    printf_("%d\r\n", i);
                     break;
                 }
             }
@@ -146,6 +147,7 @@ uint32_t get_step_align(void)
                 {
                     step_align = adc_data[0].step - adc_data[i].step;
                     insert_at_front(step_align);
+                    printf_("%d\r\n", i);
                     break;
                 }
             }
@@ -231,9 +233,9 @@ void aniso_bed_mesh_cmd(uint32_t *args)
         {
             val = 1;
         }
-        for(i=0;i<VALUE_COUNT;i++)
+        for(i=0;i<ADC_ALIGN_COUNT;i++)
         {
-            index = 0;
+            index = i + val * ADC_ALIGN_COUNT;
             printf_("%d\t%d\t%d\t\n", adc_data[index].adc_val, adc_data[index].step, adc_data[index].trigger);
         }
         
@@ -356,23 +358,39 @@ uint8_t gpio_in_read_pre1(void)
         else
         {
             adc_flag = 1;
-            val_delta = (adc_val_max_t -adc_val_min_t)*10/100;
-            if(align_flag == 0) //第一次归零
-            {
-                val_delta = val_delta * 3;
-            }
+            val_delta = (adc_val_max_t -adc_val_min_t)*30/100;
             adc_buff_data.adc_val = val;
             adc_buff_data.step = step;
             adc_buff_data.trigger = 0;
             insert_adc_data_to_group(adc_buff_data);
 
+            // if(align_flag == 0) //第一次归零
+            // {
+            //     val_delta = val_delta * 3;
+            //     if(val_delta < 200) // 确保val_delta至少为60
+            //     {
+            //         val_delta = 200;
+            //     }
+            // }
+            // if(val > ADC_MAX_TRIGGE || val < ADC_MIN_TRIGGE)
+            // {
+            //     adc_buff_data.trigger = 1;
+            //     insert_adc_data_to_group(adc_buff_data);
+            //     trigge_count = MAX_TRIGGE_COUNT;
+            //     return 1;
+            // }
+            //val_delta = MAX(val_delta, 60); // 确保val_delta至少为60
             if(val > adc_val_max_t || val < adc_val_min_t)
             {
+                if(vib_count < 3)
+                {
+                    vib_count++;
+                }
                 if(val > adc_val_max_t+val_delta||val < adc_val_min_t-val_delta)
                 {
                     vib_count1++;              
                 }
-                if((vib_count1>=MAX_TRIGGE_NUM && align_flag != 0) || (vib_count1>=MAX_TRIGGE_NUM+2 && align_flag == 0))
+                if(vib_count1>=MAX_TRIGGE_NUM)
                 {
                     adc_buff_data.trigger = 1;
                     insert_adc_data_to_group(adc_buff_data);
@@ -383,6 +401,7 @@ uint8_t gpio_in_read_pre1(void)
             }
             else
             {
+                vib_count = 0;
                 vib_count1 = 0;
             }
         }
