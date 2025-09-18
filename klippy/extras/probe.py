@@ -93,6 +93,31 @@ class ProbeCommandHelper:
         gcode.register_command('Z_OFFSET_APPLY_PROBE',
                                self.cmd_Z_OFFSET_APPLY_PROBE,
                                desc=self.cmd_Z_OFFSET_APPLY_PROBE_help)
+        
+        # debug：独立控制压电陶瓷信号采样的命令
+        gcode.register_command('ANISO_PROBE_ADC_START', self.cmd_ANISO_PROBE_ADC_START)
+        gcode.register_command('ANISO_PROBE_ADC_STOP', self.cmd_ANISO_PROBE_ADC_STOP)
+        self.aniso_probe_session = None
+
+    def cmd_ANISO_PROBE_ADC_START(self, gcmd):
+        logging.info("aniso_probe_adc_start")
+        aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
+        aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 9, 1])#切换为adc采样+周期上报模式
+
+        print_time = self.printer.lookup_object('toolhead').get_last_move_time()+0.01 #打印时间
+        sample_time = 0.000015 # 摘抄自 homing.py，ENDSTOP_SAMPLE_TIME
+        sample_count = 4 # 摘抄自 homing.py，ENDSTOP_SAMPLE_COUNT
+        rest_time = 0.001 # 采样周期，freq = 1/rest_time
+
+        self.aniso_probe_session = self.probe.start_probe_session(gcmd)
+        self.aniso_probe_session.mcu_probe.sample_start(print_time, sample_time, sample_count, rest_time)
+
+    def cmd_ANISO_PROBE_ADC_STOP(self, gcmd):
+        if self.aniso_probe_session is not None:
+            self.aniso_probe_session.mcu_probe.sample_stop()
+            self.aniso_probe_session.end_probe_session()
+            logging.info("aniso_probe_adc_stop")
+
     def _move(self, coord, speed):
         self.printer.lookup_object('toolhead').manual_move(coord, speed)
     def get_status(self, eventtime):
@@ -611,6 +636,8 @@ class ProbeEndstopWrapper:
         self.home_start = self.mcu_endstop.home_start
         self.home_wait = self.mcu_endstop.home_wait
         self.query_endstop = self.mcu_endstop.query_endstop
+        self.sample_start = self.mcu_endstop.sample_start
+        self.sample_stop = self.mcu_endstop.sample_stop
         # multi probes state
         self.multi = 'OFF'
     def _raise_probe(self):

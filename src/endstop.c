@@ -4,14 +4,15 @@
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
-#include "basecmd.h" // oid_alloc
+#include "basecmd.h"    // oid_alloc
 #include "board/gpio.h" // struct gpio
-#include "board/irq.h" // irq_disable
-#include "command.h" // DECL_COMMAND
-#include "sched.h" // struct timer
-#include "trsync.h" // trsync_do_trigger
+#include "board/irq.h"  // irq_disable
+#include "command.h"    // DECL_COMMAND
+#include "sched.h"      // struct timer
+#include "trsync.h"     // trsync_do_trigger
 
-struct endstop {
+struct endstop
+{
     struct timer time;
     struct gpio_in pin;
     uint32_t rest_time, sample_time, nextwake;
@@ -19,33 +20,35 @@ struct endstop {
     uint8_t flags, sample_count, trigger_count, trigger_reason;
 };
 
-enum { ESF_PIN_HIGH=1<<0, ESF_HOMING=1<<1 };
+enum
+{
+    ESF_PIN_HIGH = 1 << 0,
+    ESF_HOMING = 1 << 1
+};
 
 static uint_fast8_t endstop_oversample_event(struct timer *t);
 
-extern uint8_t gpio_in_read_pre1(void);
+extern void calc_sample_freq(uint32_t);
+extern uint8_t aniso_adc_sample(int);
 extern uint8_t get_step_dir_z(void);
-static uint32_t count = 0;
 struct endstop *zendstop = NULL;
-#define GPIO(PORT, NUM) (((PORT)-'A') * 16 + (NUM))
-uint32_t ticks_info1 = 0;
-uint32_t ticks_info2 = 0;
-uint8_t gpio_in_read_pre(struct gpio_in g)
+#define GPIO(PORT, NUM) (((PORT) - 'A') * 16 + (NUM))
+
+uint8_t gpio_in_read_pre(struct gpio_in g, int state)
 {
-    uint8_t val= 0;
-    uint32_t ticks = 0;
+    uint8_t val = 0;
 #ifndef __linux__
-    if(g.bit == zendstop->pin.bit)  //z
+    if (g.bit == zendstop->pin.bit) // z
     {
-        val = gpio_in_read_pre1();
-        return val;
+        val = aniso_adc_sample(state);
     }
-    else   
-#endif    
+    else
+#endif
     {
         val = gpio_in_read(g);
-        return val;
     }
+
+    return val;
 }
 
 // Timer callback for an end stop
@@ -53,9 +56,10 @@ static uint_fast8_t
 endstop_event(struct timer *t)
 {
     struct endstop *e = container_of(t, struct endstop, time);
-    uint8_t val = gpio_in_read_pre(e->pin);
+    uint8_t val = gpio_in_read_pre(e->pin, 7);
     uint32_t nextwake = e->time.waketime + e->rest_time;
-    if ((val ? ~e->flags : e->flags) & ESF_PIN_HIGH) {
+    if ((val ? ~e->flags : e->flags) & ESF_PIN_HIGH)
+    {
         // No match - reschedule for the next attempt
         e->time.waketime = nextwake;
         return SF_RESCHEDULE;
@@ -70,8 +74,9 @@ static uint_fast8_t
 endstop_oversample_event(struct timer *t)
 {
     struct endstop *e = container_of(t, struct endstop, time);
-    uint8_t val = gpio_in_read_pre(e->pin);
-    if ((val ? ~e->flags : e->flags) & ESF_PIN_HIGH) {
+    uint8_t val = gpio_in_read_pre(e->pin, 7);
+    if ((val ? ~e->flags : e->flags) & ESF_PIN_HIGH)
+    {
         // No longer matching - reschedule for the next attempt
         e->time.func = endstop_event;
         e->time.waketime = e->nextwake;
@@ -79,8 +84,8 @@ endstop_oversample_event(struct timer *t)
         return SF_RESCHEDULE;
     }
     uint8_t count = e->trigger_count - 1;
-    count = 0;
-    if (!count) {
+    if (!count)
+    {
         trsync_do_trigger(e->ts, e->trigger_reason);
         return SF_DONE;
     }
@@ -89,32 +94,34 @@ endstop_oversample_event(struct timer *t)
     return SF_RESCHEDULE;
 }
 
-void
-command_config_endstop(uint32_t *args)
+void command_config_endstop(uint32_t *args)
 {
     struct endstop *e = oid_alloc(args[0], command_config_endstop, sizeof(*e));
     e->pin = gpio_in_setup(args[1], args[2]);
 
-    if(args[1] == GPIO('B', 5)) // A0 FOR Z EDNSTOP
+    if (args[1] == GPIO('B', 5)) // A0 FOR Z EDNSTOP
     {
         zendstop = e;
     }
 }
 DECL_COMMAND(command_config_endstop, "config_endstop oid=%c pin=%c pull_up=%c");
-extern void init_step_align(void);
+
 // Home an axis
-void
-command_endstop_home(uint32_t *args)
+void command_endstop_home(uint32_t *args)
 {
     struct endstop *e = oid_lookup(args[0], command_config_endstop);
     sched_del_timer(&e->time);
     e->time.waketime = args[1];
     e->sample_time = args[2];
     e->sample_count = args[3];
-    if (!e->sample_count) {
+    if (!e->sample_count)
+    {
         // Disable end stop checking
         e->ts = NULL;
         e->flags = 0;
+#ifndef __linux__
+        aniso_adc_sample(6);//stop state
+#endif
         return;
     }
     e->rest_time = args[4];
@@ -124,16 +131,16 @@ command_endstop_home(uint32_t *args)
     e->ts = trsync_oid_lookup(args[6]);
     e->trigger_reason = args[7];
     sched_add_timer(&e->time);
-#ifndef __linux__    
-    init_step_align();
-#endif    
+#ifndef __linux__
+    calc_sample_freq(e->rest_time);
+    aniso_adc_sample(1);//init state
+#endif
 }
 DECL_COMMAND(command_endstop_home,
              "endstop_home oid=%c clock=%u sample_ticks=%u sample_count=%c"
              " rest_ticks=%u pin_value=%c trsync_oid=%c trigger_reason=%c");
 
-void
-command_endstop_query_state(uint32_t *args)
+void command_endstop_query_state(uint32_t *args)
 {
     uint8_t oid = args[0];
     struct endstop *e = oid_lookup(oid, command_config_endstop);
@@ -143,7 +150,6 @@ command_endstop_query_state(uint32_t *args)
     uint32_t nextwake = e->nextwake;
     irq_enable();
 
-    sendf("endstop_state oid=%c homing=%c next_clock=%u pin_value=%c"
-          , oid, !!(eflags & ESF_HOMING), nextwake, gpio_in_read_pre(e->pin));
+    sendf("endstop_state oid=%c homing=%c next_clock=%u pin_value=%c", oid, !!(eflags & ESF_HOMING), nextwake, gpio_in_read_pre(e->pin, 0));
 }
 DECL_COMMAND(command_endstop_query_state, "endstop_query_state oid=%c");

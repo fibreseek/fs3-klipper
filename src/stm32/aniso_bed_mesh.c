@@ -1,418 +1,484 @@
-#include <string.h> // NULL
-#include "autoconf.h" // CONFIG_MACH_STM32F446
+// readme (20250911):
+// 1. 使用STM32H7的ADC3作为电压采集转换，理论精度12位，转换结果合法取值[0, 4095]
+// 2. gpio_adc_sample 手动开启一次转换，每次转换后需等待20us才覆盖采样结果
+//    暂时处理为提前一个周期触发转换，下一周期再通过gpio_adc_read读取数据
+//    导致问题：
+//    (1) 数据至少晚了一个周期
+//    (2) 读取频率理论上限 freq = (1s) / (20us)
+//    解决方案：
+//    (1) 开启连续转换，尝试过了，会导致mcu繁忙，与上位机通信超时
+//    (2) 连续转换+DMA，或单次转换+定时器，后续有嵌入式能力强的同事，可以尝试
+//*************************************************************************
+
+#include <string.h>           // memcpy memset
+#include "autoconf.h"         // CONFIG_MACH_STM32F446
 #include "board/armcm_boot.h" // armcm_enable_irq
-#include "board/io.h" // writel
-#include "board/usb_cdc.h" // usb_notify_ep0
+#include "board/io.h"         // writel
+#include "board/usb_cdc.h"    // usb_notify_ep0
 #include "board/usb_cdc_ep.h" // USB_CDC_EP_BULK_IN
-#include "command.h" // DECL_CONSTANT_STR
-#include "internal.h" // GPIO
-#include "sched.h" // DECL_INIT
+#include "board/misc.h"       // timer_read_time
+#include "command.h"          // DECL_CONSTANT_STR
+#include "internal.h"         // GPIO
+#include "sched.h"            // DECL_INIT
 #include "gpio.h"
 #include "debug/debug.h"
-/*! Returns the minimum value out of two values */
-#define MIN(x, y)                       ((x) < (y) ? (x) : (y))
+#include "aniso_ring_buffer.h" // aniso_ring_buffer_t
+#include "aniso_filter.h"      // aniso_kalman_filter_t
 
-/*! Returns the maximum value out of two values */
-#define MAX(x, y)                       ((x) > (y) ? (x) : (y))
-#define ABS(x) ((x) < 0 ? -(x) : (x))
-#define UABS_DIFF(a, b)  (( (a) > (b) ) ? ((a) - (b)) : ((b) - (a)))
-
-uint32_t adc_val;
-uint32_t adc_val_min;
-uint32_t adc_val_max;
-volatile uint32_t adc_val_min_t;
-volatile uint32_t adc_val_max_t;
-
-static uint8_t goid = 0;
-static uint8_t startb = 0;
-struct gpio_adc gPF;
-#define ADC_MAX_OFFSET  300
-#define ADC_MIN(a, b) ((a) > (b) ? ((a) - (b)) : (a))
-#define ADC_MAX(a, b) (((a) + (b)) > 4095 ? (a) : ((a) + (b)))
-#define ADC_MIN_TRIGGE  500 // 最小触发值
-#define ADC_MAX_TRIGGE  3600 // 最大触发值
-static uint32_t ticks = 0;
-
-static uint32_t adc_val_pre = {0};
-static uint32_t delta = 0;
-int32_t val_delta = 0;
-
-static uint32_t zmicrosteps = 8; // 默认微步数为8
-extern int32_t get_step_count_z(void);
 extern uint8_t get_step_dir_z(void);
-uint8_t gpio_in_read_pre1(void);
+extern int32_t get_step_count_z(void);
 
-#define MAX_PROBE_COUNT 5
-volatile uint32_t step_align = 0; // 用于补偿步进计数
-uint32_t step_align_array[MAX_PROBE_COUNT] = {0, 0, 0}; // 用于存储对齐步数
+#define PROBE_CNT_MAX 5       // 单点复探次数
+#define STEP_ALIGN_INIT 10000 // 初始值为10000，表示未计算对齐步数
+#define BUFFER_VALUE_CNT 200  // 采样缓存的容量
+#define ALIGN_VALUE_CNT 100   // 用于adc数据对齐的缓存元素数量
+#define ABS(x) ((x) < 0 ? -(x) : (x))
 
-uint8_t step_align_count = 0;
-volatile uint8_t align_flag = 0;
-#define STEP_ALIGN_INIT_VAL 10000 // 初始值为10000，表示未计算对齐步数
-
-static uint8_t adc_flag = 0;
-static uint8_t align_start_flag = 0; // 用于标记是否开始对齐
-static int32_t align_start_step = 0; // 用于记录对齐开始时的步进计数
-static int8_t trigge_count = 0; // 用于记录触发次数
-#define MAX_TRIGGE_COUNT 5 // 最大触发次数
-#define MAX_TRIGGE_NUM   5
-
-typedef struct {
-    uint32_t data[50];
-    uint8_t count;  // 当前已有数据个数（最大到20）
-} U8Buffer;
-
-U8Buffer my_buf = {0};
-
-
-struct adc_buff {
-    uint16_t adc_val; // ADC采样值
-    int32_t step; // 活动打印时间
-    uint8_t trigger;
+// 状态机状态定义
+enum aniso_state_machine_t
+{
+    ANISO_STATE_IDLE = 0,      // 待机阶段
+    ANISO_STATE_INIT = 1,      // 初始阶段
+    ANISO_STATE_START = 2,     // 起步阶段（step_start放在1阶段会报错）
+    ANISO_STATE_WAIT = 3,      // 等待阶段（0 ~ 1200 step)
+    ANISO_STATE_PREHEAT = 4,   // 预热阶段（1200 ~ 2400 step）
+    ANISO_STATE_SAMPLE = 5,    // 采样阶段 (2400+ step)
+    ANISO_STATE_STOP = 6,      // 停止阶段
+    ANISO_STATE_PLACEHOLD = 7, // 缺省占位（从当前阶段，按条件自动切换）
 };
-#define VALUE_COUNT 600
-#define ADC_ALIGN_COUNT 300 // 用于对齐的ADC数据数量
-struct adc_buff adc_data[VALUE_COUNT];
 
-void init_step_align(void)
+// 单次采样数据内容
+struct aniso_adc_data_t
 {
-    step_align = STEP_ALIGN_INIT_VAL;
-    memset(adc_data, 0, sizeof(adc_data));
-    align_start_flag = 1;
-    trigge_count = 0;
-    //memset(step_align_array,0,sizeof(step_align_array));
-    printf_("init_step_align\r\n");
-}
+    uint8_t trigger;  // 触发标志位
+    uint32_t adc_val; // adc采样值
+    int32_t step;     // 电机步数
+    uint32_t tick;    // 时间戳(下位机时钟)
+    float flt_val;    // adc滤波值
+};
 
-int32_t gen_step_align_data(void) 
+struct gpio_adc gPF;             // adc引脚通道
+struct aniso_kalman_filter_t kf; // 卡尔曼滤波器
+struct aniso_iir_filter_t bsf;   // 陷波(带阻)滤波器
+// struct aniso_iir_filter_t hpf;                             // 高通滤波器
+struct aniso_iir_filter_t lpf;                             // 低通滤波器
+uint32_t step_align_ar[PROBE_CNT_MAX];                     // step补偿缓存array
+struct aniso_ring_buffer_t step_align_rb;                  // step补偿缓存ring_buffer
+struct aniso_adc_data_t sample_datas_ar[BUFFER_VALUE_CNT]; // adc采样缓存array
+struct aniso_ring_buffer_t sample_datas_rb;                // adc采样缓存ring_buffer
+
+static float sample_freq = 1.0f;                                         // adc采样频率
+static uint8_t sample_mode_flag = 0;                                     // 0 adc采样+触发判断；1仅adc采样(调试用)
+static int32_t step_start = 0;                                           // 起始时刻的电机步进
+static uint32_t zmicrosteps = 8;                                         // 默认微步数为8
+static enum aniso_state_machine_t state_machine_flag = ANISO_STATE_IDLE; // 状态机标志
+
+volatile float adc_val_min; // adc触发的负向阈值
+volatile float adc_val_max; // adc触发的正向阈值
+volatile uint8_t step_align_flag = 0;
+volatile uint32_t step_align_now; // 本次电机步数补偿值
+
+const uint8_t log_flag = 0; // 采样数据上报标志位，1周期上报，0关闭上报
+
+void calc_sample_freq(uint32_t tick)
 {
-    // 限制输入最大为1023（10位）
-    int32_t res = 0;
-    
-    for (int i = 0; i < MAX_PROBE_COUNT; i++) {
-        res |= ((uint32_t)(step_align_array[i] & 0x3F)) << (i * 6);
+    // 参考自clocksync.py clock_to_print_time()
+    // sample_time = sample_tick/mcu_freq
+    // sample_freq = 1 / sample_time = mcu_freq / sample_tick
+    //  STM32H723主频400mhz，也即400000000hz
+    sample_freq = 400000000.0f / (float)tick;
     }
-    
-    return res;
-}
 
-
-void insert_at_front(int value) {
-    // 先将数组中已有的值往后移动
-    for (int i = MAX_PROBE_COUNT - 1; i > 0; i--) {
-        step_align_array[i] = step_align_array[i - 1];
-    }
-    // 将新值插入到第一个位置
-    step_align_array[0] = value;
-   //printf_("add:%d\r\n",step_align_count++);
-}
-
-uint32_t get_step_align(void)
-{
-    uint8_t count = 0;
-    uint16_t offset = 0;
-
-    if(step_align != STEP_ALIGN_INIT_VAL) 
+void step_align_rb_init(void)
+{ // 按当前的机制，上电后step_align_rb只能被初始化1次，多于1次会导致数据错误
+    static uint8_t step_inited = 0;
+    if (step_inited == 0)
     {
-        return step_align;
+        aniso_ring_buffer_init(&step_align_rb, step_align_ar, PROBE_CNT_MAX, sizeof(uint32_t));
+        step_inited = 1;
     }
+}
 
+uint32_t get_zmicrosteps_val(uint32_t step)
+{ // 正常情况下，zmicrosteps总是8的正整数倍，可以简化计算
+    // 位移量 = log2(zmicrosteps/8) = log2(zmicrosteps) - log2(8) = log2(zmicrosteps) - 3
+    uint32_t shift = __builtin_ctz(zmicrosteps) - 3;
+    return step << shift;
+}
 
-    if(adc_data[0].trigger != 1)
-    {
+uint32_t get_step_align_val(void)
+{
+    if (step_align_now != STEP_ALIGN_INIT)
+        return step_align_now;
+    // flag用作缓存元素数量
+    int16_t flag = aniso_ring_buffer_size(&sample_datas_rb);
+    if (flag == 0) // 缓存为空
         return 0;
-    }
-    
-    if(step_align == STEP_ALIGN_INIT_VAL) 
+
+    step_align_now = 0; // 先赋个初值，避免后续分类有遗漏
+    struct aniso_adc_data_t temp_data0, temp_data1, temp_data2;
+    aniso_ring_buffer_pick(&sample_datas_rb, 0, &temp_data0); // 提取最新缓存
+    if (temp_data0.trigger != 1)
+        return step_align_now;
+
+    flag = 0; // flag用作符号标志位，正向阈值触发取1，负向阈值触发取-1
+    if (temp_data0.flt_val > adc_val_max)
+        flag = 1;
+    else if (temp_data0.flt_val < adc_val_min)
+        flag = -1;
+
+    if (flag != 0) // 有触发
     {
-        //step_align
-        if(adc_data[0].adc_val > adc_val_max_t)
+        for (int16_t i = 5; i < BUFFER_VALUE_CNT - 1; i++) // 为了去抖，i从5开始
         {
-            for (int i = MAX_TRIGGE_NUM; i < VALUE_COUNT; i++)
+            aniso_ring_buffer_pick(&sample_datas_rb, i, &temp_data1);
+            aniso_ring_buffer_pick(&sample_datas_rb, i + 1, &temp_data2);
+
+            // 根据flag的值来判断比较方向
+            if ((flag == 1 && temp_data1.flt_val < temp_data2.flt_val) ||
+                (flag == -1 && temp_data1.flt_val > temp_data2.flt_val))
             {
-                if((adc_data[i].adc_val < adc_data[i+1].adc_val)/* && (adc_data[i].adc_val < adc_val_max_t)*/)
-                {
-                    step_align = adc_data[0].step - adc_data[i].step;
-                    insert_at_front(step_align);
-                    printf_("%d\r\n", i);
-                    break;
-                }
+                step_align_now = temp_data0.step - temp_data1.step;
+                // printf_("%d\r\n", i);
+                break;
             }
-        }
-        else if(adc_data[0].adc_val < adc_val_min_t)
-        {
-            for (int i = MAX_TRIGGE_NUM; i < VALUE_COUNT; i++)
-            {
-                if((adc_data[i].adc_val > adc_data[i+1].adc_val)/* && adc_data[i].adc_val > adc_val_min_t*/)
-                {
-                    step_align = adc_data[0].step - adc_data[i].step;
-                    insert_at_front(step_align);
-                    printf_("%d\r\n", i);
-                    break;
-                }
-            }
-        }
-        else
-        {
-            step_align = 0;
-            insert_at_front(step_align);
         }
     }
-    return step_align;
+
+    // 使用临时变量避免volatile限定符警告
+    uint32_t step_align_copy = step_align_now;
+    aniso_ring_buffer_push(&step_align_rb, &step_align_copy);
+    return step_align_now;
 }
 
-void insert_adc_data_to_group(struct adc_buff new_data) {
-    // 从后往前复制，避免数据覆盖
-    uint16_t max = 0;
-    uint16_t min = 4096;
+int32_t get_step_align_vals(void)
+{
+    int32_t res = 0;
+    uint32_t step = 0;
 
-    for (int i = VALUE_COUNT-1; i > 0; i--) {
-        adc_data[i] = adc_data[i - 1];
-    }
-    adc_data[0] = new_data;
-    for(int i = ADC_ALIGN_COUNT; i < VALUE_COUNT; i++)
+    // 从最新的数据开始，依次压缩5个步数对齐值
+    for (int16_t i = 0; i < PROBE_CNT_MAX; i++)
     {
-        if(adc_data[i].adc_val > max)
-        {
-            max = adc_data[i].adc_val;
-        }
-        if(adc_data[i].adc_val < min)
-        {
-            min = adc_data[i].adc_val;
-        }
+        aniso_ring_buffer_pick(&step_align_rb, i, &step);
+        // 每个值只保留低6位(0-63)，然后放到结果的相应位置
+        // 第0个值占位0-5位，第1个值占位6-11位，以此类推
+        res |= ((uint32_t)(step & 0x3F)) << (i * 6);
     }
-    adc_val_min_t = min;
-    adc_val_max_t = max;
+
+    return res;
 }
 
 void aniso_bed_mesh_cmd(uint32_t *args)
 {
-    //uint32_t delay;
-    uint32_t op;
-    uint32_t val;
-    uint16_t i=0;
-    uint16_t index = 0;
-    uint8_t res = 0;
-    //static uint8_t proportion = 0;
+    uint8_t goid = (uint8_t)args[0];
+    uint32_t op = args[1];
+    uint32_t val = args[2];
 
-    goid = args[0];
-    op = args[1];
-    val = args[2];
-
-    if(op == 2)   
+    switch (op) // 功能码
     {
-
-        // adc_val_min = 4095;
-        // adc_val_max = 0;
-        // adc_val_min_t = 4095;
-        // adc_val_max_t = 0;
-        // adc_val_pre = 0;
-        // delta = val;
+    case 2: // 设置adc通道参数
         gPF = gpio_adc_setup(val);
         sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, op, 0);
-    }
-    else if(op == 3)   
-    {
-        startb = 0;
-        zmicrosteps = val; // 更新微步数
+        break;
+
+    case 3: // 设置z轴电机细分数
+        zmicrosteps = (val > 256) ? 256 : ((val < 8) ? 8 : val);
         sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, op, 0);
-    }
-    else if(op == 4)   
-    {
-        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, 4, 30000+adc_val_min_t);
-        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, 4, 40000+adc_val_max_t);
+        break;
 
-        // while(i < 10 )
-        // { 
-        //     sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, 4, my_buf.data[i]);
-        //     i++;
-        // }
+    case 4: // 输出adc采样数据缓存
+        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, 4, 30000 + adc_val_min);
+        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, 4, 40000 + adc_val_max);
 
-        printf_("min=%d,max=%d\r\n", adc_val_min_t, adc_val_max_t);
-        if(val > 1)
-        {
-            val = 1;
+        printf_("min=%d, max=%d\r\n", adc_val_min, adc_val_max);
+
+        val = val > 3 ? 3 : val; // 取值合法性检查，val ∈ [0~3]，避免索引越界
+        struct aniso_adc_data_t temp_data;
+        for (int16_t i = 0, j = BUFFER_VALUE_CNT / 4, k; i < j; i++)
+        { // BUFFER_VALUE_CNT太大，一次性print会导致下位机通信超时，需要分批打印
+            k = i + val * j;
+            aniso_ring_buffer_pick(&sample_datas_rb, k, &temp_data);
+            printf_("%u,%d,%u,%u,%.3f\r\n", temp_data.adc_val, temp_data.step,
+                    temp_data.trigger, temp_data.tick, temp_data.flt_val);
         }
-        for(i=0;i<ADC_ALIGN_COUNT;i++)
-        {
-            index = i + val * ADC_ALIGN_COUNT;
-            printf_("%d\t%d\t%d\t\n", adc_data[index].adc_val, adc_data[index].step, adc_data[index].trigger);
-        }
-        
-    }
-    else if(op == 7)
-    {
-        //printf_("aniso_bed_mesh oid=%d op=%d val=%i\r\n", goid, 7, val);
-        memset(step_align_array,0,sizeof(step_align_array));
-        align_flag = val;
-        step_align_count = 0;
-        printf_("align_flag=%d\r\n", align_flag);
-    }   
-    else if(op == 8)
-    {
-        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, 8, gen_step_align_data());
-    }
+        break;
 
+    case 7: // 清除多次步数补偿值缓存
+        memset(step_align_ar, 0, sizeof(step_align_ar));
+        aniso_ring_buffer_init(&step_align_rb, step_align_ar, PROBE_CNT_MAX, sizeof(uint32_t));
+        step_align_flag = val;
+        // printf_("step_align_flag=%d\r\n", step_align_flag);
+        break;
 
-   
-	//sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, op, val);
-}
+    case 8: // 反馈多次步数补偿值
+        sendf("aniso_bed_mesh oid=%c op=%c val=%i", goid, 8, get_step_align_vals());
+        break;
 
-
-void u8buffer_push(uint32_t value)
-{
-    if(my_buf.count < 50) {
-        // 还没满，直接追加
-        my_buf.data[my_buf.count++] = value;
-    } else {
-        // 满了，所有数据前移一位
-        memmove(&my_buf.data[0], &my_buf.data[1], 50 - 1);
-        my_buf.data[50 - 1] = value;
+    case 9: // val=1，启用adc采样+周期上报的模式；val=0，启用adc采样+触发判断的模式
+        sample_mode_flag = val;
+        state_machine_flag = ANISO_STATE_IDLE;
+        break;
     }
 }
 
-uint32_t get_zmicrosteps_value(uint32_t step)
+// 触发判断 阈值法
+uint8_t get_trigger1(int32_t adc_val_delta)
 {
-    switch(zmicrosteps)
-    {
-        case 8:
-            return step;              // 8微步，相当于 step << 0
-        case 16:
-            return step << 1;         // 16微步，step * 2
-        case 32:
-            return step << 2;         // 32微步，step * 4
-        case 64:        
-            return step << 3;         // 64微步，step * 8
-        case 128:
-            return step << 4;         // 128微步，step * 16
-        case 256:   
-            return step << 5;         // 256微步，step * 32
-        default:
-            return step;              // fallback，避免意外情况
-    }
-}
+    struct aniso_adc_data_t temp_data;
+    aniso_ring_buffer_pick(&sample_datas_rb, 0, &temp_data);
 
-uint8_t gpio_in_read_pre1(void)
-{
-    uint16_t val = 0;
-    struct adc_buff adc_buff_data = {0};
-    int32_t step; // = get_step_count_z() - Z_STEP;
-    //int32_t delta_half = 0; // = get_step_count_z() - Z_STEP;
-    static uint8_t vib_count = 0;
-    static uint8_t vib_count1 = 0;
-
-
-    if(align_start_flag == 1)
-    {
-        align_start_flag = 0;
-        ticks = 0;
-
-        adc_val_pre = 0;
-        //if(adc_flag == 0)
-        {
-            adc_val_min_t = 4095;
-            adc_val_max_t = 0;
-        }
-        //printf_("1");
-        trigge_count = 0;
-        vib_count = 0;
-        vib_count1 = 0;
-        align_start_step = get_step_count_z();
+    if (temp_data.flt_val > adc_val_max + adc_val_delta ||
+        temp_data.flt_val < adc_val_min - adc_val_delta)
+        return 1;
+    else
         return 0;
-    }
-    
-    if(trigge_count > 1)
-    {
-        trigge_count --;
-        //printf_("2");
-        return 1; // 如果已经触发过，则直接返回s
-    }
-    else if(trigge_count == 1)
-    {
-        //printf_("3");
-        return 0;
+}
+
+// 触发判断 斜率法
+uint8_t get_trigger2(int32_t adc_val_delta)
+{
+    // 1.检测末尾3点是否有序递增或递减
+    struct aniso_adc_data_t temp_data1, temp_data2, temp_data3;
+    aniso_ring_buffer_pick(&sample_datas_rb, 0, &temp_data1);
+    aniso_ring_buffer_pick(&sample_datas_rb, 1, &temp_data2);
+    aniso_ring_buffer_pick(&sample_datas_rb, 2, &temp_data3);
+
+    uint8_t flag; // 单调性标志位
+    if (temp_data1.flt_val > temp_data2.flt_val && temp_data2.flt_val > temp_data3.flt_val)
+        flag = 1; // 单调递增
+    else if (temp_data1.flt_val < temp_data2.flt_val && temp_data2.flt_val < temp_data3.flt_val)
+        flag = 0; // 单调递减
+    else
+        return 0; // 非单调变化
+
+    // 2.检测末尾3点是否均大于或小于其它任意点
+    uint16_t i = 0;
+    float val_min = adc_val_min;
+    float val_max = adc_val_max;
+    for (i = 3; i < ALIGN_VALUE_CNT; i++)
+    {//此时temp_data2的含义另作他用
+        aniso_ring_buffer_pick(&sample_datas_rb, i, &temp_data2);
+        if (val_min > temp_data2.flt_val)
+            val_min = temp_data2.flt_val;
+        if (val_max < temp_data2.flt_val)
+            val_max = temp_data2.flt_val;
     }
 
-    if(gpio_adc_sample(gPF) == 0)
+    if (flag==1) // 单调递增
     {
-        val = gpio_adc_read(gPF);
-        step = get_step_count_z() - align_start_step;
-        if(ABS(step) <= get_zmicrosteps_value(1200))
-        {
+        if (temp_data3.flt_val < val_max) // 末尾三个点不都大于其他任意值
             return 0;
-        }
-        else if(ABS(step) > get_zmicrosteps_value(1200) && ABS(step) <get_zmicrosteps_value(2400))
-        {
-            //if(adc_flag == 0)
-            //{
-            adc_val_min_t = MIN(adc_val_min_t, val);
-            adc_val_max_t = MAX(adc_val_max_t, val);
-            //}
-            adc_buff_data.adc_val = val;
-            adc_buff_data.step = step;
-            adc_buff_data.trigger = 2;
-            insert_adc_data_to_group(adc_buff_data);
-            adc_val_pre = val;
+        val_max = temp_data1.flt_val;
+    }
+    else // 单调递减
+    {
+        if (temp_data3.flt_val > val_min) // 末尾三个点不都小于其他任意值
             return 0;
-        }
+        val_min = temp_data1.flt_val;
+    }
+
+    // 3.对数据进行归一化，方便处理
+    float val_range = val_max - val_min;
+    for (i = 1; i < ALIGN_VALUE_CNT; i++)
+    {
+        aniso_ring_buffer_pick(&sample_datas_rb, i, &temp_data2);
+        float norm_y; // tan角的对边归一化
+        if (flag==1)
+            norm_y = (temp_data1.flt_val - temp_data2.flt_val) / val_range;
         else
-        {
-            adc_flag = 1;
-            val_delta = (adc_val_max_t -adc_val_min_t)*30/100;
-            adc_buff_data.adc_val = val;
-            adc_buff_data.step = step;
-            adc_buff_data.trigger = 0;
-            insert_adc_data_to_group(adc_buff_data);
+            norm_y = (temp_data2.flt_val - temp_data1.flt_val) / val_range;
+        float norm_x = (float)i / (ALIGN_VALUE_CNT-1); // tan角的临边归一化
 
-            // if(align_flag == 0) //第一次归零
-            // {
-            //     val_delta = val_delta * 3;
-            //     if(val_delta < 200) // 确保val_delta至少为60
-            //     {
-            //         val_delta = 200;
-            //     }
-            // }
-            // if(val > ADC_MAX_TRIGGE || val < ADC_MIN_TRIGGE)
-            // {
-            //     adc_buff_data.trigger = 1;
-            //     insert_adc_data_to_group(adc_buff_data);
-            //     trigge_count = MAX_TRIGGE_COUNT;
-            //     return 1;
-            // }
-            //val_delta = MAX(val_delta, 60); // 确保val_delta至少为60
-            if(val > adc_val_max_t || val < adc_val_min_t)
-            {
-                if(vib_count < 3)
-                {
-                    vib_count++;
-                }
-                if(val > adc_val_max_t+val_delta||val < adc_val_min_t-val_delta)
-                {
-                    vib_count1++;              
-                }
-                if(vib_count1>=MAX_TRIGGE_NUM)
-                {
-                    adc_buff_data.trigger = 1;
-                    insert_adc_data_to_group(adc_buff_data);
-                    trigge_count = MAX_TRIGGE_COUNT;
-                    return 1;
-                }
-                return 0;
-            }
-            else
-            {
-                vib_count = 0;
-                vib_count1 = 0;
-            }
-        }
-    }     
-    return 0; 
+        // 4.比较各点针对最后1点的斜率是否超过45度
+        if (norm_y / norm_x < 0.8391f) // tan = 对边/临边，tan(45°)=1
+            return 0;
+    }
+
+    return 1;
 }
-void adc3_gpio_init(void)
+
+uint8_t aniso_adc_sample(int smf)
 {
-    gPF = gpio_adc_setup(0x59);
+    uint8_t res = 0; // 函数返回值赋初值
+    struct aniso_adc_data_t sample_data = {0};
+
+    // c语言不支持参数默认值，通过placehold来区分强制赋值和默认赋值
+    if (smf != ANISO_STATE_PLACEHOLD)
+        state_machine_flag = smf;
+
+    if (sample_mode_flag == 0)
+    {
+        switch (state_machine_flag)
+        {
+        // 初始化阶段：状态复位
+        case ANISO_STATE_INIT:
+            adc_val_min = 4095.0f;
+            adc_val_max = 0.0f;
+            // memset(step_align_ar, 0, sizeof(step_align_ar));
+            memset(sample_datas_ar, 0, sizeof(sample_datas_ar));
+            // aniso_ring_buffer_init(&step_align_rb, step_align_ar, PROBE_CNT_MAX, sizeof(uint32_t));
+            step_align_rb_init();
+            aniso_ring_buffer_init(&sample_datas_rb, sample_datas_ar, BUFFER_VALUE_CNT, sizeof(struct aniso_adc_data_t));
+            aniso_kalman_filter_init(&kf, 0.2f, 0.03f, 0.2f);
+            aniso_iir_filter_init(&bsf, ANISO_FILTER_BAND_STOP, 50.0f, 10.0f, sample_freq);
+            // aniso_iir_filter_init(&hpf, ANISO_FILTER_HIGH_PASS, 5.0f, 0.707f, sample_freq);
+            aniso_iir_filter_init(&lpf, ANISO_FILTER_LOW_PASS, 3000.0f, 0.707f, sample_freq);
+            gpio_adc_sample(gPF); // 提前启动adc采样转换
+            step_align_now = STEP_ALIGN_INIT;
+            state_machine_flag = ANISO_STATE_START;
+            break;
+
+        // 起步阶段：获取步数初始值
+        case ANISO_STATE_START:
+            step_start = get_step_count_z();
+            state_machine_flag = ANISO_STATE_WAIT;
+            break;
+
+        // 等待阶段：前1200步，认为不稳定
+        case ANISO_STATE_WAIT:
+            sample_data.step = get_step_count_z() - step_start;
+            if (ABS(sample_data.step) > get_zmicrosteps_val(1200))
+            {
+                sample_data.adc_val = gpio_adc_read(gPF); // 读取上一周期adc转换数据
+                gpio_adc_sample(gPF);                     // 启动下一周期adc采样转换
+                aniso_kalman_filter_preheat(&kf, (float)sample_data.adc_val);
+                aniso_iir_filter_preheat(&bsf, (float)sample_data.adc_val);
+                // aniso_iir_filter_preheat(&hpf, (float)sample_data.adc_val);
+                aniso_iir_filter_preheat(&lpf, (float)sample_data.adc_val);
+                state_machine_flag = ANISO_STATE_PREHEAT;
+            }
+            break;
+
+        // 预热阶段：1200~2400步，更新采样缓存，动态计算adc触发阈值，不判断触发标志
+        case ANISO_STATE_PREHEAT:
+            sample_data.tick = timer_read_time();
+            sample_data.step = get_step_count_z() - step_start;
+            sample_data.trigger = 0;
+            sample_data.adc_val = gpio_adc_read(gPF); // 读取上一周期adc转换数据
+            gpio_adc_sample(gPF);                     // 启动下一周期adc采样转换
+            // sample_data.flt_val = aniso_iir_filter_process(&hpf, (float)sample_data.adc_val);
+            sample_data.flt_val = aniso_iir_filter_process(&lpf, (float)sample_data.adc_val);
+            sample_data.flt_val = aniso_iir_filter_process(&bsf, sample_data.flt_val);
+            sample_data.flt_val = aniso_kalman_filter_process(&kf, sample_data.flt_val);
+            aniso_ring_buffer_push(&sample_datas_rb, &sample_data); // 更新采样缓存
+
+            if (ABS(sample_data.step) > get_zmicrosteps_val(2400))
+                state_machine_flag = ANISO_STATE_SAMPLE;
+
+            // 缓存达到需求容量后，取第ALIGN_VALUE_CNT个元素，与历史阈值比较并更新
+            if (aniso_ring_buffer_size(&sample_datas_rb) > ALIGN_VALUE_CNT)
+            {
+                aniso_ring_buffer_pick(&sample_datas_rb, ALIGN_VALUE_CNT, &sample_data);
+                if (sample_data.flt_val > adc_val_max)
+                    adc_val_max = sample_data.flt_val;
+                if (sample_data.flt_val < adc_val_min)
+                    adc_val_min = sample_data.flt_val;
+                aniso_ring_buffer_pick(&sample_datas_rb, 0, &sample_data); // 为了上报变更回最新数据~
+            }
+            break;
+
+        // 采样阶段：2400+步，更新采样缓存，动态计算adc触发阈值，判断触发标志
+        case ANISO_STATE_SAMPLE:
+            sample_data.tick = timer_read_time();
+            sample_data.step = get_step_count_z() - step_start;
+            sample_data.trigger = 0;
+            sample_data.adc_val = gpio_adc_read(gPF); // 读取上一周期adc转换数据
+            gpio_adc_sample(gPF);                     // 启动下一周期adc采样转换
+            // sample_data.flt_val = aniso_iir_filter_process(&hpf, (float)sample_data.adc_val);
+            sample_data.flt_val = aniso_iir_filter_process(&lpf, (float)sample_data.adc_val);
+            sample_data.flt_val = aniso_iir_filter_process(&bsf, sample_data.flt_val);
+            sample_data.flt_val = aniso_kalman_filter_process(&kf, sample_data.flt_val);
+            aniso_ring_buffer_push(&sample_datas_rb, &sample_data); // 更新采样缓存
+
+            int32_t adc_val_delta = (adc_val_max - adc_val_min) * 30 / 100;
+            // 缓存达到需求容量后，取第ALIGN_VALUE_CNT个元素，与历史阈值比较并更新
+            if (aniso_ring_buffer_size(&sample_datas_rb) > ALIGN_VALUE_CNT)
+            {
+                aniso_ring_buffer_pick(&sample_datas_rb, ALIGN_VALUE_CNT, &sample_data);
+                if (sample_data.flt_val > adc_val_max)
+                    adc_val_max = sample_data.flt_val;
+                if (sample_data.flt_val < adc_val_min)
+                    adc_val_min = sample_data.flt_val;
+                aniso_ring_buffer_pick(&sample_datas_rb, 0, &sample_data);
+            }
+
+            // --------触发标志判断--------
+            if (get_trigger2(adc_val_delta) == 1)
+            {
+                sample_data.trigger = 1;
+                aniso_ring_buffer_update(&sample_datas_rb, 0, &sample_data);
+                res = 1;
+            }
+            break;
+
+        // 停止阶段：更新停止状态
+        case ANISO_STATE_STOP:
+            sample_data.tick = timer_read_time();
+            sample_data.step = get_step_count_z() - step_start;
+            sample_data.trigger = 1;
+            sample_data.adc_val = gpio_adc_read(gPF); // 读取上一周期adc转换数据
+            // sample_data.flt_val = aniso_iir_filter_process(&hpf, (float)sample_data.adc_val);
+            sample_data.flt_val = aniso_iir_filter_process(&lpf, (float)sample_data.adc_val);
+            sample_data.flt_val = aniso_iir_filter_process(&bsf, sample_data.flt_val);
+            sample_data.flt_val = aniso_kalman_filter_process(&kf, sample_data.flt_val);
+            aniso_ring_buffer_push(&sample_datas_rb, &sample_data); // 更新采样缓存
+            aniso_kalman_filter_reset(&kf);
+            aniso_iir_filter_reset(&bsf);
+            // aniso_iir_filter_reset(&hpf);
+            aniso_iir_filter_reset(&lpf);
+            state_machine_flag = ANISO_STATE_IDLE;
+            break;
+
+        default:
+            break;
+        }
+    }
+    else
+    {
+        switch (state_machine_flag)
+        {
+        // 初始阶段
+        case ANISO_STATE_INIT:
+            sample_data.tick = timer_read_time();
+            sample_data.step = 0;
+            step_align_now = STEP_ALIGN_INIT;
+            state_machine_flag = ANISO_STATE_START;
+            break;
+
+        // 起步阶段
+        case ANISO_STATE_START:
+            sample_data.tick = timer_read_time();
+            sample_data.step = 0;
+            step_start = get_step_count_z();
+            gpio_adc_sample(gPF); // 启动下一周期adc采样转换
+            state_machine_flag = ANISO_STATE_SAMPLE;
+            break;
+
+        // 采样阶段
+        case ANISO_STATE_SAMPLE:
+            sample_data.tick = timer_read_time();
+            sample_data.step = get_step_count_z() - step_start;
+            sample_data.adc_val = gpio_adc_read(gPF); // 读取上一周期adc转换数据
+            gpio_adc_sample(gPF);                     // 启动下一周期adc采样转换
+            break;
+
+        // 停止阶段
+        case ANISO_STATE_STOP:
+            sample_data.tick = timer_read_time();
+            sample_data.step = get_step_count_z() - step_start;
+            sample_data.adc_val = gpio_adc_read(gPF); // 读取上一周期adc转换数据
+            state_machine_flag = ANISO_STATE_IDLE;
+
+        default:
+            break;
+        }
+    }
+
+    if (log_flag) // aniso_endstop_information上报
+        sendf("aei flag=%u tick=%u step=%i adc=%u flt=%i trg=%u",
+              state_machine_flag, sample_data.tick, sample_data.step, sample_data.adc_val, (int32_t)sample_data.flt_val, sample_data.trigger);
+
+    return res;
 }
 
-DECL_COMMAND(aniso_bed_mesh_cmd,"aniso_bed_mesh_cmd oid=%u op=%u val=%u");
-//DECL_TASK(bed_mesh_task);
-// DECL_INIT(adc3_gpio_init);
+DECL_COMMAND(aniso_bed_mesh_cmd, "aniso_bed_mesh_cmd oid=%u op=%u val=%u");

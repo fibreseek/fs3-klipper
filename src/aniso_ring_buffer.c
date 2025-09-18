@@ -20,7 +20,7 @@ void aniso_ring_buffer_push(struct aniso_ring_buffer_t *rb, const void *data)
         rb->count++;
 }
 
-// 从环形缓冲区获取数据（仅get，不pop）
+// 从环形缓冲区获取数据（仅pick，不pop）
 int8_t aniso_ring_buffer_pick(struct aniso_ring_buffer_t *rb, int16_t index, void *data)
 {
     if (index >= rb->count || index < 0)
@@ -35,9 +35,8 @@ int8_t aniso_ring_buffer_pick(struct aniso_ring_buffer_t *rb, int16_t index, voi
 int8_t aniso_ring_buffer_update(struct aniso_ring_buffer_t *rb, int16_t index, const void *data)
 {
     if (index >= rb->count || index < 0)
-    {
         return -1; // 索引超出范围
-    }
+    
     int actual_index = (rb->head - index + rb->capacity) % rb->capacity;
     memcpy((char *)rb->buffer + actual_index * rb->elem_size, data, rb->elem_size);
     return 0;

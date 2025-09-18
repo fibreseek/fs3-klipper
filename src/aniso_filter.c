@@ -26,7 +26,7 @@ void aniso_kalman_filter_init(struct aniso_kalman_filter_t *kf, float p, float q
     kf->x = 0.0f;
     kf->y = 0.0f;
 
-    kf->inited = 1;
+    kf->enable = 1;
 }
 
 /**
@@ -36,7 +36,7 @@ void aniso_kalman_filter_init(struct aniso_kalman_filter_t *kf, float p, float q
  */
 void aniso_kalman_filter_reset(struct aniso_kalman_filter_t *kf)
 {
-    if (kf == NULL || !kf->inited)
+    if (kf == NULL || !kf->enable)
         return;
 
     kf->p = 1.0f;
@@ -44,7 +44,7 @@ void aniso_kalman_filter_reset(struct aniso_kalman_filter_t *kf)
     kf->x = 0.0f;
     kf->y = 0.0f;
 
-    kf->inited = 0;
+    kf->enable = 0;
 }
 
 /**
@@ -55,7 +55,7 @@ void aniso_kalman_filter_reset(struct aniso_kalman_filter_t *kf)
  */
 void aniso_kalman_filter_preheat(struct aniso_kalman_filter_t *kf, float val)
 {
-    if (kf == NULL || !kf->inited)
+    if (kf == NULL || !kf->enable)
         return;
 
     kf->x = val;
@@ -71,7 +71,7 @@ void aniso_kalman_filter_preheat(struct aniso_kalman_filter_t *kf, float val)
  */
 float aniso_kalman_filter_process(struct aniso_kalman_filter_t *kf, float val)
 {
-    if (kf == NULL || !kf->inited)
+    if (kf == NULL || !kf->enable)
         return val;
 
     kf->x = val;
@@ -79,19 +79,13 @@ float aniso_kalman_filter_process(struct aniso_kalman_filter_t *kf, float val)
     kf->p += kf->q;
 
     // Prevent covariance from becoming negative or too large
-    if (kf->p < 0.0f)
-        kf->p = 0.0f;
-    else if (kf->p > 1e6f)
-        kf->p = 1e6f;
+    kf->p = (kf->p > 1e6f) ? 1e6f : ((kf->p < 0.0f) ? 0.0f : kf->p);
 
     // Calculate Kalman gain: Kalman gain = k-time prediction covariance / (k-time prediction covariance + observation noise covariance)
     kf->k = kf->p / (kf->p + kf->r);
 
     // Limit gain range to increase stability
-    if (kf->k < 0.0f)
-        kf->k = 0.0f;
-    else if (kf->k > 1.0f)
-        kf->k = 1.0f;
+    kf->k = (kf->k > 1.0f) ? 1.0f : ((kf->k < 0.0f) ? 0.0f : kf->k);
 
     // Update corrected value: k-time corrected value = k-1-time corrected value + Kalman gain * (k-time measured value - k-1-time corrected value)
     kf->y += kf->k * (kf->x - kf->y);
@@ -181,7 +175,7 @@ void aniso_iir_filter_coeff(struct aniso_iir_filter_t *iirf)
  * @param q Filter quality
  * @param sps Sampling frequency
  */
-void aniso_iir_filter_init(struct aniso_iir_filter_t *iirf, enum aniso_filter_mode_t mode, uint8_t enable, float freq, float q, float sps)
+void aniso_iir_filter_init(struct aniso_iir_filter_t *iirf, enum aniso_filter_mode_t mode, float freq, float q, float sps)
 {
     if (iirf == NULL)
         return;
@@ -197,13 +191,9 @@ void aniso_iir_filter_init(struct aniso_iir_filter_t *iirf, enum aniso_filter_mo
         freq = sps * 0.5f - 1.0f; // Leave some margin
 
     // Limit quality factor to reasonable range
-    if (q <= 0.0f)
-        q = 0.707f; // Default Butterworth response
-    if (q > 100.0f)
-        q = 100.0f;
+    q = (q > 100.0f) ? 100.0f : ((q <= 0.0f) ? 0.707f : q);
 
     iirf->mode = mode;
-    iirf->enable = enable;
     iirf->freq = freq;
     iirf->q = q;
     iirf->sps = sps;
@@ -215,7 +205,7 @@ void aniso_iir_filter_init(struct aniso_iir_filter_t *iirf, enum aniso_filter_mo
     iirf->x[0] = iirf->x[1] = iirf->x[2] = 0.0f;
     iirf->y[0] = iirf->y[1] = iirf->y[2] = 0.0f;
 
-    iirf->inited = 1;
+    iirf->enable = 1;
 }
 
 /**
@@ -225,14 +215,14 @@ void aniso_iir_filter_init(struct aniso_iir_filter_t *iirf, enum aniso_filter_mo
  */
 void aniso_iir_filter_reset(struct aniso_iir_filter_t *iirf)
 {
-    if (iirf == NULL || !iirf->inited)
+    if (iirf == NULL || !iirf->enable)
         return;
 
     // Clear history data
     iirf->x[0] = iirf->x[1] = iirf->x[2] = 0.0f;
     iirf->y[0] = iirf->y[1] = iirf->y[2] = 0.0f;
 
-    iirf->inited = 0;
+    iirf->enable = 0;
 }
 
 /**
@@ -243,7 +233,7 @@ void aniso_iir_filter_reset(struct aniso_iir_filter_t *iirf)
  */
 void aniso_iir_filter_preheat(struct aniso_iir_filter_t *iirf, float val)
 {
-    if (iirf == NULL || !iirf->inited)
+    if (iirf == NULL || !iirf->enable)
         return;
 
     iirf->x[0] = iirf->x[1] = iirf->x[2] = val;
@@ -260,7 +250,7 @@ void aniso_iir_filter_preheat(struct aniso_iir_filter_t *iirf, float val)
 float aniso_iir_filter_process(struct aniso_iir_filter_t *iirf, float val)
 {
     // Parameter check
-    if (iirf == NULL || !iirf->inited || !iirf->enable)
+    if (iirf == NULL || !iirf->enable)
         return val;
 
     // Update history data (circular shift)

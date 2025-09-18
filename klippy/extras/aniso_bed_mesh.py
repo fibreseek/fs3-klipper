@@ -52,7 +52,7 @@ class aniso_bed_mesh:
         status = self.printer.lookup_object('toolhead').get_status(curtime)['homed_axes']
         self.sendop = 0
         self.revop = 0
-        wait_count = 0;
+        wait_count = 0
         self.adc_trigger_val = gcmd.get_float('T', 0)
         if self.adc_trigger_val == 0:
             self.adc_trigger_val = self.adc_trigger
@@ -80,7 +80,7 @@ class aniso_bed_mesh:
             wait_count = wait_count + 1
             if self.revop == 2:
                 self.sendop = 3
-                break;
+                break
         wait_count = 0
 
         if self.sendop == 3:
@@ -92,7 +92,7 @@ class aniso_bed_mesh:
                 wait_count = wait_count + 1
                 if self.revop == 3:
                     self.sendop = 4
-                    break;
+                    break
             wait_count = 0
             if self.sendop == 4:    
                 self.gcode.run_script_from_command("G28.1 Z")

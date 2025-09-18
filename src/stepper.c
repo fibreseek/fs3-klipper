@@ -379,8 +379,8 @@ command_stepper_get_position(uint32_t *args)
     sendf("stepper_position oid=%c pos=%i", oid, position - POSITION_BIAS);
 }   
 DECL_COMMAND(command_stepper_get_position, "stepper_get_position oid=%c");
-extern uint32_t get_step_align(void);
-extern volatile uint8_t align_flag ;
+extern uint32_t get_step_align_val(void);
+extern volatile uint8_t step_align_flag ;
 // Stop all moves for a given stepper (caller must disable IRQs)
 static void
 stepper_stop(struct trsync_signal *tss, uint8_t reason)
@@ -389,13 +389,13 @@ stepper_stop(struct trsync_signal *tss, uint8_t reason)
     sched_del_timer(&s->time);
     s->next_step_time = s->time.waketime = 0;
 #ifndef __linux__    
-    if(gp_z == s && (align_flag == 1 || align_flag == 0))
+    if(gp_z == s && (step_align_flag == 1 || step_align_flag == 0))
     {
-        s->position = -stepper_get_position(s) - get_step_align();
+        s->position = -stepper_get_position(s) - get_step_align_val();
    }
    else
    {
-       get_step_align(); 
+       get_step_align_val(); 
        s->position = -stepper_get_position(s); 
    }
 #else    
