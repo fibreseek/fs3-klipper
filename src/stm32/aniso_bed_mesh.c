@@ -87,7 +87,7 @@ void calc_sample_freq(uint32_t tick)
     // sample_freq = 1 / sample_time = mcu_freq / sample_tick
     //  STM32H723主频400mhz，也即400000000hz
     sample_freq = 400000000.0f / (float)tick;
-    }
+}
 
 void step_align_rb_init(void)
 { // 按当前的机制，上电后step_align_rb只能被初始化1次，多于1次会导致数据错误
@@ -279,6 +279,7 @@ uint8_t get_trigger2(int32_t adc_val_delta)
 
     // 3.对数据进行归一化，方便处理
     float val_range = val_max - val_min;
+    uint16_t fail_cnt = 0;
     for (i = 1; i < ALIGN_VALUE_CNT; i++)
     {
         aniso_ring_buffer_pick(&sample_datas_rb, i, &temp_data2);
@@ -287,11 +288,15 @@ uint8_t get_trigger2(int32_t adc_val_delta)
             norm_y = (temp_data1.flt_val - temp_data2.flt_val) / val_range;
         else
             norm_y = (temp_data2.flt_val - temp_data1.flt_val) / val_range;
-        float norm_x = (float)i / (ALIGN_VALUE_CNT-1); // tan角的临边归一化
+        float norm_x = i / (ALIGN_VALUE_CNT-1); // tan角的临边归一化
 
         // 4.比较各点针对最后1点的斜率是否超过45度
-        if (norm_y / norm_x < 0.8391f) // tan = 对边/临边，tan(45°)=1
-            return 0;
+        if (norm_y / norm_x < 1.0f) // tan = 对边/临边，tan(45°)=1.0，tan(40°)=0.8391
+        {
+            fail_cnt++;
+            if(fail_cnt>=20) //有超过20个点斜率低于45°，就直接判定未触发
+              return 0;
+        }
     }
 
     return 1;
