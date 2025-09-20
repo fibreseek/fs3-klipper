@@ -26,42 +26,67 @@ def calc_probe_z_average(positions, method='average'):
     middle = len(positions) // 2
     if (len(positions) & 1) == 1:
         # odd number of samples
-        return z_sorted[middle]
+        return list(z_sorted[middle])
     # even number of samples
     return calc_probe_z_average(z_sorted[middle-1:middle+1], 'average')
-
-# 通过线性插值法，计算给定分位数的取值
-def calc_percentile(data, percentile):
-    # 计算位置索引
-    pos = (len(data) - 1) * percentile / 100
-    # 整数部分和小数部分
-    int_part = int(pos)
-    frac_part = pos - int_part
     
-    # 如果位置是整数，直接返回该位置的值
-    if frac_part == 0:
-        return data[int_part]
-    # 否则进行线性插值
-    lower = data[int_part]
-    upper = data[int_part + 1]
-    return lower + frac_part * (upper - lower)
-    
-# 通过iqr计算，祛除异常离散点，返回干净数据的平均值/中位值
-def calc_probe_z_clean(positions, coeff = 0.3, reseult = 'average'):
-    z_sorted = sorted([p[2] for p in positions]) #仅提取z轴数据，并对数据排序
-    q1 = calc_percentile(z_sorted, 25) #计算第1四分位数
-    q3 = calc_percentile(z_sorted, 75) #计算第3四分位数
-    iqr = q3 - q1
+# 根据iqr计算，祛除异常离散点，返回清洗数据组合
+def calc_probe_z_iqr(positions, coeff = 0.3):
+    # 仅提取z轴数据，并对数据排序
+    datas_z = sorted([p[2] for p in positions]) 
+    n = len(datas_z)
 
+    # 计算第1和第3四分位数
+    q1_pos = (n - 1) * 0.25
+    q1_int = int(q1_pos)
+    q1_frac = q1_pos - int(q1_pos)
+    q1 = datas_z[q1_int] + q1_frac * (datas_z[q1_int + 1] - datas_z[q1_int])
+
+    q3_pos = (n - 1) * 0.75
+    q3_int = int(q3_pos)
+    q3_frac = q3_pos - int(q3_pos)
+    q3 = datas_z[q3_int] + q3_frac * (datas_z[q3_int + 1] - datas_z[q3_int])
+    
     # 计算异常值边界
+    iqr = q3 - q1
     lower_bound = q1 - coeff * iqr
     upper_bound = q3 + coeff * iqr
 
-    # 获取边界范围内的干净数据
-    clean_positions = [p for p in positions if p[2] >= lower_bound and p[2] <= upper_bound]
+    # 返回清洗后数据
+    return [p for p in positions if lower_bound <= p[2] <= upper_bound]
+
+# 根据极差和方差/标准差，祛除异常离散点，返回清洗数据组合
+def calc_probe_z_range(positions, threshold=0.05):
+    datas = list(positions) # 转换为可修改的列表
+    datas_z = [data[2] for data in datas]
+    cnt = len(datas_z)
     
-    # 返回平均值坐标点
-    return calc_probe_z_average(clean_positions, reseult)
+    # 循环处理直到极差小于阈值或数组长度小于等于1
+    while cnt > 1:
+        spread = max(datas_z) - min(datas_z) #当前极差
+        if spread <= threshold: # 若极差小于阈值，停止处理
+            break
+        
+        idx = 0 #使集中度最好的数据索引
+        total = sum(datas_z) #总和
+        cr_min = float('inf') #最小集中度 concentration_rate
+
+        # 计算删除第i个元素后的统计信息
+        for i in range(cnt):
+            mean = (total - datas_z[i]) / (cnt - 1) #均值
+            sum_squares = sum(z*z for z in datas_z if z != datas_z[i])
+            variance = sum_squares / (cnt - 1) - mean * mean #方差
+            # std_dev = variance ** 0.5 #标准差
+            if cr_min > variance:
+                cr_min = variance
+                idx = i
+        
+        # 更新为当前集中度最好的组合
+        datas_z.pop(idx)
+        datas.pop(idx)
+        cnt -= 1
+    
+    return datas
 
 ######################################################################
 # Probe device implementation helpers
@@ -407,14 +432,12 @@ class ProbeSessionHelper:
 
         if sample_count != 5:
             raise gcmd.error("Probe samples must be 5 for anisoprint bed mesh")
-            return
-
+        
         while len(positions) < sample_count:
             # Probe position
             pos = self._probe(params['probe_speed'])
             positions.append(pos)
             # Check samples tolerance
-            z_positions = [p[2] for p in positions]
             if len(positions) < sample_count:
                 toolhead.manual_move(
                     probexy + [pos[2] + params['sample_retract_dist']],
@@ -444,30 +467,29 @@ class ProbeSessionHelper:
                 positions[2][2] += aniso_bed_mesh.align3 * align_vlaue
                 positions[3][2] += aniso_bed_mesh.align4 * align_vlaue
                 positions[4][2] += aniso_bed_mesh.align5 * align_vlaue
-                positions.sort(key=lambda p: p[2])
-                z_positions = [p[2] for p in positions]
-                if max(z_positions[1:-1])-min(z_positions[1:-1]) > params['samples_tolerance']:
-                    sample_cache.extend(positions) #缓存未通过的采样结果
-                    if retries >= params['samples_tolerance_retries']: #达到最大尝试次数
-                        # raise gcmd.error("Probe samples exceed samples_tolerance")
-                        epos = calc_probe_z_clean(sample_cache, params['samples_coeff'], params['samples_result']) #利用iqr滤除采样缓存中的异常结果，获取干净的z特征结果
-                        self.results.append(epos) #保存特征结果
-                        sample_cache = [] #清空缓存
-                        gcode.respond_info("Probe samples exceed samples_tolerance") #一般通知
-                        gcode.respond_info("probe res ave=%.6f" % (epos[2])) #显示结果
-                        return
-                    
-                    gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
-                    retries += 1
-                    positions = []
-                    toolhead.manual_move(
-                        probexy + [pos[2] + params['sample_retract_dist']],
-                        params['lift_speed'])  
 
-        sample_cache = [] #可通过极差校验时，及时清空缓存
-        epos = calc_probe_z_average(positions[1:-1], params['samples_result'])
-        gcode.respond_info("probe res %.6f,%.6f,%.6f,%.6f,%.6f ave=%.6f"
-                            % (z_positions[0], z_positions[1], z_positions[2],z_positions[3], z_positions[4], epos[2]))
+                result = calc_probe_z_range(positions, params['samples_tolerance'])
+                if len(result)>=2: #筛选结果不少于两组
+                    positions = result #更新为筛选后的坐标组合
+                    break
+
+                #筛选结果少于两组，波动大不稳定，需要重试
+                sample_cache.extend(positions) #缓存未通过的采样结果
+                if retries >= params['samples_tolerance_retries']: #达到最大尝试次数
+                    gcode.respond_info("Probe samples exceed samples_tolerance") #一般通知
+                    positions = calc_probe_z_iqr(sample_cache, params['samples_coeff'])
+                    break
+                
+                gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
+                retries += 1
+                positions = []
+                toolhead.manual_move(
+                    probexy + [pos[2] + params['sample_retract_dist']],
+                    params['lift_speed'])
+                    
+        epos = calc_probe_z_average(positions, params['samples_result'])
+        # 参与最终特征值计算的z_posistions，以及特征值z_eigen_value
+        gcode.respond_info(f"zpos=[{', '.join(f'{x[2]:.6f}' for x in positions)}], zev={epos[2]:.6f}")
         self.results.append(epos)
     def pull_probed_results(self):
         res = self.results
