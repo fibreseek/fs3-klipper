@@ -56,7 +56,7 @@ def calc_probe_z_iqr(positions, coeff = 0.3):
     return [p for p in positions if lower_bound <= p[2] <= upper_bound]
 
 # 根据极差和方差/标准差，祛除异常离散点，返回清洗数据组合
-def calc_probe_z_range(positions, threshold=0.05):
+def calc_probe_z_variance(positions, threshold=0.05):
     datas = list(positions) # 转换为可修改的列表
     datas_z = [data[2] for data in datas]
     cnt = len(datas_z)
@@ -68,13 +68,13 @@ def calc_probe_z_range(positions, threshold=0.05):
             break
         
         idx = 0 #使集中度最好的数据索引
-        total = sum(datas_z) #总和
         cr_min = float('inf') #最小集中度 concentration_rate
+        total = sum(datas_z) #计算总和用于均值计算
 
         # 计算删除第i个元素后的统计信息
         for i in range(cnt):
             mean = (total - datas_z[i]) / (cnt - 1) #均值
-            sum_squares = sum(z*z for z in datas_z if z != datas_z[i])
+            sum_squares = sum(z*z for z in datas_z if z != datas_z[i]) #平方和
             variance = sum_squares / (cnt - 1) - mean * mean #方差
             # std_dev = variance ** 0.5 #标准差
             if cr_min > variance:
@@ -82,9 +82,57 @@ def calc_probe_z_range(positions, threshold=0.05):
                 idx = i
         
         # 更新为当前集中度最好的组合
-        datas_z.pop(idx)
-        datas.pop(idx)
+        datas_z = datas_z[:idx] + datas_z[idx+1:]
+        datas = datas[:idx] + datas[idx+1:]
         cnt -= 1
+    
+    return datas
+
+# 根据极差和MAD，祛除异常离散点，返回清洗数据组合
+def calc_probe_z_mad(positions, threshold=0.05):
+    def calc_median(data):
+        n = len(data)
+        if n==0:
+            return 0
+        sorted_data = sorted(data)
+        mid = n // 2
+        if n % 2 == 0:
+            return (sorted_data[mid - 1] + sorted_data[mid]) / 2
+        else:
+            return sorted_data[mid]
+    
+    # 转换为可修改的列表
+    datas = list(positions)
+    datas_z = [data[2] for data in datas]
+    cnt = len(datas_z)
+    
+    # 循环处理直到极差小于阈值或数组长度小于等于1
+    while cnt > 1:
+        spread = max(datas_z) - min(datas_z) #当前极差
+        if spread <= threshold: # 若极差小于阈值，停止处理
+            break
+
+        # 计算删除最大值后的MAD
+        idx1 = datas_z.index(max(datas_z))
+        datas_z1 = datas_z[:idx1] + datas_z[idx1+1:]
+        median = calc_median(datas_z1)
+        mad1 = calc_median([abs(x - median) for x in datas_z1])
+
+        # 计算删除最小值后的MAD
+        idx2 = datas_z.index(min(datas_z))
+        datas_z2 = datas_z[:idx2] + datas_z[idx2+1:]
+        median = calc_median(datas_z2)
+        mad2 = calc_median([abs(x - median) for x in datas_z2])
+        
+        # 比较集中度，确定删除元素
+        if mad1 < mad2: # 删除最大值
+            datas_z = datas_z1
+            datas = datas[:idx1] + datas[idx1+1:]
+        else: # 删除最小值
+            datas_z = datas_z2
+            datas = datas[:idx2] + datas[idx2+1:]
+        
+        cnt -= 1 #每回合只删除一个元素
     
     return datas
 
@@ -99,6 +147,7 @@ class ProbeCommandHelper:
         self.probe = probe
         self.query_endstop = query_endstop
         self.name = config.get_name()
+        self.trigger_offset = 0.0
         gcode = self.printer.lookup_object('gcode')
         # QUERY_PROBE command
         self.last_state = False
@@ -127,7 +176,7 @@ class ProbeCommandHelper:
     def cmd_ANISO_PROBE_ADC_START(self, gcmd):
         logging.info("aniso_probe_adc_start")
         aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
-        aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 9, 1])#切换为adc采样+周期上报模式
+        aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 1, 1])#切换为adc采样+触发判断模式
 
         print_time = self.printer.lookup_object('toolhead').get_last_move_time()+0.01 #打印时间
         sample_time = 0.000015 # 摘抄自 homing.py，ENDSTOP_SAMPLE_TIME
@@ -145,10 +194,15 @@ class ProbeCommandHelper:
 
     def _move(self, coord, speed):
         self.printer.lookup_object('toolhead').manual_move(coord, speed)
+
+    def set_trigger_offset(self, offset):
+        self.trigger_offset = offset
+
     def get_status(self, eventtime):
         return {'name': self.name,
                 'last_query': self.last_state,
-                'last_z_result': self.last_z_result}
+                'last_z_result': self.last_z_result,
+                'trigger_offset': self.trigger_offset}
     cmd_QUERY_PROBE_help = "Return the status of the z-probe"
     def cmd_QUERY_PROBE(self, gcmd):
         if self.query_endstop is None:
@@ -423,15 +477,11 @@ class ProbeSessionHelper:
         params = self.get_probe_params(gcmd)
         toolhead = self.printer.lookup_object('toolhead')
         gcode = self.printer.lookup_object('gcode')
-        aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
         probexy = toolhead.get_position()[:2]
         retries = 0
         positions = []
         sample_count = params['samples']
         sample_cache = [] #采样结果历史缓存初始化
-
-        if sample_count != 5:
-            raise gcmd.error("Probe samples must be 5 for anisoprint bed mesh")
         
         while len(positions) < sample_count:
             # Probe position
@@ -443,32 +493,7 @@ class ProbeSessionHelper:
                     probexy + [pos[2] + params['sample_retract_dist']],
                     params['lift_speed'])
             else:
-                ## aniso add start
-                aniso_bed_mesh.refresh = 0
-                aniso_bed_mesh.align5 = 0
-                aniso_bed_mesh.align4 = 0
-                aniso_bed_mesh.align3 = 0
-                aniso_bed_mesh.align2 = 0
-                aniso_bed_mesh.align1 = 0
-                aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 8, 0])
-                waitcount = 0
-                while(waitcount < 10):
-                    time.sleep(0.3) 
-                    if aniso_bed_mesh.refresh == 1:   
-                        break
-                    waitcount += 1    
-                ## aniso add end
- 
-                z_microsteps = self.session_z.getfloat('microsteps')
-                align_vlaue = (0.00165*8)/ z_microsteps
-                
-                positions[0][2] += aniso_bed_mesh.align1 * align_vlaue
-                positions[1][2] += aniso_bed_mesh.align2 * align_vlaue
-                positions[2][2] += aniso_bed_mesh.align3 * align_vlaue
-                positions[3][2] += aniso_bed_mesh.align4 * align_vlaue
-                positions[4][2] += aniso_bed_mesh.align5 * align_vlaue
-
-                result = calc_probe_z_range(positions, params['samples_tolerance'])
+                result = calc_probe_z_mad(positions, params['samples_tolerance'])
                 if len(result)>=2: #筛选结果不少于两组
                     positions = result #更新为筛选后的坐标组合
                     break
@@ -568,8 +593,7 @@ class ProbePointsHelper:
         manual_probe.verify_no_manual_probe(self.printer)
         # Lookup objects
         probe = self.printer.lookup_object('probe', None)
-        gcode = self.printer.lookup_object('gcode')
-        aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
+        # gcode = self.printer.lookup_object('gcode')
         method = gcmd.get('METHOD', 'automatic').lower()
         def_move_z = self.default_horizontal_move_z
         self.horizontal_move_z = gcmd.get_float('HORIZONTAL_MOVE_Z',
@@ -590,7 +614,6 @@ class ProbePointsHelper:
         probe_session = probe.start_probe_session(gcmd)
         probe_num = 0
         #gcode.run_script_from_command("M530 L%d" % (len(self.probe_points),))
-        aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 7, 2])
         while 1:
             #gcode.run_script_from_command("M532 L%d" % (probe_num+1,))
             self._raise_tool(not probe_num)
@@ -716,6 +739,8 @@ class PrinterProbe:
         return self.cmd_helper.get_status(eventtime)
     def start_probe_session(self, gcmd):
         return self.probe_session.start_probe_session(gcmd)
+    def set_trigger_offset(self, offset):
+        self.cmd_helper.set_trigger_offset(offset)
 
 def load_config(config):
     return PrinterProbe(config)

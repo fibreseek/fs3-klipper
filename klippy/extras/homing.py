@@ -77,7 +77,7 @@ class HomingMove:
         # Notify start of homing/probing move
         self.printer.send_event("homing:homing_move_begin", self)
         aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
-        aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 9, 0])
+        aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 1, 0])#切换为仅adc采样模式
         # Note start location
         self.toolhead.flush_step_generation()
         kin = self.toolhead.get_kinematics()
@@ -91,7 +91,10 @@ class HomingMove:
         endstop_triggers = []
         for mcu_endstop, name in self.endstops:
             rest_time = self._calc_endstop_rate(mcu_endstop, movepos, speed)
-            # wait = mcu_endstop.home_start(print_time, ENDSTOP_SAMPLE_TIME,
+            if name=='z': #仅针对z轴，一定要在home_start之前发送
+                acc_time = speed / self.toolhead.get_kinematics().max_z_accel #加速段时长t=v/a
+                acc_cnt = math.ceil(acc_time/rest_time) #加速段对应的采样周期次数
+                aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 2, acc_cnt])
             wait = mcu_endstop.home_start(print_time, rest_time,
                                           ENDSTOP_SAMPLE_COUNT, rest_time,
                                           triggered=triggered)
@@ -152,6 +155,9 @@ class HomingMove:
                 error = str(e)
         if error is not None:
             raise self.printer.command_error(error)
+        # 更新停止与触发的z轴位置偏差
+        probe = self.printer.lookup_object('probe')
+        probe.set_trigger_offset(haltpos[2] - trigpos[2])
         return trigpos
     def check_no_movement(self):
         if self.printer.get_start_args().get('debuginput') is not None:
@@ -190,10 +196,6 @@ class Homing:
         self.toolhead.set_position(self._fill_coord(pos))
     def home_rails(self, rails, forcepos, movepos):
         # Notify of upcoming homing operation
-        # add for anisoprint bedmesh start
-        aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
-        aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 7, 0])
-        # add for anisoprint bedmesh end
         self.printer.send_event("homing:home_rails_begin", self, rails)
         # Alter kinematics class to think printer is at forcepos
         force_axes = [axis for axis in range(3) if forcepos[axis] is not None]
@@ -217,7 +219,6 @@ class Homing:
             retractpos = [hp - ad * retract_r
                           for hp, ad in zip(homepos, axes_d)]
             self.toolhead.move(retractpos, hi.retract_speed)
-            aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 7, 1])
             self.gcode.run_script_from_command("SET_TMC_FIELD STEPPER=stepper_y FIELD=drv_err VALUE=1")
             self.gcode.run_script_from_command("SET_TMC_FIELD STEPPER=stepper_x FIELD=drv_err VALUE=1")
             # Home again
@@ -230,47 +231,13 @@ class Homing:
                 raise self.printer.command_error(
                     "Endstop %s still triggered after retract"
                     % (hmove.check_no_movement(),))
-        '''
-        # 针对Z轴进行5次探测
-        is_z_homing = 2 in force_axes
-        z_positions = []
 
-        # Perform second home
-        if hi.retract_dist:
-            total_cycles = 4 if is_z_homing else 1
-            for cycle in range(total_cycles):
-                # Retract
-                startpos = self._fill_coord(forcepos)
-                homepos = self._fill_coord(movepos)
-                axes_d = [hp - sp for hp, sp in zip(homepos, startpos)]
-                move_d = math.sqrt(sum([d*d for d in axes_d[:3]]))
-                retract_r = min(1., hi.retract_dist / move_d)
-                retractpos = [hp - ad * retract_r
-                            for hp, ad in zip(homepos, axes_d)]
-                self.toolhead.move(retractpos, hi.retract_speed)
-                aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 7, 1])
-                self.gcode.run_script_from_command("G4 P2000")
-                # Home again
-                startpos = [rp - ad * retract_r
-                            for rp, ad in zip(retractpos, axes_d)]
-                self.toolhead.set_position(startpos)
-                hmove = HomingMove(self.printer, endstops)
-                ans = hmove.homing_move(homepos, hi.second_homing_speed)
-                if is_z_homing:
-                    z_positions.append(ans[2])
-                if hmove.check_no_movement() is not None:
-                    raise self.printer.command_error(
-                        "Endstop %s still triggered after retract"
-                        % (hmove.check_no_movement(),))
-        '''   
         # Signal home operation complete
         self.toolhead.flush_step_generation()
         self.trigger_mcu_pos = {sp.stepper_name: sp.trig_pos
                                 for sp in hmove.stepper_positions}
         self.adjust_pos = {}
         self.printer.send_event("homing:home_rails_end", self, rails)
-        # if is_z_homing:
-        #     logging.info("123 zpos %.6f %.6f %.6f %.6f", z_positions[0], z_positions[1], z_positions[2], z_positions[3])
         if any(self.adjust_pos.values()):
             # Apply any homing offsets
             kin = self.toolhead.get_kinematics()
@@ -327,19 +294,26 @@ class PrinterHoming:
         kin = self.printer.lookup_object('toolhead').get_kinematics()
         try:
             kin.home(homing_state)
-            # gcode = self.printer.lookup_object('gcode')
-            # gcode.run_script_from_command("GET_POSITION") #报告当前坐标（调试对比使用）
 
-            # # 如果有z轴回零，额外增加probe探点命令，利用探点结果校准z轴坐标
-            # if 2 in axes:
-            #     # gcode = self.printer.lookup_object('gcode')
-            #     gcode.run_script_from_command("G1 Z10 F600") #令Z轴回退安全裕量
-            #     gcode.run_script_from_command("G4 P500") #等待500ms，确保稳定
-            #     gcode.run_script_from_command("PROBE SAMPLES=5") #执行探点
-            #     status = self.printer.lookup_object('probe').cmd_helper.get_status(0) #获取探点结果
-            #     gcode.run_script_from_command("G92 Z%f" % (status['last_z_result'])) #校准Z轴坐标
-            #     gcode.run_script_from_command("G4 P500") #等待500ms，确保稳定
-            #     gcode.run_script_from_command("GET_POSITION") #报告当前坐标（调试对比使用）
+            # 存在z轴回零，额外增加probe命令，利用寻位结果校验z轴坐标
+            if 2 not in axes:
+                return
+            #TODO: probe命令的参数不应为固定值，应读取配置参数
+            gcode = self.printer.lookup_object('gcode')
+            gcode.run_script_from_command(
+                "G1 Z3 F600\n" #令Z轴回退安全裕量
+                "G4 P100\n" #等待100ms，确保稳定
+                "PROBE PROBE_SPEED=8 LIFT_SPEED=8 SAMPLES=6 SAMPLE_RETRACT_DIST=3 SAMPLES_TOLERANCE=0.03\n" #探点寻位
+                )
+            
+            status = self.printer.lookup_object('probe').get_status(0)
+            trigger_pos = status['last_z_result'] #获取触发坐标
+            trigger_offset = status['trigger_offset'] #获取位置偏差（停止-触发）
+
+            gcode.run_script_from_command(
+                f"G92 Z{trigger_pos + trigger_offset}\n" #重置Z轴停止坐标
+                "G4 P10\n" #等待10ms，确保稳定
+                )
                 
         except self.printer.command_error:
             if self.printer.is_shutdown():

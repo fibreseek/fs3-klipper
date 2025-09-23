@@ -307,8 +307,10 @@ class MCU_endstop:
         return self._dispatch.get_steppers()
     def _build_config(self):
         # Setup config
-        self._mcu.add_config_cmd("config_endstop oid=%d pin=%s pull_up=%d"
-                                 % (self._oid, self._pin, self._pullup))
+        # TODO:引脚是配置参数，有变动风险，根据引脚识别不够通用灵活
+        is_z = 1 if self._pin == 'PB5' else 0
+        self._mcu.add_config_cmd("config_endstop oid=%d pin=%s pull_up=%d is_z=%d"
+                                 % (self._oid, self._pin, self._pullup, is_z))
         self._mcu.add_config_cmd(
             "endstop_home oid=%d clock=0 sample_ticks=0 sample_count=0"
             " rest_ticks=0 pin_value=0 trsync_oid=0 trigger_reason=0"
@@ -323,22 +325,21 @@ class MCU_endstop:
             "endstop_query_state oid=%c",
             "endstop_state oid=%c homing=%c next_clock=%u pin_value=%c",
             oid=self._oid, cq=cmd_queue)
-        
         self._mcu.register_response(self._handle_boardcast, 'aei')#采样数据广播
         
     def _handle_boardcast(self, params):
         self._log_cnt +=1
         now_clock = self._mcu.clock32_to_clock64(params['tick']) #将下位机32位tick转为64位tick
         now_time = self._mcu.clock_to_print_time(now_clock) #将下位机64位tick转为上位机printtime
-        self._log_cache = f"{self._log_cache}{params['flag']},{now_time},{params['step']},{params['adc']},{params['flt']},{params['trg']}\n"
+        self._log_cache = f"{self._log_cache}{params['flag']},{now_time},{params['step']},{params['raw']},{params['flt']},{params['trg']}\n"
         if (self._log_flag) or (self._log_cnt == 20): #每缓存20次才输出1次log
             logging.info(self._log_cache.rstrip('\n'))
             self._log_cache = ''
             self._log_cnt = 0
 
     def sample_start(self, print_time, sample_time, sample_count, rest_time):
-        # 状态机标志位，打印时间，z电机步数，原始adc值，滤波adc值(取整)，触发标志位
-        logging.info("state,time,step,src,flt,trig")
+        # 状态机标志位，打印时间，z电机步数，原始adc值，滤波adc值，触发标志位
+        logging.info("state,time,step,raw,flt,trig")
         self._log_cache=''
         self._log_cnt = 0
         self._log_flag = False
@@ -374,10 +375,11 @@ class MCU_endstop:
         if self._mcu.is_fileoutput():
             return home_end_time
         params = self._query_cmd.send([self._oid])
+        self._log_flag = True
+        # logging.info(f"trigger_tick:{params['next_clock']}")
         next_clock = self._mcu.clock32_to_clock64(params['next_clock'])
         return self._mcu.clock_to_print_time(next_clock - self._rest_ticks)
     def query_endstop(self, print_time):
-        self._log_flag = True
         clock = self._mcu.print_time_to_clock(print_time)
         if self._mcu.is_fileoutput():
             return 0

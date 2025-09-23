@@ -97,7 +97,6 @@ src-$(CONFIG_HAVE_GPIO_HARD_PWM) += stm32/hard_pwm.c
 
 #aniso add start
 src-$(CONFIG_MACH_STM32H7) += stm32/xyz_align.c
-src-$(CONFIG_MACH_STM32H7) += stm32/aniso_bed_mesh.c
 src-$(CONFIG_MACH_STM32H7) += stm32/debug/debug.c
 src-$(CONFIG_MACH_STM32H7) += stm32/debug/printf.c
 #aniso add end
