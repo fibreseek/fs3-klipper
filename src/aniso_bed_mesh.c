@@ -402,6 +402,7 @@ void command_setup_aniso_bed_mesh(uint32_t *args)
 
     case 3: // 设置广播标志位
         log_flag = (uint8_t)args[2];
+        break;
     }
 }
 DECL_COMMAND(command_setup_aniso_bed_mesh, "setup_aniso_bed_mesh oid=%u op=%u val=%u");
