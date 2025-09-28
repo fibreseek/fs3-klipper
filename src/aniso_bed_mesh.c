@@ -28,7 +28,7 @@
 #include "aniso_bed_mesh.h"
 
 // 变量声明
-#define BUFFER_VALUE_CNT 30                           // 采样缓存的容量
+#define BUFFER_VALUE_CNT 50                           // 采样缓存的容量
 static uint8_t log_flag;                              // 0 数据上报关闭；1 数据上报开启
 static uint8_t sample_mode_flag = 0;                  // 0 adc采样+触发判断；1 adc采样(调试用)
 static uint32_t sample_cycle_acc;                     // 加速段采样周期次数
