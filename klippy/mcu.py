@@ -298,7 +298,6 @@ class MCU_endstop:
         
         self._log_cache = ''
         self._log_cnt = 0
-        self._log_flag = False
     def get_mcu(self):
         return self._mcu
     def add_stepper(self, stepper):
@@ -329,10 +328,12 @@ class MCU_endstop:
         
     def _handle_boardcast(self, params):
         self._log_cnt +=1
-        now_clock = self._mcu.clock32_to_clock64(params['tick']) #将下位机32位tick转为64位tick
-        now_time = self._mcu.clock_to_print_time(now_clock) #将下位机64位tick转为上位机printtime
-        self._log_cache = f"{self._log_cache}{params['flag']},{params['tick']},{params['step']},{params['raw']},{params['flt']},{params['trg']}\n"
-        if (self._log_flag) or (self._log_cnt == 20): #每缓存20次才输出1次log
+        # now_clock = self._mcu.clock32_to_clock64(params['tick']) #将下位机32位tick转为64位tick
+        # now_time = self._mcu.clock_to_print_time(now_clock) #将下位机64位tick转为上位机printtime
+        params['raw'] *= 0.001
+        params['flt'] *= 0.001
+        self._log_cache = f"{self._log_cache}{params['flag']},{params['tick']},{params['step']},{params['raw']:.3f},{params['flt']:.3f},{params['trg']}\n"
+        if self._log_cnt == 20 or params['flag']==0: #每缓存20次才输出1次log
             logging.info(self._log_cache.rstrip('\n'))
             self._log_cache = ''
             self._log_cnt = 0
@@ -342,17 +343,14 @@ class MCU_endstop:
         logging.info("state,time,step,raw,flt,trig")
         self._log_cache=''
         self._log_cnt = 0
-        self._log_flag = False
         self.home_start(print_time, sample_time, sample_count, rest_time)
 
     def sample_stop(self):
         self._home_cmd.send([self._oid, 0, 0, 0, 0, 0, 0, 0])
-        self._log_flag = True
         self._dispatch.stop()
 
     def home_start(self, print_time, sample_time, sample_count, rest_time,
                    triggered=True):
-        self._log_flag = False
         clock = self._mcu.print_time_to_clock(print_time)
         rest_ticks = self._mcu.print_time_to_clock(print_time+rest_time) - clock
         self._rest_ticks = rest_ticks
@@ -375,8 +373,6 @@ class MCU_endstop:
         if self._mcu.is_fileoutput():
             return home_end_time
         params = self._query_cmd.send([self._oid])
-        self._log_flag = True
-        # logging.info(f"trigger_tick:{params['next_clock']}")
         next_clock = self._mcu.clock32_to_clock64(params['next_clock'])
         return self._mcu.clock_to_print_time(next_clock - self._rest_ticks)
     def query_endstop(self, print_time):

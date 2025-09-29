@@ -114,8 +114,6 @@ class HomingMove:
         for mcu_endstop, name in self.endstops:
             try:
                 trigger_time = mcu_endstop.home_wait(move_end_print_time)
-                if name=='z':
-                    logging.info(f"_aniso_ trig at {trigger_time}")
             except self.printer.command_error as e:
                 if error is None:
                     error = "Error during homing %s: %s" % (name, str(e))
@@ -301,12 +299,13 @@ class PrinterHoming:
             # 存在z轴回零，额外增加probe命令，利用寻位结果校验z轴坐标
             if 2 not in axes:
                 return
-            #TODO: probe命令的参数不应为固定值，应读取配置参数
+
+            # z_homing_info = kin.rails[2].get_homing_info()
             gcode = self.printer.lookup_object('gcode')
             gcode.run_script_from_command(
                 "G1 Z3 F600\n" #令Z轴回退安全裕量
                 "G4 P100\n" #等待100ms，确保稳定
-                "PROBE PROBE_SPEED=8 LIFT_SPEED=8 SAMPLES=6 SAMPLE_RETRACT_DIST=3 SAMPLES_TOLERANCE=0.03\n" #探点寻位
+                "PROBE\n" #探点寻位
                 )
             
             status = self.printer.lookup_object('probe').get_status(0)
