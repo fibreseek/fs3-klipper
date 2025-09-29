@@ -22,7 +22,8 @@ extern int32_t get_step_count_x(void);
 extern int32_t get_step_count_z(void);
 #define PG11_VALUE (GPIOG->IDR & (1 << 11)) ? 1 : 0
 #define ABS(x) ((x) < 0 ? -(x) : (x))
-volatile uint8_t debounce = 0; // xiaodou
+volatile uint8_t debounce = 0; // Debounce counter for interrupt filtering
+#define DEBOUNCE_CYCLES 10  // Increase debounce time for better filtering
 
 void sort_array(int arr[], int n) {
     int i, j, temp;
@@ -83,27 +84,27 @@ void command_align_start(uint32_t *args)
 
         break;
 
-        case 2:
-            sendf("xyz_align_end oid=%c res=%c z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i", oid, 2, PG11_VALUE, 0, 0,0,0,0);
-        break;
+    case 2:
+        sendf("xyz_align_end oid=%c res=%c z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i", oid, 2, PG11_VALUE, 0, 0,0,0,0);
+    break;
 
-        case 3:
-            offset_index = 0;
-            printf_("z:%d, xy: %d %d %d %d %d\r\n",offset_z[0], offset_xy[0][0], offset_xy[0][1], offset_xy[0][2], offset_xy[0][3], offset_xy[0][4]);
-        break;
+    case 3:
+        offset_index = 0;
+        printf_("z:%d, xy: %d %d %d %d %d\r\n",offset_z[0], offset_xy[0][0], offset_xy[0][1], offset_xy[0][2], offset_xy[0][3], offset_xy[0][4]);
+    break;
 
-        case 4:
-            for(i = 0; i < 10; i++)
-            {
-                
-                for(j = 0; j < 5; j++)
-                {
-                    printf_("%d ", offset_xy[i][j]);
-                }
-                printf_("%d \r\n",offset_z[i]);
-            }
+    case 4:
+        for(i = 0; i < 10; i++)
+        {
             
-        break;
+            for(j = 0; j < 5; j++)
+            {
+                printf_("%d ", offset_xy[i][j]);
+            }
+            printf_("%d \r\n",offset_z[i]);
+        }
+        
+    break;
 
     }
 }    //sendf("uart_get_cmd oid=%c val=%c", oid, val);
@@ -117,11 +118,11 @@ void EXTI15_10_IRQHandler(void)
     {
         EXTI->PR1 = (1UL << 11);  // 清除挂起标志（写 1 清除）
 
-        if(debounce != 0)         //xiaodou
+        if(debounce != 0)         // Check debounce counter
         {
             return;
         }
-        debounce = 2;
+        debounce = DEBOUNCE_CYCLES;
 
         x = get_step_count_x();
         z = get_step_count_z();

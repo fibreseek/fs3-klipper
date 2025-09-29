@@ -21,7 +21,8 @@ class xyz_align:
         self.speed = config.getfloat('speed',3000)
         self.offset_z = 10
         self.z_value = 1
-        self.ini_path = "../printer_data/config/xyz_offset.ini"
+        # Use absolute path to avoid path resolution issues
+        self.ini_path = os.path.expanduser("~/printer_data/config/xyz_offset.ini")
         ppins = self.printer.lookup_object('pins')
         pin_params = ppins.lookup_pin(config.get('pin'))
         self.mcu = pin_params['chip']
@@ -34,23 +35,35 @@ class xyz_align:
         self.gcode.register_command('XYZ_ALIGN_INFO', self.cmd_XYZ_ALIGN_INFO, desc=self.cmd_XYZ_ALIGN_help)
         self.gcode.register_command('XYZ_ALIGN_T1', self.cmd_XYZ_ALIGN_T1, desc=self.cmd_XYZ_ALIGN_help)
         self.gcode.register_command('XYZ_ALIGN_T0', self.cmd_XYZ_ALIGN_T0, desc=self.cmd_XYZ_ALIGN_help)
-        self.gcode.register_command('XYZ_ALGIN_CLEAR', self.cmd_XYZ_ALIGN_TEST, desc=self.cmd_XYZ_ALIGN_help)
+        self.gcode.register_command('XYZ_ALIGN_CLEAR', self.cmd_XYZ_ALIGN_TEST, desc=self.cmd_XYZ_ALIGN_help)
         self.mcu.register_response(self.handle_align_end,"xyz_align_end", self.oid)
         self.printer.register_event_handler("klippy:ready", self.xyz_init_offset)
 
     def xyz_init_offset(self):
         config = configparser.ConfigParser()
-        config.read(self.ini_path)
         
-        if 't0_offset' in config:
-            self.t0_offset_x = config.getfloat('t0_offset', 'x_offset', fallback=self.t0_offset_x)
-            self.t0_offset_y = config.getfloat('t0_offset', 'y_offset', fallback=self.t0_offset_y)
-            #self.t0_offset_z = config.getfloat('t0_offset', 'z_offset', fallback=self.t0_offset_z)
-        
-        if 't1_offset' in config:
-            self.t1_offset_x = config.getfloat('t1_offset', 'x_offset', fallback=self.t1_offset_x)
-            self.t1_offset_y = config.getfloat('t1_offset', 'y_offset', fallback=self.t1_offset_y)
-            #self.t1_offset_z = config.getfloat('t1_offset', 'z_offset', fallback=self.t1_offset_z)
+        try:
+            if os.path.exists(self.ini_path):
+                config.read(self.ini_path)
+                
+                if 't0_offset' in config:
+                    self.t0_offset_x = config.getfloat('t0_offset', 'x_offset', fallback=self.t0_offset_x)
+                    self.t0_offset_y = config.getfloat('t0_offset', 'y_offset', fallback=self.t0_offset_y)
+                    #self.t0_offset_z = config.getfloat('t0_offset', 'z_offset', fallback=self.t0_offset_z)
+                
+                if 't1_offset' in config:
+                    self.t1_offset_x = config.getfloat('t1_offset', 'x_offset', fallback=self.t1_offset_x)
+                    self.t1_offset_y = config.getfloat('t1_offset', 'y_offset', fallback=self.t1_offset_y)
+                    #self.t1_offset_z = config.getfloat('t1_offset', 'z_offset', fallback=self.t1_offset_z)
+                
+                logging.info("Loaded xyz_offset.ini: T0(%.3f,%.3f) T1(%.3f,%.3f)" % 
+                           (self.t0_offset_x, self.t0_offset_y, self.t1_offset_x, self.t1_offset_y))
+            else:
+                logging.info("xyz_offset.ini file not found, using default values")
+                
+        except Exception as e:
+            logging.error("Failed to load xyz_offset.ini: %s" % str(e))
+            self.gcode.respond_info("Warning: Failed to load xyz_offset.ini, using default values")
 
         logging.info("init xyz_offset.ini file end")
 
@@ -75,29 +88,36 @@ class xyz_align:
         z_rotation_distance = self.session_z.getfloat('rotation_distance') 
         z_microsteps = self.session_z.getfloat('microsteps')
         config = configparser.ConfigParser()
+        
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(self.ini_path), exist_ok=True)
         config.read(self.ini_path)
 
-        if 't0_offset' not in config and 't1_offset' not in config:
+        # Always update the configuration (remove the restrictive condition)
+        if 't0_offset' not in config:
             config['t0_offset'] = {}
+        if 't1_offset' not in config:
             config['t1_offset'] = {}
-            self.t0_offset_x = self.t0_offset_x - (x0*x_rotation_distance/(x_microsteps*200))
-            self.t0_offset_y = self.t0_offset_y - (y0*x_rotation_distance/(x_microsteps*200))
-            self.t1_offset_x = self.t1_offset_x - (x1*x_rotation_distance/(x_microsteps*200))
-            self.t1_offset_y = self.t1_offset_y - (y1*x_rotation_distance/(x_microsteps*200))
+            
+        self.t0_offset_x = self.t0_offset_x - (x0*x_rotation_distance/(x_microsteps*200))
+        self.t0_offset_y = self.t0_offset_y - (y0*x_rotation_distance/(x_microsteps*200))
+        self.t1_offset_x = self.t1_offset_x - (x1*x_rotation_distance/(x_microsteps*200))
+        self.t1_offset_y = self.t1_offset_y - (y1*x_rotation_distance/(x_microsteps*200))
 
-            config['t0_offset']['x_offset'] = str(self.t0_offset_x)
-            config['t0_offset']['y_offset'] = str(self.t0_offset_y)
-            config['t0_offset']['z_offset'] = str(self.t0_offset_z)
-            config['t1_offset']['x_offset'] = str(self.t1_offset_x)
-            config['t1_offset']['y_offset'] = str(self.t1_offset_y)
-            config['t1_offset']['z_offset'] = str(self.t1_offset_z)
+        config['t0_offset']['x_offset'] = str(self.t0_offset_x)
+        config['t0_offset']['y_offset'] = str(self.t0_offset_y)
+        config['t0_offset']['z_offset'] = str(self.t0_offset_z)
+        config['t1_offset']['x_offset'] = str(self.t1_offset_x)
+        config['t1_offset']['y_offset'] = str(self.t1_offset_y)
+        config['t1_offset']['z_offset'] = str(self.t1_offset_z)
 
-            try:
-                with open(self.ini_path, 'w') as configfile:
-                    config.write(configfile)
-                self.gcode.respond_info("update xyz_offset.ini file success")
-            except Exception as e:
-                self.gcode.respond_info("update xyz_offset.ini file failed")
+        try:
+            with open(self.ini_path, 'w') as configfile:
+                config.write(configfile)
+            self.gcode.respond_info("update xyz_offset.ini file success")
+        except Exception as e:
+            self.gcode.respond_info("update xyz_offset.ini file failed: %s" % str(e))
+            logging.error("Failed to update xyz_offset.ini: %s" % str(e))
 
         # self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (x_offset))
         # self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (y_offset))
@@ -130,7 +150,9 @@ class xyz_align:
             self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (0-x_offset))
             self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (0-y_offset))
             self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=zoffset VALUE=%f" % (0-z_offset))
-            self.gcode.respond_info("handle_align_end: res = %d x0 = %f x1 = %f y0 = %f y1 = %f z0 = %d z1 = %d" % (res,x0,x1,y0,y1,z0,z1))
+            temp_xoffset = (x1*x_rotation_distance/(x_microsteps*200)) - (x0*x_rotation_distance/(x_microsteps*200))
+            temp_yoffset = (y1*x_rotation_distance/(x_microsteps*200)) - (y0*x_rotation_distance/(x_microsteps*200))
+            self.gcode.respond_info("handle_align_end: res = %d x0 = %f x1 = %f y0 = %f y1 = %f z0 = %d z1 = %d temp_xoffset = %f temp_yoffset = %f" % (res,x0,x1,y0,y1,z0,z1,temp_xoffset,temp_yoffset))
             
             
             self.xyz_update_offset(x0, y0, x1, y1)
