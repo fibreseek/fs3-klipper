@@ -1,6 +1,6 @@
 # Interface to Klipper micro-controller code
 #
-# Copyright (C) 2016-2024  Kevin O'Connor <kevin@koconnor.net>
+# Copyright (C) 2016-2025  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import sys, os, zlib, logging, math
@@ -331,7 +331,7 @@ class MCU_endstop:
         self._log_cnt +=1
         now_clock = self._mcu.clock32_to_clock64(params['tick']) #将下位机32位tick转为64位tick
         now_time = self._mcu.clock_to_print_time(now_clock) #将下位机64位tick转为上位机printtime
-        self._log_cache = f"{self._log_cache}{params['flag']},{now_time},{params['step']},{params['raw']},{params['flt']},{params['trg']}\n"
+        self._log_cache = f"{self._log_cache}{params['flag']},{params['tick']},{params['step']},{params['raw']},{params['flt']},{params['trg']}\n"
         if (self._log_flag) or (self._log_cnt == 20): #每缓存20次才输出1次log
             logging.info(self._log_cache.rstrip('\n'))
             self._log_cache = ''
@@ -578,6 +578,11 @@ class MCU_adc:
 ######################################################################
 # Main MCU class
 ######################################################################
+
+# Minimum time host needs to get scheduled events queued into mcu
+MIN_SCHEDULE_TIME = 0.100
+# Maximum time all MCUs can internally schedule into the future
+MAX_NOMINAL_DURATION = 3.0
 
 class MCU:
     error = error
@@ -902,6 +907,10 @@ class MCU:
         return int(time * self._mcu_freq)
     def get_max_stepper_error(self):
         return self._max_stepper_error
+    def min_schedule_time(self):
+        return MIN_SCHEDULE_TIME
+    def max_nominal_duration(self):
+        return MAX_NOMINAL_DURATION
     # Wrapper functions
     def get_printer(self):
         return self._printer

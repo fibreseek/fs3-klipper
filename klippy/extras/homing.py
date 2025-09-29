@@ -77,7 +77,7 @@ class HomingMove:
         # Notify start of homing/probing move
         self.printer.send_event("homing:homing_move_begin", self)
         aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
-        aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 1, 0])#切换为仅adc采样模式
+        aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 1, 0])#切换为adc采样+触发判断模式
         # Note start location
         self.toolhead.flush_step_generation()
         kin = self.toolhead.get_kinematics()
@@ -91,7 +91,8 @@ class HomingMove:
         endstop_triggers = []
         for mcu_endstop, name in self.endstops:
             rest_time = self._calc_endstop_rate(mcu_endstop, movepos, speed)
-            if name=='z': #仅针对z轴，一定要在home_start之前发送
+            logging.info(f"_aniso_ freq {1/rest_time:.3f}")
+            if name=='z': #仅针对z轴，一定要在home_start之前发送acc_cnt
                 acc_time = speed / self.toolhead.get_kinematics().max_z_accel #加速段时长t=v/a
                 acc_cnt = math.ceil(acc_time/rest_time) #加速段对应的采样周期次数
                 aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 2, acc_cnt])
@@ -113,6 +114,8 @@ class HomingMove:
         for mcu_endstop, name in self.endstops:
             try:
                 trigger_time = mcu_endstop.home_wait(move_end_print_time)
+                if name=='z':
+                    logging.info(f"_aniso_ trig at {trigger_time}")
             except self.printer.command_error as e:
                 if error is None:
                     error = "Error during homing %s: %s" % (name, str(e))

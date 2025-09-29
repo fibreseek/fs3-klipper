@@ -109,12 +109,16 @@ uint8_t get_trigger2(void)
     {
         if (temp_data3.flt_val < val_max) // 末尾三个点不都大于其他任意值
             return 0;
+        if (temp_data1.flt_val > 80.0f) // 超过绝对阈值，强制触发
+            return 1;
         val_max = temp_data1.flt_val;
     }
     else // 单调递减
     {
         if (temp_data3.flt_val > val_min) // 末尾三个点不都小于其他任意值
             return 0;
+        if (temp_data1.flt_val < -80.0f) // 超过绝对阈值，强制触发
+            return 1;
         val_min = temp_data1.flt_val;
     }
 
@@ -402,6 +406,7 @@ void command_setup_aniso_bed_mesh(uint32_t *args)
 
     case 3: // 设置广播标志位
         log_flag = (uint8_t)args[2];
+        break;
     }
 }
 DECL_COMMAND(command_setup_aniso_bed_mesh, "setup_aniso_bed_mesh oid=%u op=%u val=%u");
