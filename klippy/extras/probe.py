@@ -127,9 +127,19 @@ def calc_probe_z_mad(positions, threshold=0.05):
         if mad1 < mad2: # 删除最大值
             datas_z = datas_z1
             datas = datas[:idx1] + datas[idx1+1:]
-        else: # 删除最小值
+        elif mad1 > mad2: # 删除最小值
             datas_z = datas_z2
             datas = datas[:idx2] + datas[idx2+1:]
+        else: # mad相等，删除离中位数较远的最值
+            median = calc_median(datas_z)
+            mad1 = abs(datas_z[idx1] - median) # 最大值与中位数的距离
+            mad2 = abs(datas_z[idx2] - median) # 最小值与中位数的距离
+            if mad1 > mad2:
+                datas_z = datas_z1
+                datas = datas[:idx1] + datas[idx1+1:]
+            else:
+                datas_z = datas_z2
+                datas = datas[:idx2] + datas[idx2+1:]
         
         cnt -= 1 #每回合只删除一个元素
     
@@ -522,7 +532,7 @@ class ProbeSessionHelper:
                     params['lift_speed'])
             else:
                 result = calc_probe_z_mad(positions, params['samples_tolerance'])
-                if len(result)>=2: #筛选结果不少于两组
+                if len(result)>=2 or sample_count == 1: #筛选结果不少于两组
                     positions = result #更新为筛选后的坐标组合
                     break
 
@@ -542,7 +552,7 @@ class ProbeSessionHelper:
         # Calculate result
         epos = calc_probe_z_average(positions, params['samples_result'])
         # 参与最终特征值计算的z_posistions，以及特征值z_eigen_value
-        gcode.respond_info(f"zpos=[{', '.join(f'{x[2]:.6f}' for x in positions)}], zev={epos[2]:.6f}")
+        # gcode.respond_info(f"zpos=[{', '.join(f'{x[2]:.6f}' for x in positions)}], zev={epos[2]:.6f}")
         self.results.append(epos)
     def pull_probed_results(self):
         res = self.results

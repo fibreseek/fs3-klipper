@@ -131,7 +131,7 @@ void command_endstop_query_state(uint32_t *args)
     uint8_t val;
     if (e->is_z == 1)
     {
-        e->nextwake = get_critical2(); // 强制覆盖为临界接触时刻
+        e->nextwake = get_critical3(); // 强制覆盖为临界接触时刻
         val = aniso_adc_sample(ANISO_STATE_STOP);
     }
     else

@@ -28,7 +28,7 @@
 #include "aniso_bed_mesh.h"
 
 // 变量声明
-#define BUFFER_VALUE_CNT 100                           // 采样缓存的容量
+#define BUFFER_VALUE_CNT 100                          // 采样缓存的容量
 static uint8_t log_flag;                              // 0 数据上报关闭；1 数据上报开启
 static uint8_t sample_mode_flag = 0;                  // 0 adc采样+触发判断；1 adc采样(调试用)
 static uint32_t sample_cycle_acc;                     // 加速段采样周期次数
@@ -59,7 +59,7 @@ uint8_t get_trigger1(void)
 {
     struct aniso_adc_data_t temp_data;
     float val_max = 0.0f, val_min = 4095.0f;
-    for (int i = 1; i < BUFFER_VALUE_CNT; i++) // 确定当前缓存的最值（排除本周期最新数据）
+    for (int16_t i = 5; i < BUFFER_VALUE_CNT; i++) // 计算最值（缓存的一半旧数据）
     {
         aniso_ring_buffer_pick(&sample_datas_rb, i, &temp_data);
         if (val_max < temp_data.flt_val)
@@ -67,12 +67,11 @@ uint8_t get_trigger1(void)
         if (val_min > temp_data.flt_val)
             val_min = temp_data.flt_val;
     }
-
     float val_range = (val_max - val_min) * 0.3;
-    aniso_ring_buffer_pick(&sample_datas_rb, 0, &temp_data); // 本周期最新数据
 
-    if (temp_data.flt_val > val_max + val_range ||
-        temp_data.flt_val < val_min - val_range) // 超出动态阈值，才算本周期有触发
+    aniso_ring_buffer_pick(&sample_datas_rb, 0, &temp_data); // 本周期最新数据
+    if (temp_data.flt_val >= val_max + val_range ||
+        temp_data.flt_val <= val_min - val_range) // 超出动态阈值，才算本周期有触发
         return 1;
     return 0;
 }
@@ -125,8 +124,8 @@ uint8_t get_trigger2(void)
 
     // 3.对数据进行归一化，方便处理
     float val_range = val_max - val_min;
-    uint16_t fail_cnt = 0, fail_cnt_max = BUFFER_VALUE_CNT / 10; // 允许最多10%缓存点通不过斜率检查
-    for (i = BUFFER_VALUE_CNT - 1; i > 0; i--)                   // 数据越旧越不易通过斜率约束，可提高筛选效率
+    uint16_t fail_cnt_now = 0, fail_cnt_max = BUFFER_VALUE_CNT / 10; // 允许最多10%缓存点通不过斜率检查
+    for (i = BUFFER_VALUE_CNT - 1; i > 0; i--)                       // 数据越旧，斜率越小，倒序可提高筛选效率
     {
         aniso_ring_buffer_pick(&sample_datas_rb, i, &temp_data2);
         float norm_y; // tan角的对边归一化
@@ -139,8 +138,8 @@ uint8_t get_trigger2(void)
         // 4.比较各点针对最后1点的斜率是否超过45度
         if (norm_y / norm_x < 1.0f) // tan = 对边/临边，tan(45°)=1.0，tan(40°)=0.8391
         {
-            fail_cnt++;
-            if (fail_cnt >= fail_cnt_max) // 斜率不足的点数太多，就直接判定未触发
+            fail_cnt_now++;
+            if (fail_cnt_now >= fail_cnt_max) // 斜率不足的点数太多，就直接判定未触发
                 return 0;
         }
     }
@@ -254,7 +253,7 @@ uint32_t get_critical3(void)
     float k = (ye - ys) / (BUFFER_VALUE_CNT - 1);                               // 斜率k=(yend-ystart)/(xend-xstart)
     critical_tick = temp_data.tick;                                             // 默认返回最新时间戳
 
-    // 拐点检测 遍历找到偏差最大点
+    // 拐点检测 遍历找到纵向距离偏差最大点
     float err_max = 0.0f;
     for (int16_t i = 1; i < BUFFER_VALUE_CNT; i++) // 首尾两点偏差一定是0，不必遍历
     {
