@@ -64,6 +64,9 @@ class Heater:
         gcode.register_mux_command("SET_HEATER_TEMPERATURE", "HEATER",
                                    short_name, self.cmd_SET_HEATER_TEMPERATURE,
                                    desc=self.cmd_SET_HEATER_TEMPERATURE_help)
+        gcode.register_mux_command("SET_MIN_EXTRUDE_TEMP", "HEATER",
+                                   short_name, self.cmd_SET_MIN_EXTRUDE_TEMP,
+                                   desc=self.cmd_SET_MIN_EXTRUDE_TEMP_help)
         self.printer.register_event_handler("klippy:shutdown",
                                             self._handle_shutdown)
     def set_pwm(self, read_time, value):
@@ -102,6 +105,8 @@ class Heater:
         return self.max_power
     def get_smooth_time(self):
         return self.smooth_time
+    def get_min_extrude_temp(self):
+        return self.min_extrude_temp
     def set_temp(self, degrees):
         if degrees and (degrees < self.min_temp or degrees > self.max_temp):
             raise self.printer.command_error(
@@ -145,13 +150,28 @@ class Heater:
             target_temp = self.target_temp
             smoothed_temp = self.smoothed_temp
             last_pwm_value = self.last_pwm_value
+            min_extrude_temp = self.min_extrude_temp
+            can_extrude = self.can_extrude
         return {'temperature': round(smoothed_temp, 2), 'target': target_temp,
-                'power': last_pwm_value}
+                'power': last_pwm_value, 'min_extrude_temp': min_extrude_temp,
+                'can_extrude': can_extrude}
     cmd_SET_HEATER_TEMPERATURE_help = "Sets a heater temperature"
     def cmd_SET_HEATER_TEMPERATURE(self, gcmd):
         temp = gcmd.get_float('TARGET', 0.)
         pheaters = self.printer.lookup_object('heaters')
         pheaters.set_temperature(self, temp)
+    cmd_SET_MIN_EXTRUDE_TEMP_help = "Sets minimum extrude temperature"
+    def cmd_SET_MIN_EXTRUDE_TEMP(self, gcmd):
+        temp = gcmd.get_float('TEMP', self.min_extrude_temp)
+        if temp < self.min_temp or temp > self.max_temp:
+            raise gcmd.error(
+                "Min extrude temp (%.1f) out of range (%.1f:%.1f)"
+                % (temp, self.min_temp, self.max_temp))
+        with self.lock:
+            self.min_extrude_temp = temp
+            # Update can_extrude status based on current temperature
+            self.can_extrude = (self.smoothed_temp >= self.min_extrude_temp)
+        gcmd.respond_info("Min extrude temperature set to %.1f°C" % temp)
 
 
 ######################################################################
