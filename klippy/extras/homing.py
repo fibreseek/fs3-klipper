@@ -314,7 +314,7 @@ class PrinterHoming:
             trigger_offset = status['trigger_offset'] #获取位置偏差（停止-触发）
 
             gcode.run_script_from_command(
-                f"G92 Z{trigger_pos + trigger_offset}\n" #重置Z轴停止坐标
+                f"SET_KINEMATIC_POSITION Z={trigger_pos + trigger_offset}\n" #重置Z轴停止坐标
                 "G4 P10\n" #等待10ms，确保稳定
                 )
                 
