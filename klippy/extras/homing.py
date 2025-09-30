@@ -306,7 +306,7 @@ class PrinterHoming:
             gcode.run_script_from_command(
                 "G1 Z3 F600\n" #令Z轴回退安全裕量
                 "G4 P100\n" #等待100ms，确保稳定
-                "PROBE PROBE_SPEED=8 LIFT_SPEED=8 SAMPLES=6 SAMPLE_RETRACT_DIST=3 SAMPLES_TOLERANCE=0.03\n" #探点寻位
+                "PROBE\n" #探点寻位
                 )
             
             status = self.printer.lookup_object('probe').get_status(0)

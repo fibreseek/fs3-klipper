@@ -28,7 +28,7 @@
 #include "aniso_bed_mesh.h"
 
 // 变量声明
-#define BUFFER_VALUE_CNT 50                           // 采样缓存的容量
+#define BUFFER_VALUE_CNT 100                           // 采样缓存的容量
 static uint8_t log_flag;                              // 0 数据上报关闭；1 数据上报开启
 static uint8_t sample_mode_flag = 0;                  // 0 adc采样+触发判断；1 adc采样(调试用)
 static uint32_t sample_cycle_acc;                     // 加速段采样周期次数
@@ -109,7 +109,7 @@ uint8_t get_trigger2(void)
     {
         if (temp_data3.flt_val < val_max) // 末尾三个点不都大于其他任意值
             return 0;
-        if (temp_data1.flt_val > 80.0f) // 超过绝对阈值，强制触发
+        if (temp_data1.flt_val > 100.0f) // 超过绝对阈值，强制触发
             return 1;
         val_max = temp_data1.flt_val;
     }
@@ -117,7 +117,7 @@ uint8_t get_trigger2(void)
     {
         if (temp_data3.flt_val > val_min) // 末尾三个点不都小于其他任意值
             return 0;
-        if (temp_data1.flt_val < -80.0f) // 超过绝对阈值，强制触发
+        if (temp_data1.flt_val < -100.0f) // 超过绝对阈值，强制触发
             return 1;
         val_min = temp_data1.flt_val;
     }
