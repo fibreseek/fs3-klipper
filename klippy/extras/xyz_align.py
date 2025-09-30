@@ -11,11 +11,11 @@ class xyz_align:
         self.session_z = config.getsection('stepper_z')
         self.z_init_value = 10
         self.gcode = self.printer.lookup_object('gcode')
-        self.t0_offset_x = config.getfloat('t0_offset_x')
-        self.t0_offset_y = config.getfloat('t0_offset_y')
+        self.t0_offset_x = config.getint('t0_offset_x')
+        self.t0_offset_y = config.getint('t0_offset_y')
         self.t0_offset_z = self.z_init_value
-        self.t1_offset_x = config.getfloat('t1_offset_x')
-        self.t1_offset_y = config.getfloat('t1_offset_y')
+        self.t1_offset_x = config.getint('t1_offset_x')
+        self.t1_offset_y = config.getint('t1_offset_y')
         self.t1_offset_z = self.z_init_value
         self.move_offset = config.getfloat('move_offset')
         self.speed = config.getfloat('speed',3000)
@@ -47,13 +47,13 @@ class xyz_align:
                 config.read(self.ini_path)
                 
                 if 't0_offset' in config:
-                    self.t0_offset_x = config.getfloat('t0_offset', 'x_offset', fallback=self.t0_offset_x)
-                    self.t0_offset_y = config.getfloat('t0_offset', 'y_offset', fallback=self.t0_offset_y)
+                    self.t0_offset_x = config.getint('t0_offset', 'x_offset', fallback=int(self.t0_offset_x))
+                    self.t0_offset_y = config.getint('t0_offset', 'y_offset', fallback=int(self.t0_offset_y))
                     #self.t0_offset_z = config.getfloat('t0_offset', 'z_offset', fallback=self.t0_offset_z)
                 
                 if 't1_offset' in config:
-                    self.t1_offset_x = config.getfloat('t1_offset', 'x_offset', fallback=self.t1_offset_x)
-                    self.t1_offset_y = config.getfloat('t1_offset', 'y_offset', fallback=self.t1_offset_y)
+                    self.t1_offset_x = config.getint('t1_offset', 'x_offset', fallback=int(self.t1_offset_x))
+                    self.t1_offset_y = config.getint('t1_offset', 'y_offset', fallback=int(self.t1_offset_y))
                     #self.t1_offset_z = config.getfloat('t1_offset', 'z_offset', fallback=self.t1_offset_z)
                 
                 logging.info("Loaded xyz_offset.ini: T0(%.3f,%.3f) T1(%.3f,%.3f)" % 
@@ -98,11 +98,16 @@ class xyz_align:
             config['t0_offset'] = {}
         if 't1_offset' not in config:
             config['t1_offset'] = {}
-            
-        self.t0_offset_x = self.t0_offset_x - (x0*x_rotation_distance/(x_microsteps*200))
-        self.t0_offset_y = self.t0_offset_y - (y0*x_rotation_distance/(x_microsteps*200))
-        self.t1_offset_x = self.t1_offset_x - (x1*x_rotation_distance/(x_microsteps*200))
-        self.t1_offset_y = self.t1_offset_y - (y1*x_rotation_distance/(x_microsteps*200))
+        
+        temp_t0_offset_x = x0*x_rotation_distance/(x_microsteps*200)
+        temp_t0_offset_y = y0*x_rotation_distance/(x_microsteps*200)
+        temp_t1_offset_x = x1*x_rotation_distance/(x_microsteps*200)
+        temp_t1_offset_y = y1*x_rotation_distance/(x_microsteps*200)
+
+        self.t0_offset_x = self.t0_offset_x - int(temp_t0_offset_x)
+        self.t0_offset_y = self.t0_offset_y - int(temp_t0_offset_y)
+        self.t1_offset_x = self.t1_offset_x - int(temp_t1_offset_x)
+        self.t1_offset_y = self.t1_offset_y - int(temp_t1_offset_y)
 
         config['t0_offset']['x_offset'] = str(self.t0_offset_x)
         config['t0_offset']['y_offset'] = str(self.t0_offset_y)
@@ -202,7 +207,7 @@ class xyz_align:
                 # "G1 X100 Y100 F3000\n"
                 "G1 X%d Y%d F3000\n"
                 % (self.offset_z, self.t0_offset_x, self.t0_offset_y))
-            self.gcode.respond_info("cmd_XYZ_ALIGN: x = %f y = %f" % (self.t0_offset_x,self.t0_offset_y))    
+            self.gcode.respond_info("cmd_XYZ_ALIGN: tx0 = %d ty0 = %d; tx1 = %d ty1 = %d" % (self.t0_offset_x,self.t0_offset_y,self.t1_offset_x,self.t1_offset_y))    
             for i in range(5):
                 if(self.t0_offset_z == self.z_init_value):
                     self.get_z_press_val(0)  
