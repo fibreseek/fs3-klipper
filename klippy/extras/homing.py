@@ -91,7 +91,6 @@ class HomingMove:
         endstop_triggers = []
         for mcu_endstop, name in self.endstops:
             rest_time = self._calc_endstop_rate(mcu_endstop, movepos, speed)
-            # logging.info(f"_aniso_ freq {1/rest_time:.3f}")
             if name=='z' or name=='probe': #仅针对z轴，一定要在home_start之前发送
                 acc_dist = speed**2/2/self.toolhead.get_kinematics().max_z_accel #加速段位移 v^2=2as
                 acc_step = acc_dist / mcu_endstop.get_steppers()[0].get_step_dist() #加速段微步数
@@ -122,7 +121,6 @@ class HomingMove:
                 trigger_times[name] = trigger_time
             elif check_triggered and error is None:
                 error = "No trigger on %s after full movement" % (name,)
-                logging.info(f"_aniso_ no_trigger {trigger_time}")
                 if probe_pos: #若是PROBE命令，忽略报错，人为赋值一个异常结果
                     trigger_times[name] = 0
                     error = None              
