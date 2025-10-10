@@ -34,6 +34,7 @@ static uint8_t log_flag;                              // 0 数据上报关闭；
 static uint8_t sample_mode_flag = 0;                  // 0 adc采样+触发判断；1 adc采样(调试用)
 static int32_t sample_step_acc;                       // 加速段对应电机微步数
 static int32_t sample_step_start;                     // 起始电机微步数
+static uint32_t sample_cycle_now;                     // 当前采样周期次数
 static uint32_t critical_tick = 1;                    // 临界拐点的时间戳
 static enum aniso_state_machine_t state_machine_flag; // 状态机标志位
 static float sample_freq = 1.0f;                      // 采样频率
@@ -287,6 +288,7 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
         // 初始化阶段：状态复位
         case ANISO_STATE_INIT:
             sample_val_mean = 0.0f;
+            sample_cycle_now = 0;
             sample_step_start = get_step_count_z();
             critical_tick = 1;
             gpio_adc_sample(gPF); // 启动下一周期adc采样转换
@@ -304,6 +306,7 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
             sample_data.step = get_step_count_z() - sample_step_start;
             sample_data.raw_val = (float)gpio_adc_read(gPF); // 读取上一周期adc转换数据
             gpio_adc_sample(gPF);                            // 启动下一周期adc采样转换
+            sample_cycle_now++;
             sample_val_mean += (sample_data.raw_val - sample_val_mean) / sample_cycle_now; // 在线计算历史均值
             sample_data.raw_val -= sample_val_mean;                                        // 去除直流分量
             sample_data.flt_val = sample_data.raw_val;                                     // 数据预填充，避免下阶段起始无数据判断
