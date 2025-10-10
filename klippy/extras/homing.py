@@ -92,10 +92,10 @@ class HomingMove:
         for mcu_endstop, name in self.endstops:
             rest_time = self._calc_endstop_rate(mcu_endstop, movepos, speed)
             # logging.info(f"_aniso_ freq {1/rest_time:.3f}")
-            if name=='z': #仅针对z轴，一定要在home_start之前发送acc_cnt
-                acc_time = speed / self.toolhead.get_kinematics().max_z_accel #加速段时长t=v/a
-                acc_cnt = math.ceil(acc_time/rest_time) #加速段对应的采样周期次数
-                aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 2, acc_cnt])
+            if name=='z' or name=='probe': #仅针对z轴，一定要在home_start之前发送
+                acc_dist = speed**2/2/self.toolhead.get_kinematics().max_z_accel #加速段位移 v^2=2as
+                acc_step = acc_dist / mcu_endstop.get_steppers()[0].get_step_dist() #加速段微步数
+                aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 2, math.ceil(acc_step)])
             wait = mcu_endstop.home_start(print_time, rest_time,
                                           ENDSTOP_SAMPLE_COUNT, rest_time,
                                           triggered=triggered)

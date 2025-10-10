@@ -29,11 +29,12 @@
 
 // 变量声明
 #define BUFFER_VALUE_CNT 100                          // 采样缓存的容量
+#define CRITICAL_VALUE_CNT 30                         // 回溯临界拐点的容量
 static uint8_t log_flag;                              // 0 数据上报关闭；1 数据上报开启
 static uint8_t sample_mode_flag = 0;                  // 0 adc采样+触发判断；1 adc采样(调试用)
-static uint32_t sample_cycle_acc;                     // 加速段采样周期次数
-static uint32_t sample_cycle_now;                     // 当前采样周期次数
-static uint32_t critical_tick = 0;                    // 临界拐点的时间戳(调试用)
+static int32_t sample_step_acc;                       // 加速段对应电机微步数
+static int32_t sample_step_start;                     // 起始电机微步数
+static uint32_t critical_tick = 1;                    // 临界拐点的时间戳
 static enum aniso_state_machine_t state_machine_flag; // 状态机标志位
 static float sample_freq = 1.0f;                      // 采样频率
 static float sample_val_mean;                         // 采样均值
@@ -152,12 +153,12 @@ uint32_t get_critical1(void)
 {
     struct aniso_adc_data_t temp_data1, temp_data2;
     aniso_ring_buffer_pick(&sample_datas_rb, 0, &temp_data1);                    // 最新缓存数据
-    aniso_ring_buffer_pick(&sample_datas_rb, BUFFER_VALUE_CNT - 1, &temp_data2); // 最旧缓存数据
+    aniso_ring_buffer_pick(&sample_datas_rb, CRITICAL_VALUE_CNT - 1, &temp_data2); // 最旧缓存数据
 
     critical_tick = temp_data1.tick;
     uint8_t flag = (temp_data1.flt_val >= temp_data2.flt_val) ? 1 : 0; // 1整体趋势↑ 0整体趋势↓
 
-    for (int16_t i = 1; i < BUFFER_VALUE_CNT; i++)
+    for (int16_t i = 1; i < CRITICAL_VALUE_CNT; i++)
     {
         aniso_ring_buffer_pick(&sample_datas_rb, i, &temp_data2);
 
@@ -182,10 +183,10 @@ uint32_t get_critical2(void)
     int16_t i, j;
     struct aniso_adc_data_t temp_data1, temp_data2;
     aniso_ring_buffer_pick(&sample_datas_rb, 0, &temp_data1);                    // 最新缓存数据
-    aniso_ring_buffer_pick(&sample_datas_rb, BUFFER_VALUE_CNT - 1, &temp_data2); // 最旧缓存数据
+    aniso_ring_buffer_pick(&sample_datas_rb, CRITICAL_VALUE_CNT - 1, &temp_data2); // 最旧缓存数据
     if (temp_data1.flt_val < temp_data2.flt_val)                                 // 若整体趋势↓
     {
-        for (i = 0; i < BUFFER_VALUE_CNT; i++)
+        for (i = 0; i < CRITICAL_VALUE_CNT; i++)
         { // 翻转整体趋势
             aniso_ring_buffer_pick(&sample_datas_rb, i, &temp_data2);
             temp_data2.flt_val = -temp_data2.flt_val;
@@ -196,7 +197,7 @@ uint32_t get_critical2(void)
     // 2 数据归一化
     float val_max, val_min, val_range;
     val_max = val_min = temp_data1.flt_val;
-    for (i = 1; i < BUFFER_VALUE_CNT; i++)
+    for (i = 1; i < CRITICAL_VALUE_CNT; i++)
     {
         aniso_ring_buffer_pick(&sample_datas_rb, i, &temp_data2);
         if (val_min > temp_data2.flt_val)
@@ -206,25 +207,25 @@ uint32_t get_critical2(void)
     }
     val_range = val_max - val_min;
 
-    float norm_y[BUFFER_VALUE_CNT];
-    float norm_x[BUFFER_VALUE_CNT];
-    for (i = 0; i < BUFFER_VALUE_CNT; i++)
+    float norm_y[CRITICAL_VALUE_CNT];
+    float norm_x[CRITICAL_VALUE_CNT];
+    for (i = 0; i < CRITICAL_VALUE_CNT; i++)
     {
         aniso_ring_buffer_pick(&sample_datas_rb, i, &temp_data2);
         norm_y[i] = (temp_data2.flt_val - val_min) / val_range; // yi'=(yi-ymin)/(ymax-ymin)
-        norm_x[i] = (float)i / (BUFFER_VALUE_CNT - 1);          // xi'=(xi-xmin)/(xmax-xmin)
+        norm_x[i] = (float)i / (CRITICAL_VALUE_CNT - 1);        // xi'=(xi-xmin)/(xmax-xmin)
     }
 
     // 3 夹角计算
-    float delta_y = fabsf(norm_y[0] - norm_y[BUFFER_VALUE_CNT - 1]); // 对边长度（归一化）
-    float delta_x = fabsf(norm_x[0] - norm_x[BUFFER_VALUE_CNT - 1]); // 临边长度（归一化）
+    float delta_y = fabsf(norm_y[0] - norm_y[CRITICAL_VALUE_CNT - 1]); // 对边长度（归一化）
+    float delta_x = fabsf(norm_x[0] - norm_x[CRITICAL_VALUE_CNT - 1]); // 临边长度（归一化）
     float delta_l = sqrtf(delta_x * delta_x + delta_y * delta_y);    // 斜边长度（勾股定理）
     float sin_q = delta_y / delta_l;                                 // 首末点夹角sin
     float cos_q = delta_x / delta_l;                                 // 首末点夹角cos
 
     // 4 拐点检测
     val_min = norm_y[0];
-    for (j = 0, i = 1; i < BUFFER_VALUE_CNT; i++)
+    for (j = 0, i = 1; i < CRITICAL_VALUE_CNT; i++)
     { // 以首点(norm_x[0],norm_y[0])为旋转中心，其余点逆时针旋转q角
         float rotate_y = sin_q * (norm_x[i] - norm_x[0]) +
                          cos_q * (norm_y[i] - norm_y[0]) +
@@ -246,16 +247,16 @@ uint32_t get_critical2(void)
 uint32_t get_critical3(void)
 {
     struct aniso_adc_data_t temp_data;
-    aniso_ring_buffer_pick(&sample_datas_rb, BUFFER_VALUE_CNT - 1, &temp_data); // 最旧缓存数据
+    aniso_ring_buffer_pick(&sample_datas_rb, CRITICAL_VALUE_CNT - 1, &temp_data); // 最旧缓存数据
     float ye = temp_data.flt_val;                                               // y终止拟合值，对应x=end
     aniso_ring_buffer_pick(&sample_datas_rb, 0, &temp_data);                    // 最新缓存数据
     float ys = temp_data.flt_val;                                               // y起始拟合值，对应x=0
-    float k = (ye - ys) / (BUFFER_VALUE_CNT - 1);                               // 斜率k=(yend-ystart)/(xend-xstart)
+    float k = (ye - ys) / (CRITICAL_VALUE_CNT - 1);                             // 斜率k=(yend-ystart)/(xend-xstart)
     critical_tick = temp_data.tick;                                             // 默认返回最新时间戳
 
     // 拐点检测 遍历找到纵向距离偏差最大点
     float err_max = 0.0f;
-    for (int16_t i = 1; i < BUFFER_VALUE_CNT; i++) // 首尾两点偏差一定是0，不必遍历
+    for (int16_t i = 1; i < CRITICAL_VALUE_CNT; i++) // 首尾两点偏差一定是0，不必遍历
     {
         aniso_ring_buffer_pick(&sample_datas_rb, i, &temp_data);
         float yi = ys + i * k;                     // y期望
@@ -286,8 +287,8 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
         // 初始化阶段：状态复位
         case ANISO_STATE_INIT:
             sample_val_mean = 0.0f;
-            sample_cycle_now = 0;
-            critical_tick = 0;
+            sample_step_start = get_step_count_z();
+            critical_tick = 1;
             gpio_adc_sample(gPF); // 启动下一周期adc采样转换
             memset(sample_datas_ar, 0, sizeof(sample_datas_ar));
             aniso_ring_buffer_init(&sample_datas_rb, sample_datas_ar, BUFFER_VALUE_CNT, sizeof(struct aniso_adc_data_t));
@@ -300,25 +301,25 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
 
         // 预热阶段：对应寻位运动的加速段，计算直流分量（采样均值）
         case ANISO_STATE_PREHEAT:
-            // sample_data.step = get_step_count_z();
+            sample_data.step = get_step_count_z() - sample_step_start;
             sample_data.raw_val = (float)gpio_adc_read(gPF); // 读取上一周期adc转换数据
             gpio_adc_sample(gPF);                            // 启动下一周期adc采样转换
-            sample_cycle_now++;
             sample_val_mean += (sample_data.raw_val - sample_val_mean) / sample_cycle_now; // 在线计算历史均值
             sample_data.raw_val -= sample_val_mean;                                        // 去除直流分量
-            if (sample_cycle_now + BUFFER_VALUE_CNT >= sample_cycle_acc)
-            {
-                sample_data.flt_val = sample_data.raw_val;              // 数据预填充，避免下阶段起始无数据判断
-                aniso_ring_buffer_push(&sample_datas_rb, &sample_data); // 压入缓存
-                if (sample_cycle_now >= sample_cycle_acc)               // 加速段结束
+            sample_data.flt_val = sample_data.raw_val;                                     // 数据预填充，避免下阶段起始无数据判断
+            aniso_ring_buffer_push(&sample_datas_rb, &sample_data);                        // 压入缓存
+            if (abs(sample_data.step) >= sample_step_acc)
+                if (aniso_ring_buffer_size(&sample_datas_rb) >= BUFFER_VALUE_CNT)
+                {
+                    sample_step_acc = 0;
                     state_machine_flag = ANISO_STATE_SAMPLE;
-            }
+                }
             break;
 
         // 采样阶段：对应寻位运动的匀速段，判断触发标志
         case ANISO_STATE_SAMPLE:
             sample_data.tick = timer_read_time();
-            // sample_data.step = get_step_count_z();
+            // sample_data.step = get_step_count_z() - sample_step_start;
             sample_data.raw_val = gpio_adc_read(gPF) - sample_val_mean; // 读取上一周期adc转换数据（同时去除直流分量）
             gpio_adc_sample(gPF);                                       // 启动下一周期adc采样转换
             // sample_data.flt_val = aniso_iir_filter_process(&hpf, sample_data.raw_val);
@@ -402,8 +403,8 @@ void command_setup_aniso_bed_mesh(uint32_t *args)
         state_machine_flag = ANISO_STATE_IDLE;
         break;
 
-    case 2: // 获取寻位运动的加速段所需周期数
-        sample_cycle_acc = args[2] > BUFFER_VALUE_CNT ? args[2] : BUFFER_VALUE_CNT;
+    case 2: // 获取寻位运动的加速段对应的电机微步数
+        sample_step_acc = args[2];
         break;
 
     case 3: // 设置广播标志位
