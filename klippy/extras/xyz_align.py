@@ -171,12 +171,13 @@ class xyz_align:
             x_offset = (x1*x_rotation_distance/(x_microsteps*200)) - (x0*x_rotation_distance/(x_microsteps*200))+ self.t0_offset_x - self.t1_offset_x
             y_offset = (y1*x_rotation_distance/(x_microsteps*200)) - (y0*x_rotation_distance/(x_microsteps*200)) + self.t0_offset_y - self.t1_offset_y
             
-            self.gcode.run_script_from_command("M118 [NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=1 x_offset=%f y_offset=%f z_offset=%f"% (x_offset,y_offset,z_offset))
+            # self.gcode.run_script_from_command("M118 [NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=1 x_offset=%f y_offset=%f z_offset=%f"% (x_offset,y_offset,z_offset))
             self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (0-x_offset))
             self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (0-y_offset))
             self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=zoffset VALUE=%f" % (0-z_offset))
             temp_xoffset = (x1*x_rotation_distance/(x_microsteps*200)) - (x0*x_rotation_distance/(x_microsteps*200))
             temp_yoffset = (y1*x_rotation_distance/(x_microsteps*200)) - (y0*x_rotation_distance/(x_microsteps*200))
+            self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=1 x_offset=%f y_offset=%f z_offset=%f"% (x_offset,y_offset,z_offset))
             self.gcode.respond_info("handle_align_end: res = %d x0 = %f x1 = %f y0 = %f y1 = %f z0 = %d z1 = %d temp_xoffset = %f temp_yoffset = %f" % (res,x0,x1,y0,y1,z0,z1,temp_xoffset,temp_yoffset))
             
             
