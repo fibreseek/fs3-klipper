@@ -124,7 +124,7 @@ class xyz_align:
         self.t1_offset_x = self.t1_offset_x - temp_t1_offset_x
         self.t1_offset_y = self.t1_offset_y - temp_t1_offset_y
         # If t0_offset_y + move_offset exceeds Y max travel, reset t0_offset_y
-        y_max_travel = self.session_y.getfloat('position_max', fallback=None)
+        y_max_travel = self.session_y.getfloat('position_max')
         if y_max_travel is not None and self.t0_offset_y + self.move_offset > y_max_travel:
             self.t0_offset_y = self.default_t0_offset_y
         # If t1_offset_y + move_offset exceeds Y max travel, reset t1_offset_y
