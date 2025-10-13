@@ -532,11 +532,11 @@ class ProbeSessionHelper:
                     params['lift_speed'])
             else:
                 result = calc_probe_z_mad(positions, params['samples_tolerance'])
-                if len(result)>=2 or sample_count == 1: #筛选结果不少于两组
+                if len(result)>= -(-sample_count//2): #筛选结果不得少于样本半数
                     positions = result #更新为筛选后的坐标组合
                     break
 
-                #筛选结果少于两组，波动大不稳定，需要重试
+                #筛选结果少于半数，波动大不稳定，需要重试
                 sample_cache.extend(positions) #缓存未通过的采样结果
                 if retries >= params['samples_tolerance_retries']: #达到最大尝试次数
                     gcode.respond_info("Probe samples exceed samples_tolerance") #一般通知
