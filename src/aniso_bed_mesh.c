@@ -124,7 +124,7 @@ uint8_t get_trigger2(void)
 
     // 3.对数据进行归一化，方便处理
     float val_range = val_max - val_min;
-    uint16_t fail_cnt_now = 0, fail_cnt_max = BUFFER_VALUE_CNT / 10; // 允许最多10%缓存点通不过斜率检查
+    uint16_t fail_cnt_now = 0, fail_cnt_max = BUFFER_VALUE_CNT / 5; // 允许最多20%缓存点通不过斜率检查
     for (i = BUFFER_VALUE_CNT - 1; i > 0; i--)                       // 数据越旧，斜率越小，倒序可提高筛选效率
     {
         aniso_ring_buffer_pick(&sample_datas_rb, i, &temp_data2);

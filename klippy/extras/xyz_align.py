@@ -27,6 +27,7 @@ class xyz_align:
         self.offset_z = 10.0
         self.z_value = 1.0
         self.y_max_travel = self.session_y.getfloat('position_max', 337.0)
+        self.x_min_travel = self.session_x.getfloat('position_min', -52.0)
         # Use absolute path to avoid path resolution issues
         self.ini_path = os.path.expanduser("~/printer_data/config/xyz_offset.ini")
         ppins = self.printer.lookup_object('pins')
@@ -58,6 +59,8 @@ class xyz_align:
                     # If t0_offset_y + move_offset exceeds Y max travel, reset t0_offset_y
                     if self.t0_offset_y + self.move_offset > self.y_max_travel:
                         self.t0_offset_y = self.default_t0_offset_y
+                    if self.t0_offset_x < self.x_min_travel:
+                        self.t0_offset_x = self.default_t0_offset_x
 
                 if 't1_offset' in config:
                     self.t1_offset_x = config.getfloat('t1_offset', 'x_offset')
@@ -65,6 +68,8 @@ class xyz_align:
                     # If t1_offset_y + move_offset exceeds Y max travel, reset t1_offset_y
                     if self.t1_offset_y + self.move_offset > self.y_max_travel:
                         self.t1_offset_y = self.default_t1_offset_y
+                    if self.t1_offset_x < self.x_min_travel:
+                        self.t1_offset_x = self.default_t1_offset_x
                 
                 logging.info("Loaded xyz_offset.ini value: T0(%.3f,%.3f) T1(%.3f,%.3f)" % 
                            (self.t0_offset_x, self.t0_offset_y, self.t1_offset_x, self.t1_offset_y))
@@ -125,9 +130,17 @@ class xyz_align:
         # If t0_offset_y + move_offset exceeds Y max travel, reset t0_offset_y
         if self.t0_offset_y + self.move_offset > self.y_max_travel:
             self.t0_offset_y = self.default_t0_offset_y
+        # If t0_offset_x < X min travel, reset t0_offset_x
+        if self.t0_offset_x < self.x_min_travel:
+            self.t0_offset_x = self.default_t0_offset_x
         # If t1_offset_y + move_offset exceeds Y max travel, reset t1_offset_y
         if self.t1_offset_y + self.move_offset > self.y_max_travel:
             self.t1_offset_y = self.default_t1_offset_y
+        # If t1_offset_x < X min travel, reset t1_offset_x
+        if self.t1_offset_x < self.x_min_travel:
+            self.t1_offset_x = self.default_t1_offset_x
+
+         # Write updated offsets to the configuration file
 
         config['t0_offset']['x_offset'] = str(self.t0_offset_x)
         config['t0_offset']['y_offset'] = str(self.t0_offset_y)
