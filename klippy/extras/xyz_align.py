@@ -190,7 +190,7 @@ class xyz_align:
             self.z_value = params['z0']
             self.gcode.respond_info("handle_align_end: z = %d" % (self.z_value))
         else:
-            self.gcode.run_script_from_command("M118 [NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=0 count=%d" % (res))
+            self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=0 count=%d" % (res))
 
 
     def cmd_XYZ_ALIGN_TEST(self, gcmd):

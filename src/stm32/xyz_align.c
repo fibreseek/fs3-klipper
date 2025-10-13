@@ -90,7 +90,7 @@ void command_align_start(uint32_t *args)
 
     case 3:
         offset_index = 0;
-        printf_("z:%d, xy: %d %d %d %d %d\r\n",offset_z[0], offset_xy[0][0], offset_xy[0][1], offset_xy[0][2], offset_xy[0][3], offset_xy[0][4]);
+        printf_("z:%d, xy: %d %d %d %d %d\r\n",offset_z[0], offset_xy[0][0], offset_xy[1][0], offset_xy[2][0], offset_xy[3][0], offset_xy[4][0]);
     break;
 
     case 4:
