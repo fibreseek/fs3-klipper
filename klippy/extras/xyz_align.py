@@ -18,7 +18,8 @@ class xyz_align:
         self.t1_offset_x = config.getfloat('t1_offset_x')
         self.t1_offset_y = config.getfloat('t1_offset_y')
         self.t1_offset_z = self.z_init_value
-        self.move_offset = config.getfloat('move_offset')
+        self.left_move_offset = config.getfloat('left_move_offset', 12.0)
+        self.right_move_offset = config.getfloat('right_move_offset', 10.0)
         self.speed = config.getfloat('speed',3000)
         self.default_t0_offset_x = self.t0_offset_x
         self.default_t0_offset_y = self.t0_offset_y
@@ -56,20 +57,20 @@ class xyz_align:
                 if 't0_offset' in config:
                     self.t0_offset_x = config.getfloat('t0_offset', 'x_offset')
                     self.t0_offset_y = config.getfloat('t0_offset', 'y_offset')
-                    # If t0_offset_y + move_offset exceeds Y max travel, reset t0_offset_y
-                    if self.t0_offset_y + self.move_offset > self.y_max_travel:
-                        self.t0_offset_y = self.default_t0_offset_y
-                    if self.t0_offset_x < self.x_min_travel:
-                        self.t0_offset_x = self.default_t0_offset_x
+                    # If t0_offset_y + left_move_offset exceeds Y max travel, reset t0_offset_y
+                    if self.t0_offset_y + self.left_move_offset > self.y_max_travel:
+                        self.t0_offset_y = self.y_max_travel - self.left_move_offset
+                    if self.t0_offset_x - self.left_move_offset < self.x_min_travel:
+                        self.t0_offset_x = self.x_min_travel + self.left_move_offset
 
                 if 't1_offset' in config:
                     self.t1_offset_x = config.getfloat('t1_offset', 'x_offset')
                     self.t1_offset_y = config.getfloat('t1_offset', 'y_offset')
-                    # If t1_offset_y + move_offset exceeds Y max travel, reset t1_offset_y
-                    if self.t1_offset_y + self.move_offset > self.y_max_travel:
-                        self.t1_offset_y = self.default_t1_offset_y
-                    if self.t1_offset_x < self.x_min_travel:
-                        self.t1_offset_x = self.default_t1_offset_x
+                    # If t1_offset_y + right_move_offset exceeds Y max travel, reset t1_offset_y
+                    if self.t1_offset_y + self.right_move_offset > self.y_max_travel:
+                        self.t1_offset_y = self.y_max_travel - self.right_move_offset
+                    if self.t1_offset_x - self.right_move_offset < self.x_min_travel:
+                        self.t1_offset_x = self.x_min_travel + self.right_move_offset
                 
                 logging.info("Loaded xyz_offset.ini value: T0(%.3f,%.3f) T1(%.3f,%.3f)" % 
                            (self.t0_offset_x, self.t0_offset_y, self.t1_offset_x, self.t1_offset_y))
@@ -127,18 +128,18 @@ class xyz_align:
         self.t0_offset_y = self.t0_offset_y - temp_t0_offset_y
         self.t1_offset_x = self.t1_offset_x - temp_t1_offset_x
         self.t1_offset_y = self.t1_offset_y - temp_t1_offset_y
-        # If t0_offset_y + move_offset exceeds Y max travel, reset t0_offset_y
-        if self.t0_offset_y + self.move_offset > self.y_max_travel:
-            self.t0_offset_y = self.default_t0_offset_y
+        # If t0_offset_y + left_move_offset exceeds Y max travel, reset t0_offset_y
+        if self.t0_offset_y + self.left_move_offset > self.y_max_travel:
+            self.t0_offset_y = self.y_max_travel - self.left_move_offset
         # If t0_offset_x < X min travel, reset t0_offset_x
-        if self.t0_offset_x < self.x_min_travel:
-            self.t0_offset_x = self.default_t0_offset_x
-        # If t1_offset_y + move_offset exceeds Y max travel, reset t1_offset_y
-        if self.t1_offset_y + self.move_offset > self.y_max_travel:
-            self.t1_offset_y = self.default_t1_offset_y
+        if self.t0_offset_x - self.left_move_offset < self.x_min_travel:
+            self.t0_offset_x = self.x_min_travel + self.left_move_offset
+        # If t1_offset_y + right_move_offset exceeds Y max travel, reset t1_offset_y
+        if self.t1_offset_y + self.right_move_offset > self.y_max_travel:
+            self.t1_offset_y = self.y_max_travel - self.right_move_offset
         # If t1_offset_x < X min travel, reset t1_offset_x
-        if self.t1_offset_x < self.x_min_travel:
-            self.t1_offset_x = self.default_t1_offset_x
+        if self.t1_offset_x - self.right_move_offset < self.x_min_travel:
+            self.t1_offset_x = self.x_min_travel + self.right_move_offset
 
          # Write updated offsets to the configuration file
 
@@ -282,7 +283,7 @@ class xyz_align:
                     "G1 Y%.3f\n"
                     "G1 Z%.3f\n"
                     "G1 Y%.3f\n"
-                    % (self.t0_offset_x+self.move_offset,self.offset_z,self.t0_offset_x,self.offset_z_press,self.t0_offset_x-self.move_offset,self.offset_z,self.t0_offset_x,self.offset_z_press,self.t0_offset_y+self.move_offset,self.offset_z,self.t0_offset_y,self.offset_z_press,self.t0_offset_y-self.move_offset,self.offset_z,self.t0_offset_y))
+                    % (self.t0_offset_x+self.left_move_offset,self.offset_z,self.t0_offset_x,self.offset_z_press,self.t0_offset_x-self.left_move_offset,self.offset_z,self.t0_offset_x,self.offset_z_press,self.t0_offset_y+self.left_move_offset,self.offset_z,self.t0_offset_y,self.offset_z_press,self.t0_offset_y-self.left_move_offset,self.offset_z,self.t0_offset_y))
                     #add change to t1
                 # self.gcode.run_script_from_command("G1 F3000")    
                 # self.gcode.run_script_from_command("G1 Y100")
@@ -330,7 +331,7 @@ class xyz_align:
                     "G1 Z%.3f\n"
                     "G1 Y%.3f\n"
                     "RESTORE_GCODE_STATE NAME=pre_offset_state\n"
-                    % (self.speed,self.offset_z,self.offset_z_press,self.t1_offset_x+self.move_offset,self.offset_z,self.t1_offset_x,self.offset_z_press,self.t1_offset_x-self.move_offset,self.offset_z,self.t1_offset_x,self.offset_z_press,self.t1_offset_y+self.move_offset-2,self.offset_z,self.t1_offset_y,self.offset_z_press,self.t1_offset_y-self.move_offset,self.offset_z,self.t1_offset_y))
+                    % (self.speed,self.offset_z,self.offset_z_press,self.t1_offset_x+self.right_move_offset,self.offset_z,self.t1_offset_x,self.offset_z_press,self.t1_offset_x-self.right_move_offset,self.offset_z,self.t1_offset_x,self.offset_z_press,self.t1_offset_y+self.right_move_offset,self.offset_z,self.t1_offset_y,self.offset_z_press,self.t1_offset_y-self.right_move_offset,self.offset_z,self.t1_offset_y))
                 self.gcode.run_script_from_command("G1 Z10 F600")
             self.gcode.run_script_from_command("G1 Y280 F3000")
             self.gcode.run_script_from_command("T0")
@@ -377,7 +378,7 @@ class xyz_align:
                 "G1 Z%.3f\n"
                 "G1 Y%.3f\n"
                 "G1 Z%.3f\n"
-                % (self.speed,self.offset_z,self.offset_z_press,self.t1_offset_x+self.move_offset,self.offset_z,self.t1_offset_x,self.offset_z_press,self.t1_offset_x-self.move_offset,self.offset_z,self.t1_offset_x,self.offset_z_press,self.t1_offset_y+self.move_offset-2,self.offset_z,self.t1_offset_y,self.offset_z_press,self.t1_offset_y-self.move_offset,self.offset_z))
+                % (self.speed,self.offset_z,self.offset_z_press,self.t1_offset_x+self.right_move_offset,self.offset_z,self.t1_offset_x,self.offset_z_press,self.t1_offset_x-self.right_move_offset,self.offset_z,self.t1_offset_x,self.offset_z_press,self.t1_offset_y+self.right_move_offset,self.offset_z,self.t1_offset_y,self.offset_z_press,self.t1_offset_y-self.right_move_offset,self.offset_z))
             self.gcode.run_script_from_command("G1 Z10 F600")
             self.gcode.run_script_from_command("G1 Y280 F3000")
             # self.gcode.run_script_from_command("T0")
@@ -429,7 +430,7 @@ class xyz_align:
                 "G1 Y%.3f\n"
                 "G1 Z%.3f\n"
                 "M400\n"
-                % (self.t0_offset_x+self.move_offset,self.offset_z,self.t0_offset_x,self.offset_z_press,self.t0_offset_x-self.move_offset,self.offset_z,self.t0_offset_x,self.offset_z_press,self.t0_offset_y+self.move_offset,self.offset_z,self.t0_offset_y,self.offset_z_press,self.t0_offset_y-self.move_offset,self.offset_z))
+                % (self.t0_offset_x+self.left_move_offset,self.offset_z,self.t0_offset_x,self.offset_z_press,self.t0_offset_x-self.left_move_offset,self.offset_z,self.t0_offset_x,self.offset_z_press,self.t0_offset_y+self.left_move_offset,self.offset_z,self.t0_offset_y,self.offset_z_press,self.t0_offset_y-self.left_move_offset,self.offset_z))
                
             self.align_start_cmd.send([self.oid, 3])
 
