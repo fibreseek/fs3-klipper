@@ -95,10 +95,11 @@ class HomingMove:
             sample_count = ENDSTOP_SAMPLE_COUNT #sample_count默认值
             if name=='z' or name=='probe': #仅针对z轴，一定要在home_start之前发送
                 acc_dist = speed**2/2/self.toolhead.get_kinematics().max_z_accel #加速段位移 v^2=2as
-                acc_step = acc_dist / mcu_endstop.get_steppers()[0].get_step_dist() #加速段微步数
+                acc_step = (acc_dist / mcu_endstop.get_steppers()[0].get_step_dist())*1.2 #加速段微步数
                 aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 2, math.ceil(acc_step)])
                 sample_time = rest_time #z轴传感器开启有均匀时间的采样滤波器
-                # sample_count += 1 #z轴传感器的触发去抖约束加强
+                sample_count = 8 #z轴传感器的触发去抖约束加强
+                logging.info(f"_aniso freq {(1/rest_time):.3f}")
             wait = mcu_endstop.home_start(print_time, sample_time,
                                           sample_count, rest_time,
                                           triggered=triggered)
@@ -221,34 +222,37 @@ class Homing:
         hmove.homing_move(homepos, hi.speed)
         # Perform second home
         if hi.retract_dist:
-            # Retract
-            startpos = self._fill_coord(forcepos)
-            homepos = self._fill_coord(movepos)
-            axes_d = [hp - sp for hp, sp in zip(homepos, startpos)]
-            move_d = math.sqrt(sum([d*d for d in axes_d[:3]]))
-            retract_r = min(1., hi.retract_dist / move_d)
-            retractpos = [hp - ad * retract_r
-                          for hp, ad in zip(homepos, axes_d)]
-            self.toolhead.move(retractpos, hi.retract_speed)
-            self.gcode.run_script_from_command("SET_TMC_FIELD STEPPER=stepper_y FIELD=drv_err VALUE=1")
-            self.gcode.run_script_from_command("SET_TMC_FIELD STEPPER=stepper_x FIELD=drv_err VALUE=1")
-            # Home again
-            startpos = [rp - ad * retract_r
-                        for rp, ad in zip(retractpos, axes_d)]
-            self.toolhead.set_position(startpos)
-            # 仅针对z轴的Home again
-            anisopos = None
-            if 2 in force_axes:
-                kin = self.toolhead.get_kinematics()
-                anisopos = (homepos[2],  kin.limits[2][0]) #暂存触发位置和负限位
-                homepos[2] = -kin.limits[2][1] #修改目标位置
-                kin.limits[2] = (homepos[2]-0.1, kin.limits[2][1]) #修改限位
-            hmove = HomingMove(self.printer, endstops)
-            hmove.homing_move(homepos, hi.second_homing_speed, aniso_pos=anisopos)
-            if hmove.check_no_movement() is not None:
-                raise self.printer.command_error(
-                    "Endstop %s still triggered after retract"
-                    % (hmove.check_no_movement(),))
+            is_z_homing = 2 in force_axes
+            homing_cycles = 2 if is_z_homing else 1
+            for cycle in range(homing_cycles):
+                # Retract
+                startpos = self._fill_coord(forcepos)
+                homepos = self._fill_coord(movepos)
+                axes_d = [hp - sp for hp, sp in zip(homepos, startpos)]
+                move_d = math.sqrt(sum([d*d for d in axes_d[:3]]))
+                retract_r = min(1., hi.retract_dist / move_d)
+                retractpos = [hp - ad * retract_r
+                            for hp, ad in zip(homepos, axes_d)]
+                self.toolhead.move(retractpos, hi.retract_speed)
+                self.gcode.run_script_from_command("SET_TMC_FIELD STEPPER=stepper_y FIELD=drv_err VALUE=1")
+                self.gcode.run_script_from_command("SET_TMC_FIELD STEPPER=stepper_x FIELD=drv_err VALUE=1")
+                # Home again
+                startpos = [rp - ad * retract_r
+                            for rp, ad in zip(retractpos, axes_d)]
+                self.toolhead.set_position(startpos)
+                # 仅针对z轴的Home again
+                anisopos = None
+                if is_z_homing and cycle < homing_cycles - 1:
+                    kin = self.toolhead.get_kinematics()
+                    anisopos = (homepos[2],  kin.limits[2][0]) #暂存触发位置和负限位
+                    homepos[2] = -kin.limits[2][1] #修改目标位置
+                    kin.limits[2] = (homepos[2]-0.1, kin.limits[2][1]) #修改限位
+                hmove = HomingMove(self.printer, endstops)
+                hmove.homing_move(homepos, hi.second_homing_speed, aniso_pos=anisopos)
+                if hmove.check_no_movement() is not None:
+                    raise self.printer.command_error(
+                        "Endstop %s still triggered after retract"
+                        % (hmove.check_no_movement(),))
 
         # Signal home operation complete
         self.toolhead.flush_step_generation()
@@ -311,29 +315,40 @@ class PrinterHoming:
         homing_state.set_axes(axes)
         kin = self.printer.lookup_object('toolhead').get_kinematics()
         try:
-            kin.home(homing_state)
+            is_z_homing = 2 in axes
+            homing_cycles = 1 if is_z_homing else 1  #z轴仅需一次, 如果要求两次，请改这里
+            for cycle_now in range(homing_cycles):
+                kin.home(homing_state)
 
-            # 存在z轴回零，额外增加probe命令，利用寻位结果校验z轴坐标
-            if 2 not in axes:
-                return
+                if not is_z_homing:
+                    break
 
-            # z_homing_info = kin.rails[2].get_homing_info()
-            gcode = self.printer.lookup_object('gcode')
-            gcode.run_script_from_command(
-                "G1 Z3 F600\n" #令Z轴回退安全裕量
-                "G4 P100\n" #等待100ms，确保稳定
-                "PROBE\n" #探点寻位
-                )
-            
-            status = self.printer.lookup_object('probe').get_status(0)
-            trigger_pos = status['last_z_result'] #获取触发坐标
-            trigger_offset = status['trigger_offset'] #获取位置偏差（停止-触发）
+                # # z_homing_info = kin.rails[2].get_homing_info()
+                # gcode = self.printer.lookup_object('gcode')
+                # gcode.run_script_from_command(
+                #     "G1 Z3 F600\n" # 令Z轴回退安全裕量
+                #     "G4 P100\n" # 等待100ms，确保稳定
+                #     "PROBE SAMPLES=4 SAMPLES_TOLERANCE_RETRIES=0\n" # 探点寻位
+                #     )
 
-            gcode.run_script_from_command(
-                f"SET_KINEMATIC_POSITION Z={trigger_pos + trigger_offset}\n" #重置Z轴停止坐标
-                "G4 P10\n" #等待10ms，确保稳定
-                )
-            gcode.respond_info(f"aniso_result is z={(trigger_pos + trigger_offset):.4f}")
+                # probe = self.printer.lookup_object('probe')
+                # status = probe.get_status(0)
+                # trigger_pos = status['last_z_result'] # 获取触发坐标
+                # # trigger_offset = status['trigger_offset'] # 获取位置偏差（停止-触发）
+                # z_offset = probe.get_offsets()[2]
+                # z_tolerance = probe.get_probe_params()['samples_tolerance']
+
+                # if abs(trigger_pos - z_offset) <= z_tolerance:
+                #     break
+                # if cycle_now==homing_cycles-1: # 最后一次尝试且超限，拉起异常报错
+                #     raise self.printer.command_error(
+                #         "Homing failed due to bad result precision")
+
+                # gcode.run_script_from_command(
+                #     f"SET_KINEMATIC_POSITION Z={trigger_pos + trigger_offset}\n" #重置Z轴停止坐标
+                #     "G4 P10\n" #等待10ms，确保稳定
+                #     )
+                # gcode.respond_info(f"aniso_result is z={(trigger_pos + trigger_offset):.4f}")
                 
         except self.printer.command_error:
             if self.printer.is_shutdown():

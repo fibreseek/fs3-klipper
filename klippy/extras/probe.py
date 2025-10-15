@@ -522,6 +522,7 @@ class ProbeSessionHelper:
         sample_cache = [] #采样结果历史缓存初始化
         
         while len(positions) < sample_count:
+            # gcode.run_script_from_command("G4 P500")
             # Probe position
             pos = self._probe(gcmd)
             positions.append(pos)
@@ -532,7 +533,7 @@ class ProbeSessionHelper:
                     params['lift_speed'])
             else:
                 result = calc_probe_z_mad(positions, params['samples_tolerance'])
-                if len(result)>= -(-sample_count//2): #筛选结果不得少于样本半数
+                if len(result)*2 >= sample_count: #筛选结果不得少于样本半数
                     positions = result #更新为筛选后的坐标组合
                     break
 
@@ -541,6 +542,8 @@ class ProbeSessionHelper:
                 if retries >= params['samples_tolerance_retries']: #达到最大尝试次数
                     gcode.respond_info("Probe samples exceed samples_tolerance") #一般通知
                     positions = calc_probe_z_iqr(sample_cache, params['samples_coeff'])
+                    if len(positions)*2 < len(sample_cache): #数据波动大，拉起异常报错
+                        raise self.printer.command_error("bad samples precision")
                     break
                 
                 gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
