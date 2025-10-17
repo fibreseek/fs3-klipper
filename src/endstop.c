@@ -103,7 +103,7 @@ void command_endstop_home(uint32_t *args)
         e->ts = NULL;
         e->flags = 0;
         if (e->is_z == 1)
-            aniso_adc_sample(ANISO_STATE_STOP);
+            aniso_adc_sample(ANISO_STATE_IDLE);
         return;
     }
     e->rest_time = args[4];

@@ -522,16 +522,16 @@ class ProbeSessionHelper:
         sample_cache = [] #采样结果历史缓存初始化
         
         while len(positions) < sample_count:
-            # gcode.run_script_from_command("G4 P500")
+            gcode.run_script_from_command("G4 P200")
             # Probe position
             pos = self._probe(gcmd)
             positions.append(pos)
+            toolhead.manual_move(
+                probexy + [pos[2] + params['sample_retract_dist']],
+                params['lift_speed'])
+
             # Check samples tolerance
-            if len(positions) < sample_count:
-                toolhead.manual_move(
-                    probexy + [pos[2] + params['sample_retract_dist']],
-                    params['lift_speed'])
-            else:
+            if len(positions) == sample_count:
                 result = calc_probe_z_mad(positions, params['samples_tolerance'])
                 if len(result)*2 >= sample_count: #筛选结果不得少于样本半数
                     positions = result #更新为筛选后的坐标组合

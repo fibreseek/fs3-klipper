@@ -28,6 +28,7 @@
 // 变量声明
 #define BUFFER_VALUE_CNT 200                          // 采样缓存的容量
 #define ALIGN_VALUE_CNT 5                            // 触发判断所需的最少缓存数量
+#define ALIGN_VALUE_CNT_TRIGGER2 100                 // 触发判断所需的最少缓存数量
 #define CRITICAL_VALUE_CNT 30                         // 回溯临界拐点的容量
 static uint8_t log_flag;                              // 0 数据上报关闭；1 数据上报开启
 static uint8_t sample_mode_flag = 0;                  // 0 adc采样+触发判断；1 adc采样(调试用)
@@ -45,8 +46,8 @@ static struct aniso_iir_filter_t bsf;                 // 陷波(带阻)滤波器
 static struct aniso_iir_filter_t lpf;                             // 低通滤波器
 static struct aniso_adc_data_t sample_datas_ar[BUFFER_VALUE_CNT]; // 采样缓存array
 static struct aniso_ring_buffer_t sample_datas_rb;                // 采样缓存ring_buffer
-volatile float adc_val_min = 0; // adc触发的负向阈值
-volatile float adc_val_max = 4095; // adc触发的正向阈值
+volatile float adc_val_min = 4095; // adc触发的负向阈值
+volatile float adc_val_max = 0; // adc触发的正向阈值
 
 // 采样频率计算
 void calc_sample_freq(uint32_t tick)
@@ -87,65 +88,43 @@ uint8_t get_trigger1(void)
 uint8_t get_trigger2(void)
 {
     // 1.检测末尾3点是否有序递增或递减
-    struct aniso_adc_data_t temp_data1, temp_data2, temp_data3;
+    struct aniso_adc_data_t temp_data1, temp_data2, temp_data3, temp_data4, temp_data5;
     aniso_ring_buffer_pick(&sample_datas_rb, 0, &temp_data1);
     aniso_ring_buffer_pick(&sample_datas_rb, 1, &temp_data2);
     aniso_ring_buffer_pick(&sample_datas_rb, 2, &temp_data3);
+    aniso_ring_buffer_pick(&sample_datas_rb, 3, &temp_data4);
+    aniso_ring_buffer_pick(&sample_datas_rb, 4, &temp_data5);
 
     uint8_t flag; // 单调性标志位
-    if (temp_data1.flt_val > temp_data2.flt_val && temp_data2.flt_val > temp_data3.flt_val)
+    if (temp_data1.flt_val > temp_data2.flt_val && temp_data2.flt_val > temp_data3.flt_val && temp_data3.flt_val > temp_data4.flt_val && temp_data4.flt_val > temp_data5.flt_val)
         flag = 1; // 单调递增
-    else if (temp_data1.flt_val < temp_data2.flt_val && temp_data2.flt_val < temp_data3.flt_val)
+    else if (temp_data1.flt_val < temp_data2.flt_val && temp_data2.flt_val < temp_data3.flt_val && temp_data3.flt_val < temp_data4.flt_val && temp_data4.flt_val < temp_data5.flt_val)
         flag = 0; // 单调递减
     else
         return 0; // 非单调变化
 
     // 2.检测末尾3点是否均大于或小于其它任意点
     uint16_t i = 0;
-    float val_max = 0.0f, val_min = 4095.0f;
-    for (i = 3; i < BUFFER_VALUE_CNT; i++)
-    { // 此时temp_data2的含义另作他用
+    uint16_t icount = ALIGN_VALUE_CNT_TRIGGER2;
+    float val_max = adc_val_max, val_min = adc_val_min;
+
+    // 3.对数据进行归一化，方便处理
+    float val_range = val_max - val_min;
+    uint16_t pass_cnt_now = 0, pass_cnt_max = icount * 0.8; // 允许最多10%缓存点通不过斜率检查
+    for (i = icount - 1; i > 0; i--)                       // 数据越旧，斜率越小，倒序可提高筛选效率
+    {
         aniso_ring_buffer_pick(&sample_datas_rb, i, &temp_data2);
-        val_max = fmaxf(val_max, temp_data2.flt_val);
-        val_min = fminf(val_min, temp_data2.flt_val);
+        float norm_y = fabsf(temp_data1.flt_val - temp_data2.flt_val) / val_range; // tan角的对边归一化
+        float norm_x = (float)i / (icount - 1); // tan角的临边归一化
+
+        // 4.比较各点针对最后1点的斜率是否超过35度
+        if (norm_y / norm_x > 1.0f) // tan = 对边/临边，tan(45°)=1.0，tan(40°)=0.8391，tan(75°)=3.73，tan(80°)=5.67
+        {
+            pass_cnt_now++;
+        }
     }
 
-    if (flag==1) // 单调递增
-    {
-        if (temp_data3.flt_val < val_max) // 末尾三个点不都大于其他任意值
-            return 0;
-        // if (temp_data1.flt_val > 100.0f) // 超过绝对阈值，强制触发
-        //     return 1;
-        val_max = temp_data1.flt_val;
-    }
-    else // 单调递减
-    {
-        if (temp_data3.flt_val > val_min) // 末尾三个点不都小于其他任意值
-            return 0;
-        // if (temp_data1.flt_val < -100.0f) // 超过绝对阈值，强制触发
-        //     return 1;
-        val_min = temp_data1.flt_val;
-    }
-
-    // // 3.对数据进行归一化，方便处理
-    // float val_range = val_max - val_min;
-    // uint16_t fail_cnt_now = 0, fail_cnt_max = BUFFER_VALUE_CNT / 10; // 允许最多10%缓存点通不过斜率检查
-    // for (i = BUFFER_VALUE_CNT - 1; i > 0; i--)                       // 数据越旧，斜率越小，倒序可提高筛选效率
-    // {
-    //     aniso_ring_buffer_pick(&sample_datas_rb, i, &temp_data2);
-    //     float norm_y = fabsf(temp_data1.flt_val - temp_data2.flt_val) / val_range; // tan角的对边归一化
-    //     float norm_x = (float)i / (BUFFER_VALUE_CNT - 1); // tan角的临边归一化
-
-    //     // 4.比较各点针对最后1点的斜率是否超过35度
-    //     if (norm_y / norm_x < 0.7f) // tan = 对边/临边，tan(45°)=1.0，tan(40°)=0.8391
-    //     {
-    //         fail_cnt_now++;
-    //         if (fail_cnt_now >= fail_cnt_max) // 斜率不足的点数太多，就直接判定未触发
-    //             return 0;
-    //     }
-    // }
-
-    return 1;
+    return (pass_cnt_now >= pass_cnt_max) ? 1 : 0;
 }
 
 // 临界回溯 趋势逆反法
@@ -296,8 +275,8 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
             // aniso_iir_filter_init(&hpf, ANISO_FILTER_HIGH_PASS, 5.0f, 0.707f, sample_freq);
             aniso_iir_filter_init(&lpf, ANISO_FILTER_LOW_PASS, 3000.0f, 0.707f, sample_freq);
             state_machine_flag = ANISO_STATE_PREHEAT;
-            adc_val_min = 0;
-            adc_val_max = 4095;
+            adc_val_min = 4095;
+            adc_val_max = 0;
             break;
 
         // 预热阶段：对应寻位运动的加速段，计算直流分量（采样均值）
@@ -329,7 +308,12 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
             sample_data.flt_val = aniso_iir_filter_process(&bsf, sample_data.flt_val);
             sample_data.flt_val = aniso_kalman_filter_process(&kmf, sample_data.flt_val);
             aniso_ring_buffer_push(&sample_datas_rb, &sample_data); // 更新采样缓存（必须先push，判断trigger需要读缓存）
-            sample_data.trigger = get_trigger1();                   // 判断触发标志
+
+            struct aniso_adc_data_t maxmin_data;
+            aniso_ring_buffer_pick(&sample_datas_rb, ALIGN_VALUE_CNT_TRIGGER2, &maxmin_data);
+            adc_val_max = fmaxf(adc_val_max, maxmin_data.flt_val);
+            adc_val_min = fminf(adc_val_min, maxmin_data.flt_val);
+            sample_data.trigger = get_trigger2();                   // 判断触发标志
             if (sample_data.trigger == 1)
                 aniso_ring_buffer_update(&sample_datas_rb, 0, &sample_data);
             break;
@@ -338,6 +322,7 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
         case ANISO_STATE_STOP:
             sample_data.tick = critical_tick; // 记录临界点时间戳
             state_machine_flag = ANISO_STATE_IDLE;
+            memset(sample_datas_ar, 0, sizeof(sample_datas_ar));
             break;
 
         default:

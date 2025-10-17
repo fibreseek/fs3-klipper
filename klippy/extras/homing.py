@@ -95,10 +95,10 @@ class HomingMove:
             sample_count = ENDSTOP_SAMPLE_COUNT #sample_count默认值
             if name=='z' or name=='probe': #仅针对z轴，一定要在home_start之前发送
                 acc_dist = speed**2/2/self.toolhead.get_kinematics().max_z_accel #加速段位移 v^2=2as
-                acc_step = (acc_dist / mcu_endstop.get_steppers()[0].get_step_dist())*1.2 #加速段微步数
+                acc_step = (acc_dist / mcu_endstop.get_steppers()[0].get_step_dist()) #加速段微步数
                 aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 2, math.ceil(acc_step)])
                 sample_time = rest_time #z轴传感器开启有均匀时间的采样滤波器
-                sample_count = 8 #z轴传感器的触发去抖约束加强
+                sample_count = 5 #z轴传感器的触发去抖约束加强
                 logging.info(f"_aniso freq {(1/rest_time):.3f}")
             wait = mcu_endstop.home_start(print_time, sample_time,
                                           sample_count, rest_time,
