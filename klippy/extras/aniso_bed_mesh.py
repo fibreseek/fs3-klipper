@@ -50,7 +50,7 @@ class aniso_bed_mesh:
         commands.extend([
             "T0",
             "M400",
-            "G1 X150 Y150 F3000",
+            "G1 X150 Y150 F6000",
             "M400",
             "G28.1 Z",
             "M400"
