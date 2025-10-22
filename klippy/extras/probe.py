@@ -6,6 +6,12 @@
 import logging
 import pins
 from . import manual_probe
+import os
+import sys
+import subprocess
+import tempfile
+import threading
+import re
 
 HINT_TIMEOUT = """
 If the probe did not move far enough to trigger, then
@@ -301,6 +307,89 @@ class ProbeCommandHelper:
             "probe accuracy results: maximum %.6f, minimum %.6f, range %.6f, "
             "average %.6f, median %.6f, standard deviation %.6f" % (
             max_value, min_value, range_value, avg_value, median, sigma))
+        try:
+            # Prepare temporary input file for analysis script
+            # Create a timestamped filename like: probe_samples_20251022_154747.txt
+            now = __import__('datetime').datetime.now()
+            fname = f"probe_samples_{now.strftime('%Y%m%d_%H%M%S')}.txt"
+            tmp_dir = tempfile.gettempdir()
+            tmp_path = os.path.join(tmp_dir, fname)
+            fd = os.open(tmp_path, os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
+            with open(tmp_path, 'w', encoding='utf-8') as tf:
+                for p in positions:
+                    # write lines that analyze_probe_data.py expects (contains z=...)
+                    tf.write("time=%.6f z=%.6f\n" % (__import__('time').time(), p[2]))
+            script = "/home/anisoprint/klipper/scripts/analyze_probe_data.py"
+            if not os.path.exists(script):
+                gcmd.respond_info(f"Probe analysis script not found: {script}")
+            else:
+                # Choose a python executable that can import matplotlib.
+                candidates = [sys.executable, "python3", "/usr/bin/python3", "/usr/local/bin/python3"]
+                chosen_py = None
+                for py in candidates:
+                    if not py:
+                        continue
+                    try:
+                        test = subprocess.run([py, "-c", "import matplotlib"],
+                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    except FileNotFoundError:
+                        continue
+                    if test.returncode == 0:
+                        chosen_py = py
+                        break
+                if chosen_py is None:
+                    # fallback to system python3; will likely fail if matplotlib is missing
+                    chosen_py = "python3"
+                    gcmd.respond_info("Probe analysis: could not find python with matplotlib on PATH; using 'python3' (may fail)")
+
+                # Run analysis in a background thread so we don't block the Klipper main loop.
+                def _analysis_worker(py_exec, script_path, input_path, gcode_cmd):
+                    try:
+                        gcode_cmd.respond_info(f"Probe analysis started (background) with: {py_exec}")
+                        proc = subprocess.run([py_exec, script_path, input_path],
+                                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                                text=True, check=False)
+                        out = (proc.stdout or '').strip()
+                        gcode_cmd.respond_info(f"Probe analysis finished (rc={proc.returncode})")
+                        if out:
+                            out_lines = [l for l in out.splitlines() if l.strip()]
+                            # send up to 50 lines of combined output
+                            for line in out_lines[:50]:
+                                gcode_cmd.respond_info("ANALYZE: %s" % (line,))
+                            # Try to parse any printed paths to generated files (common scripts print 'results/...')
+                            pat = re.compile(r'(?P<p>/?(?:\S*/)?results/\S+\.(?:png|txt))')
+                            for line in out_lines:
+                                m = pat.search(line)
+                                if m:
+                                    gcode_cmd.respond_info("ANALYZE_FILE: %s" % (m.group('p'),))
+                        else:
+                            gcode_cmd.respond_info("Probe analysis produced no output")
+                    except Exception as e:
+                        try:
+                            gcode_cmd.respond_info("ANALYZE_ERR: %s" % (str(e),))
+                        except:
+                            pass
+                    finally:
+                        # Worker is responsible for removing the temporary input file.
+                        try:
+                            os.remove(input_path)
+                            try:
+                                gcode_cmd.respond_info(f"ANALYZE: removed temp file {input_path}")
+                            except:
+                                pass
+                        except Exception:
+                            pass
+
+                thr = threading.Thread(target=_analysis_worker, args=(chosen_py, script, tmp_path, gcmd), daemon=True)
+                thr.start()
+                gcmd.respond_info(f"Probe analysis launched in background with: {chosen_py}")
+        except Exception as e:
+            try:
+                gcmd.respond_info("Probe analysis failed to start: %s" % (str(e),))
+            except:
+                pass
+        
     cmd_Z_OFFSET_APPLY_PROBE_help = "Adjust the probe's z_offset"
     def cmd_Z_OFFSET_APPLY_PROBE(self, gcmd):
         gcode_move = self.printer.lookup_object("gcode_move")
