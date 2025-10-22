@@ -310,22 +310,20 @@ def main():
     
     try:
         # 解析数据
-        print("正在解析probe数据...")
-        print(f"过滤异常数据: {'是' if filter_abnormal else '否'}")
+        print("Parsing probe data...")
+        print(f"Filter abnormal data: {'Yes' if filter_abnormal else 'No'}")
         z_values, abnormal_data = parse_probe_data(input_file, filter_abnormal=filter_abnormal)
-        print(f"成功解析 {len(z_values)} 个有效数据点")
-        print(f"发现 {len(abnormal_data)} 个异常数据点")
+        print(f"Successfully parsed {len(z_values)} valid data points")
+        print(f"Found {len(abnormal_data)} abnormal data points")
 
         # 计算偏差值
-        print("正在计算偏差值...")
+        print("Calculating deviations...")
         deviations = calculate_deviations(z_values, baseline=baseline)
 
         # 统计分析
-        print("正在进行统计分析...")
         deviation_stats = analyze_deviations(deviations)
 
         # 异常数据统计
-        print("正在进行异常数据统计...")
         abnormal_stats = analyze_abnormal_data(abnormal_data)
 
         # 计算用于图注的统计信息：最小值、极差、出现最多的值
@@ -343,52 +341,51 @@ def main():
             stat_info = None
 
         # 生成柱状图（传入统计信息以在右上角显示）
-        print("正在生成柱状图...")
+        print("Generating histogram...")
         plot_histogram(deviations, histogram_path, base_name, stats=stat_info)
 
         # 保存统计结果
-        print("正在保存统计结果...")
+        print("Saving statistics...")
         save_statistics(deviation_stats, stats_path, baseline=baseline)
 
         # 保存异常数据统计结果
-        print("正在保存异常数据统计结果...")
+        print("Saving abnormal statistics...")
         save_abnormal_statistics(abnormal_stats, abnormal_data, abnormal_stats_path)
 
         # 输出摘要信息
         print("\n" + "="*50)
-        print("分析完成!")
-        print(f"原始数据文件: {input_file}")
-        print(f"有效数据点数: {len(z_values)}")
-        print(f"异常数据点数: {len(abnormal_data)}")
-        print(f"基准值: {baseline} mm")
-        print(f"偏差值范围: {min(deviations):.2f} 到 {max(deviations):.2f} mm")
-        print(f"柱状图已保存: {histogram_path}")
-        print(f"统计结果已保存: {stats_path}")
-        print(f"异常数据统计已保存: {abnormal_stats_path}")
+        print("Summary:")
+        print(f"Valid data points: {len(z_values)}")
+        print(f"Abnormal data points: {len(abnormal_data)}")
+        print(f"Baseline: {baseline} mm")
+        print(f"Range: {min(deviations):.2f} to {max(deviations):.2f} mm")
+        print(f"Histogram saved at: {histogram_path}")
+        print(f"Statistics saved at: {stats_path}")
+        print(f"Abnormal statistics saved at: {abnormal_stats_path}")
         print("="*50)
 
         # 显示主要统计信息
-        print("\n主要统计信息:")
+        print("\nMain Statistics:")
         print("-" * 40)
-        print("偏差值(mm)\t出现次数\t百分比(%)")
+        print("Deviation (mm)\tCount\tPercentage (%)")
         print("-" * 40)
         for deviation in sorted(deviation_stats.keys()):
             stats = deviation_stats[deviation]
             print(f"{deviation:>10.2f}\t{stats['count']:>8}\t{stats['percentage']:>10.2f}")
 
-        # 显示异常数据统计信息
+        # Display abnormal data statistics
         if abnormal_stats['total_abnormal'] > 0:
-            print("\n异常数据统计:")
+            print("\nAbnormal Data Statistics:")
             print("-" * 40)
-            print("异常类型\t出现次数\t百分比(%)")
+            print("Abnormal Type\tCount\tPercentage (%)")
             print("-" * 40)
-            print(f"z值过低\t{abnormal_stats['too_low']:>8}\t{abnormal_stats['low_percentage']:>10.2f}")
-            print(f"z值过高\t{abnormal_stats['too_high']:>8}\t{abnormal_stats['high_percentage']:>10.2f}")
+            print(f"Z value too low\t{abnormal_stats['too_low']:>8}\t{abnormal_stats['low_percentage']:>10.2f}")
+            print(f"Z value too high\t{abnormal_stats['too_high']:>8}\t{abnormal_stats['high_percentage']:>10.2f}")
 
-    except FileNotFoundError:
-        print(f"错误: 找不到文件 {input_file}")
-    except Exception as e:
-        print(f"分析过程中出现错误: {str(e)}")
+        except FileNotFoundError:
+        print(f"Error: File not found: {input_file}")
+        except Exception as e:
+        print(f"An error occurred during analysis: {str(e)}")
 
 if __name__ == "__main__":
     main()
