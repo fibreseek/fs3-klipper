@@ -382,9 +382,9 @@ def main():
             print(f"Z value too low\t{abnormal_stats['too_low']:>8}\t{abnormal_stats['low_percentage']:>10.2f}")
             print(f"Z value too high\t{abnormal_stats['too_high']:>8}\t{abnormal_stats['high_percentage']:>10.2f}")
 
-        except FileNotFoundError:
+    except FileNotFoundError:
         print(f"Error: File not found: {input_file}")
-        except Exception as e:
+    except Exception as e:
         print(f"An error occurred during analysis: {str(e)}")
 
 if __name__ == "__main__":
