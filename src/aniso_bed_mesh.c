@@ -34,11 +34,11 @@
 #include "stm32/debug/printf.h"
 
 // 变量声明
-#define BUFFER_VALUE_CNT 100                          // 采样缓存的容量
-#define ALIGN_VALUE_CNT 50                            // 触发判断所需的最少缓存数量
-#define ALIGN_VALUE_CNT_TRIGGER2 50                 // 触发判断所需的最少缓存数量
+#define BUFFER_VALUE_CNT 50                          // 采样缓存的容量
+#define ALIGN_VALUE_CNT 30                            // 触发判断所需的最少缓存数量
+#define ALIGN_VALUE_CNT_TRIGGER2 30                 // 触发判断所需的最少缓存数量
 #define CRITICAL_VALUE_CNT 30                         // 回溯临界拐点的容量
-#define SAMPLE_INTERVAL_US 200                         // 采样间隔200微秒
+#define SAMPLE_INTERVAL_US 200                         // 采样间隔500微秒
 
 static uint8_t log_flag = 0;                              // 0 数据上报关闭；1 数据上报开启
 static uint8_t sample_mode_flag = 0;                  // 0 adc采样+触发判断；1 adc采样(调试用)
@@ -302,145 +302,110 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
     if (smf != ANISO_STATE_PLACEHOLD)
         state_machine_flag = smf;
 
-    if (sample_mode_flag == 0)
+    switch (state_machine_flag)
     {
-        switch (state_machine_flag)
+    // 初始化阶段：状态复位
+    case ANISO_STATE_INIT:
+        sample_val_mean = 0.0f;
+        sample_cycle_now = 0;
+        // sample_step_start = get_step_count_z();
+        // 过滤触发后，产生振荡的异常数据，以50ms振荡为例，0.05*(1000*1000/SAMPLE_INTERVAL_US)=500个采样点
+        sample_step_acc = 0.05*(1000*1000/SAMPLE_INTERVAL_US);
+        sample_step_start = 0;
+        critical_tick = 1;
+        gpio_adc_sample(gPF); // 启动下一周期adc采样转换
+        memset(sample_datas_ar, 0, sizeof(sample_datas_ar));
+        aniso_ring_buffer_init(&sample_datas_rb, sample_datas_ar, BUFFER_VALUE_CNT, sizeof(struct aniso_adc_data_t));
+        aniso_kalman_filter_init(&kmf, 0.2f, 0.03f, 0.2f);
+        aniso_iir_filter_init(&bsf, ANISO_FILTER_BAND_STOP, 50.0f, 10.0f, sample_freq);
+        // aniso_iir_filter_init(&hpf, ANISO_FILTER_HIGH_PASS, 5.0f, 0.707f, sample_freq);
+        aniso_iir_filter_init(&lpf, ANISO_FILTER_LOW_PASS, 3000.0f, 0.707f, sample_freq);
+        state_machine_flag = ANISO_STATE_PREHEAT;
+        adc_val_min = INFINITY;
+        adc_val_max = -INFINITY;
+        trigger1_count = 0;
+
+        // printf_("START AEI ADC_RANGE\r\n");
+        // printf_("START AEI ADC_RANGE: sample_step_acc= %d sample_step_start= %d\r\n", sample_step_acc, sample_step_start);
+        break;
+
+    // 预热阶段：对应寻位运动的加速段，计算直流分量（采样均值）
+    case ANISO_STATE_PREHEAT:
+        // sample_data.step = get_step_count_z() - sample_step_start;
+        sample_step_start++;
+        sample_data.raw_val = (float)gpio_adc_read(gPF); // 读取上一周期adc转换数据
+        gpio_adc_sample(gPF);                            // 启动下一周期adc采样转换
+        sample_cycle_now++;
+        sample_val_mean += (sample_data.raw_val - sample_val_mean) / sample_cycle_now; // 在线计算历史均值
+        sample_data.raw_val -= sample_val_mean;                                        // 去除直流分量
+        // if (abs(sample_data.step) >= sample_step_acc)
+        if (sample_step_start >= sample_step_acc)
         {
-        // 初始化阶段：状态复位
-        case ANISO_STATE_INIT:
-            sample_val_mean = 0.0f;
-            sample_cycle_now = 0;
-            // sample_step_start = get_step_count_z();
-            // 过滤触发后，产生振荡的异常数据，以50ms振荡为例，0.05*(1000*1000/SAMPLE_INTERVAL_US)=500个采样点
-            sample_step_acc = 0.05*(1000*1000/SAMPLE_INTERVAL_US);
-            sample_step_start = 0;
-            critical_tick = 1;
-            gpio_adc_sample(gPF); // 启动下一周期adc采样转换
-            memset(sample_datas_ar, 0, sizeof(sample_datas_ar));
-            aniso_ring_buffer_init(&sample_datas_rb, sample_datas_ar, BUFFER_VALUE_CNT, sizeof(struct aniso_adc_data_t));
-            aniso_kalman_filter_init(&kmf, 0.2f, 0.03f, 0.2f);
-            aniso_iir_filter_init(&bsf, ANISO_FILTER_BAND_STOP, 50.0f, 10.0f, sample_freq);
-            // aniso_iir_filter_init(&hpf, ANISO_FILTER_HIGH_PASS, 5.0f, 0.707f, sample_freq);
-            aniso_iir_filter_init(&lpf, ANISO_FILTER_LOW_PASS, 3000.0f, 0.707f, sample_freq);
-            state_machine_flag = ANISO_STATE_PREHEAT;
-            adc_val_min = INFINITY;
-            adc_val_max = -INFINITY;
+            sample_data.flt_val = sample_data.raw_val;                                     // 数据预填充，避免下阶段起始无数据判断
+            aniso_ring_buffer_push(&sample_datas_rb, &sample_data);  
+            adc_val_max = fmaxf(adc_val_max, sample_data.flt_val);
+            adc_val_min = fminf(adc_val_min, sample_data.flt_val);                      // 压入缓存
+            if (aniso_ring_buffer_size(&sample_datas_rb) >= BUFFER_VALUE_CNT)
+            {
+                sample_step_acc = 0;
+                sample_step_start = 0;
+                state_machine_flag = ANISO_STATE_SAMPLE;
+                // printf_("ANISO_STATE_SAMPLE start\r\n");
+            }
+            // printf_("ANISO_STATE_PREHEAT %.3f\r\n", sample_data.flt_val);
+
+        }
+        break;
+
+    // 采样阶段：对应寻位运动的匀速段，判断触发标志
+    case ANISO_STATE_SAMPLE:
+        sample_data.tick = timer_read_time();
+        // sample_data.step = get_step_count_z() - sample_step_start;
+        sample_data.raw_val = gpio_adc_read(gPF) - sample_val_mean; // 读取上一周期adc转换数据（同时去除直流分量）
+        gpio_adc_sample(gPF);                                       // 启动下一周期adc采样转换
+        // sample_data.flt_val = aniso_iir_filter_process(&hpf, sample_data.raw_val);
+        sample_data.flt_val = aniso_iir_filter_process(&lpf, sample_data.raw_val);
+        sample_data.flt_val = aniso_iir_filter_process(&bsf, sample_data.flt_val);
+        sample_data.flt_val = aniso_kalman_filter_process(&kmf, sample_data.flt_val);
+        aniso_ring_buffer_push(&sample_datas_rb, &sample_data); // 更新采样缓存（必须先push，判断trigger需要读缓存）
+
+        struct aniso_adc_data_t maxmin_data;
+        aniso_ring_buffer_pick(&sample_datas_rb, ALIGN_VALUE_CNT, &maxmin_data);
+        adc_val_max = fmaxf(adc_val_max, maxmin_data.flt_val);
+        adc_val_min = fminf(adc_val_min, maxmin_data.flt_val);
+        sample_data.trigger = get_trigger1();                   // 判断触发标志
+        if (sample_data.trigger == 1)
+        {
+            // printf_("ANISO_STATE_SAMPLE triggered 0\r\n");
+            aniso_ring_buffer_update(&sample_datas_rb, 0, &sample_data);
+            trigger1_count++;
+        }
+        else {
             trigger1_count = 0;
-
-            // printf_("START AEI ADC_RANGE\r\n");
-            // printf_("START AEI ADC_RANGE: sample_step_acc= %d sample_step_start= %d\r\n", sample_step_acc, sample_step_start);
-            break;
-
-        // 预热阶段：对应寻位运动的加速段，计算直流分量（采样均值）
-        case ANISO_STATE_PREHEAT:
-            // sample_data.step = get_step_count_z() - sample_step_start;
-            sample_step_start++;
-            sample_data.raw_val = (float)gpio_adc_read(gPF); // 读取上一周期adc转换数据
-            gpio_adc_sample(gPF);                            // 启动下一周期adc采样转换
-            sample_cycle_now++;
-            sample_val_mean += (sample_data.raw_val - sample_val_mean) / sample_cycle_now; // 在线计算历史均值
-            sample_data.raw_val -= sample_val_mean;                                        // 去除直流分量
-            // if (abs(sample_data.step) >= sample_step_acc)
-            if (sample_step_start >= sample_step_acc)
-            {
-                sample_data.flt_val = sample_data.raw_val;                                     // 数据预填充，避免下阶段起始无数据判断
-                aniso_ring_buffer_push(&sample_datas_rb, &sample_data);  
-                adc_val_max = fmaxf(adc_val_max, sample_data.flt_val);
-                adc_val_min = fminf(adc_val_min, sample_data.flt_val);                      // 压入缓存
-                if (aniso_ring_buffer_size(&sample_datas_rb) >= BUFFER_VALUE_CNT)
-                {
-                    sample_step_acc = 0;
-                    sample_step_start = 0;
-                    state_machine_flag = ANISO_STATE_SAMPLE;
-                    // printf_("ANISO_STATE_SAMPLE start\r\n");
-                }
-                // printf_("ANISO_STATE_PREHEAT %.3f\r\n", sample_data.flt_val);
-
-            }
-            break;
-
-        // 采样阶段：对应寻位运动的匀速段，判断触发标志
-        case ANISO_STATE_SAMPLE:
-            sample_data.tick = timer_read_time();
-            // sample_data.step = get_step_count_z() - sample_step_start;
-            sample_data.raw_val = gpio_adc_read(gPF) - sample_val_mean; // 读取上一周期adc转换数据（同时去除直流分量）
-            gpio_adc_sample(gPF);                                       // 启动下一周期adc采样转换
-            // sample_data.flt_val = aniso_iir_filter_process(&hpf, sample_data.raw_val);
-            sample_data.flt_val = aniso_iir_filter_process(&lpf, sample_data.raw_val);
-            sample_data.flt_val = aniso_iir_filter_process(&bsf, sample_data.flt_val);
-            sample_data.flt_val = aniso_kalman_filter_process(&kmf, sample_data.flt_val);
-            aniso_ring_buffer_push(&sample_datas_rb, &sample_data); // 更新采样缓存（必须先push，判断trigger需要读缓存）
-
-            struct aniso_adc_data_t maxmin_data;
-            aniso_ring_buffer_pick(&sample_datas_rb, ALIGN_VALUE_CNT, &maxmin_data);
-            adc_val_max = fmaxf(adc_val_max, maxmin_data.flt_val);
-            adc_val_min = fminf(adc_val_min, maxmin_data.flt_val);
-            sample_data.trigger = get_trigger1();                   // 判断触发标志
-            if (sample_data.trigger == 1)
-            {
-                // printf_("ANISO_STATE_SAMPLE triggered 0\r\n");
-                aniso_ring_buffer_update(&sample_datas_rb, 0, &sample_data);
-                trigger1_count++;
-            }
-            else {
-                trigger1_count = 0;
-            }
-
-            if (trigger1_count > 4) {
-                // printf_("ANISO_STATE_SAMPLE triggered 1\r\n");
-                trigger1_count = 0;
-                gpio_out_setup(GPIO('B', 2), 0);
-                gpio_out_setup(GPIO('G', 7), 0);
-                state_machine_flag = ANISO_STATE_STOP;
-            }
-            break;
-
-        // 停止阶段
-        case ANISO_STATE_STOP:
-            gpio_out_setup(GPIO('B', 2), 1);
-            gpio_out_setup(GPIO('G', 7), 1);
-            memset(sample_datas_ar, 0, sizeof(sample_datas_ar));
-            sample_data.tick = critical_tick; // 记录临界点时间戳
-            // state_machine_flag = ANISO_STATE_IDLE;
-            sample_mode_flag = 0;
-            state_machine_flag = ANISO_STATE_INIT;
-            break;
-
-        default:
-            break;
         }
-    }
-    else
-    {
-        switch (state_machine_flag)
-        {
-        // 初始阶段
-        case ANISO_STATE_INIT:
-            sample_data.tick = timer_read_time();
-            sample_data.step = get_step_count_z();
-            gpio_adc_sample(gPF); // 启动下一周期adc采样转换
-            state_machine_flag = ANISO_STATE_SAMPLE;
-            break;
 
-        // 采样阶段
-        case ANISO_STATE_SAMPLE:
-            sample_data.tick = timer_read_time();
-            sample_data.step = get_step_count_z();
-            sample_data.raw_val = gpio_adc_read(gPF); // 读取上一周期adc转换数据
-            gpio_adc_sample(gPF);                     // 启动下一周期adc采样转换
-            break;
-
-        // 停止阶段
-        case ANISO_STATE_STOP:
-            sample_data.tick = timer_read_time();
-            sample_data.step = get_step_count_z();
-            sample_data.raw_val = gpio_adc_read(gPF); // 读取上一周期adc转换数据
-            state_machine_flag = ANISO_STATE_IDLE;
-            break;
-
-        default:
-            break;
+        if (trigger1_count > 4) {
+            // printf_("ANISO_STATE_SAMPLE triggered 1\r\n");
+            trigger1_count = 0;
+            gpio_out_setup(GPIO('B', 2), 0);
+            // gpio_out_setup(GPIO('G', 7), 0);
+            state_machine_flag = ANISO_STATE_STOP;
         }
+        break;
+
+    // 停止阶段
+    case ANISO_STATE_STOP:
+        gpio_out_setup(GPIO('B', 2), 1);
+        // gpio_out_setup(GPIO('G', 7), 1);
+        memset(sample_datas_ar, 0, sizeof(sample_datas_ar));
+        sample_data.tick = critical_tick; // 记录临界点时间戳
+        // state_machine_flag = ANISO_STATE_IDLE;
+        sample_mode_flag = 0;
+        state_machine_flag = ANISO_STATE_INIT;
+        break;
+
+    default:
+        break;
     }
 
     if (log_flag) // aniso_endstop_information上报
@@ -454,9 +419,15 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
 
 void sample_task(void)
 {
-    printf_("aniso_bed_mesh state_machine_flag=%u\r\n", (uint16_t)state_machine_flag);
+    {
+        uint32_t now = timer_read_time();
+        int32_t dt = (int32_t)(sample_timer.waketime - now);
+        printf_("aniso_bed_mesh state_machine_flag=%u trigger1_count=%u waketime=%u now=%u dt=%d\r\n",
+                (uint16_t)state_machine_flag, (uint16_t)trigger1_count,
+                sample_timer.waketime, now, dt);
+    }
 }
-// DECL_TASK(sample_task);
+DECL_TASK(sample_task);
 
 void command_config_aniso_bed_mesh(uint32_t *args)
 {
@@ -488,7 +459,7 @@ void command_setup_aniso_bed_mesh(uint32_t *args)
         sample_mode_flag = 0;
         state_machine_flag = ANISO_STATE_INIT;
         gpio_out_setup(GPIO('B', 2), 1);
-        gpio_out_setup(GPIO('G', 7), 1);
+        // gpio_out_setup(GPIO('G', 7), 1);
         printf_("setup_aniso_bed_mesh oid=%u\r\n", goid);
         break;
 
