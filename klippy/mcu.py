@@ -258,9 +258,9 @@ class TriggerDispatch:
     def start(self, print_time):
         reactor = self._mcu.get_printer().get_reactor()
         self._trigger_completion = reactor.completion()
-        expire_timeout = TRSYNC_TIMEOUT
-        if len(self._trsyncs) == 1:
-            expire_timeout = TRSYNC_SINGLE_MCU_TIMEOUT
+        expire_timeout = TRSYNC_SINGLE_MCU_TIMEOUT
+        # if len(self._trsyncs) == 1:
+        #     expire_timeout = TRSYNC_SINGLE_MCU_TIMEOUT
         for i, trsync in enumerate(self._trsyncs):
             report_offset = float(i) / len(self._trsyncs)
             trsync.start(print_time, report_offset,
@@ -307,7 +307,8 @@ class MCU_endstop:
     def _build_config(self):
         # Setup config
         # TODO:引脚是配置参数，有变动风险，根据引脚识别不够通用灵活
-        is_z = 1 if self._pin == 'PB5' else 0
+        # is_z = 1 if self._pin == 'PB5' else 0
+        is_z = 0
         self._mcu.add_config_cmd("config_endstop oid=%d pin=%s pull_up=%d is_z=%d"
                                  % (self._oid, self._pin, self._pullup, is_z))
         self._mcu.add_config_cmd(

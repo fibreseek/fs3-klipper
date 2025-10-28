@@ -77,7 +77,7 @@ class HomingMove:
         # Notify start of homing/probing move
         self.printer.send_event("homing:homing_move_begin", self)
         aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
-        aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 1, 0])#切换为adc采样+触发判断模式
+        # aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 1, 0])#切换为adc采样+触发判断模式
         # Note start location
         self.toolhead.flush_step_generation()
         kin = self.toolhead.get_kinematics()
@@ -98,7 +98,7 @@ class HomingMove:
                 acc_step = (acc_dist / mcu_endstop.get_steppers()[0].get_step_dist()) #加速段微步数
                 aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 2, math.ceil(acc_step)])
                 sample_time = rest_time #z轴传感器开启有均匀时间的采样滤波器
-                sample_count = 5 #z轴传感器的触发去抖约束加强
+                sample_count = 1 #z轴传感器的触发去抖约束加强
                 logging.info(f"_aniso freq {(1/rest_time):.3f}")
             wait = mcu_endstop.home_start(print_time, sample_time,
                                           sample_count, rest_time,

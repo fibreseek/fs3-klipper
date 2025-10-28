@@ -611,7 +611,7 @@ class ProbeSessionHelper:
         sample_cache = [] #采样结果历史缓存初始化
         
         while len(positions) < sample_count:
-            gcode.run_script_from_command("G4 P200")
+            # gcode.run_script_from_command("G4 P1000")
             # Probe position
             pos = self._probe(gcmd)
             positions.append(pos)

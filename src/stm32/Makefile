@@ -24,7 +24,7 @@ CFLAGS-$(CONFIG_MACH_STM32F103) += -mcpu=cortex-m3
 CFLAGS-$(CONFIG_MACH_N32G45x) += -mcpu=cortex-m4 -Ilib/n32g45x/include
 CFLAGS-$(CONFIG_MACH_STM32F1) += -Ilib/stm32f1/include
 CFLAGS-$(CONFIG_MACH_STM32F2) += -mcpu=cortex-m3 -Ilib/stm32f2/include
-CFLAGS-$(CONFIG_MACH_STM32F4) += -mcpu=cortex-m4 -Ilib/stm32f4/include
+CFLAGS-$(CONFIG_MACH_STM32F4) += -mcpu=cortex-m4 -mfpu=vfpv4-d16 -mfloat-abi=hard -Ilib/stm32f4/include
 CFLAGS-$(CONFIG_MACH_STM32F7) += -mcpu=cortex-m7 -Ilib/stm32f7/include
 CFLAGS-$(CONFIG_MACH_STM32G0) += -mcpu=cortex-m0plus -Ilib/stm32g0/include
 CFLAGS-$(CONFIG_MACH_STM32G4) += -mcpu=cortex-m4 -Ilib/stm32g4/include
@@ -93,7 +93,8 @@ src-$(CONFIG_HAVE_GPIO_SDIO) += stm32/sdio.c
 #aniso add start
 src-$(CONFIG_MACH_STM32H7) += stm32/xyz_align.c
 src-$(CONFIG_MACH_STM32H7) += stm32/debug/debug.c
-src-$(CONFIG_MACH_STM32H7) += stm32/debug/printf.c
+src-$(CONFIG_MACH_STM32F4) += stm32/debug/debug_f401.c
+src-y += stm32/debug/printf.c
 #aniso add end
 # Binary output file rules
 target-y += $(OUT)klipper.bin

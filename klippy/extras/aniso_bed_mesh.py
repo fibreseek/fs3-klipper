@@ -8,7 +8,7 @@ class aniso_bed_mesh:
         adc_pin = config.get('pin', 'PF5')
         adc_ppin = ppins.lookup_pin(adc_pin)
         self.adc_pin = adc_ppin['pin']
-        self.mcu = self.printer.lookup_object('mcu')
+        self.mcu = self.printer.lookup_object('mcu toolhead')
         self.oid = self.mcu.create_oid()
         self.cmd_queue = self.mcu.alloc_command_queue()
         self.mcu.register_config_callback(self.build_config)
