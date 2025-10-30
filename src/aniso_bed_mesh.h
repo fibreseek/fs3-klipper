@@ -33,9 +33,6 @@ void command_setup_aniso_bed_mesh(uint32_t *args);
 void command_config_aniso_bed_mesh(uint32_t *args);
 uint8_t aniso_adc_sample(enum aniso_state_machine_t smf);
 uint8_t get_trigger1(void);
-uint8_t get_trigger2(void);
-uint32_t get_critical1(void);
-uint32_t get_critical2(void);
 uint32_t get_critical3(void);
 
 // 出于封装性考虑，将变量声明放在源文件中

@@ -36,10 +36,7 @@ endstop_event(struct timer *t)
 {
     struct endstop *e = container_of(t, struct endstop, time);
     uint8_t val;
-    if (e->is_z == 1)
-        val = aniso_adc_sample(ANISO_STATE_PLACEHOLD);
-    else
-        val = gpio_in_read(e->pin);
+    val = gpio_in_read(e->pin);
     uint32_t nextwake = e->time.waketime + e->rest_time;
     if ((val ? ~e->flags : e->flags) & ESF_PIN_HIGH)
     {
@@ -58,10 +55,7 @@ endstop_oversample_event(struct timer *t)
 {
     struct endstop *e = container_of(t, struct endstop, time);
     uint8_t val;
-    if (e->is_z == 1)
-        val = aniso_adc_sample(ANISO_STATE_PLACEHOLD);
-    else
-        val = gpio_in_read(e->pin);
+    val = gpio_in_read(e->pin);
     if ((val ? ~e->flags : e->flags) & ESF_PIN_HIGH)
     {
         // No longer matching - reschedule for the next attempt
@@ -102,8 +96,6 @@ void command_endstop_home(uint32_t *args)
         // Disable end stop checking
         e->ts = NULL;
         e->flags = 0;
-        if (e->is_z == 1)
-            aniso_adc_sample(ANISO_STATE_IDLE);
         return;
     }
     e->rest_time = args[4];
@@ -113,11 +105,6 @@ void command_endstop_home(uint32_t *args)
     e->ts = trsync_oid_lookup(args[6]);
     e->trigger_reason = args[7];
     sched_add_timer(&e->time);
-    if (e->is_z == 1)
-    {
-        calc_sample_freq(e->rest_time);
-        aniso_adc_sample(ANISO_STATE_INIT);
-    }
 }
 DECL_COMMAND(command_endstop_home,
              "endstop_home oid=%c clock=%u sample_ticks=%u sample_count=%c"
@@ -129,13 +116,7 @@ void command_endstop_query_state(uint32_t *args)
     struct endstop *e = oid_lookup(oid, command_config_endstop);
 
     uint8_t val;
-    if (e->is_z == 1)
-    {
-        e->nextwake = get_critical3(); // 强制覆盖为临界接触时刻
-        val = aniso_adc_sample(ANISO_STATE_STOP);
-    }
-    else
-        val = gpio_in_read(e->pin);
+    val = gpio_in_read(e->pin);
 
     irq_disable();
     uint8_t eflags = e->flags;
