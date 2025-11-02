@@ -125,6 +125,13 @@ gpio_out_write(struct gpio_out g, uint32_t val)
         regs->BSRR = g.bit << 16;
 }
 
+void
+gpio_out_write_now(struct gpio_out g, uint8_t val)
+{
+    irqstatus_t flag = irq_save();
+    gpio_out_write(g, val);
+    irq_restore(flag);
+}
 
 struct gpio_in
 gpio_in_setup(uint32_t pin, int32_t pull_up)

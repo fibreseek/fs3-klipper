@@ -152,7 +152,6 @@ gpio_out_write(struct gpio_out g, uint8_t val)
         regs->PIO_CODR = g.bit;
 }
 
-
 struct gpio_in
 gpio_in_setup(uint8_t pin, int8_t pull_up)
 {

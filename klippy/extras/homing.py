@@ -77,7 +77,7 @@ class HomingMove:
         # Notify start of homing/probing move
         self.printer.send_event("homing:homing_move_begin", self)
         aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
-        # aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 1, 0])#切换为adc采样+触发判断模式
+        aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 1, 0])#切换为adc采样+触发判断模式
         # Note start location
         self.toolhead.flush_step_generation()
         kin = self.toolhead.get_kinematics()
@@ -126,9 +126,9 @@ class HomingMove:
                 trigger_times[name] = trigger_time
             elif check_triggered and error is None:
                 error = "No trigger on %s after full movement" % (name,)
-                if probe_pos: #若是PROBE命令，忽略报错，人为赋值一个异常结果
-                    trigger_times[name] = 0
-                    error = None              
+                # if probe_pos: #若是PROBE命令，忽略报错，人为赋值一个异常结果
+                #     trigger_times[name] = 0
+                #     error = None              
         # Determine stepper halt positions
         self.toolhead.flush_step_generation()
         for sp in self.stepper_positions:

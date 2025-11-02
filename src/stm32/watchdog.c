@@ -30,9 +30,10 @@ watchdog_init(void)
     IWDG->RLR = 0x0FFF; // 410-512ms timeout (depending on stm32 chip)
     IWDG->KR = 0xCCCC;
     #if CONFIG_MACH_STM32F4
-    dis = gpio_out_setup(GPIO('C', 13), 0);
+    dis = gpio_out_setup(GPIO('A', 8), 0);
     #else
-    dis = gpio_out_setup(GPIO('B', 11), 1);
+    // dis = gpio_out_setup(GPIO('B', 11), 1);
+    dis = gpio_out_setup(GPIO('G', 7), 0);
     #endif
 }
 DECL_INIT(watchdog_init);

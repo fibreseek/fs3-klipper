@@ -285,10 +285,10 @@ class ProbeCommandHelper:
             # Probe position
             probe_session.run_probe(fo_gcmd)
             probe_num += 1
-            # Retract
-            pos = toolhead.get_position()
-            liftpos = [None, None, pos[2] + params['sample_retract_dist']]
-            self._move(liftpos, params['lift_speed'])
+            # # Retract
+            # pos = toolhead.get_position()
+            # liftpos = [None, None, pos[2] + params['sample_retract_dist']]
+            # self._move(liftpos, params['lift_speed'])
         positions = probe_session.pull_probed_results()
         probe_session.end_probe_session()
         # Calculate maximum, minimum and average values
@@ -611,14 +611,15 @@ class ProbeSessionHelper:
         sample_cache = [] #采样结果历史缓存初始化
         
         while len(positions) < sample_count:
-            gcode.run_script_from_command("G4 P100")
+            # gcode.run_script_from_command("G4 P500")
             # Probe position
             pos = self._probe(gcmd)
             positions.append(pos)
             toolhead.manual_move(
-                probexy + [pos[2] + params['sample_retract_dist']],
+                # probexy + [pos[2] + params['sample_retract_dist']],
+                probexy + [params['sample_retract_dist']],
                 params['lift_speed'])
-
+            gcode.run_script_from_command("G4 P600")
             # Check samples tolerance
             if len(positions) == sample_count:
                 result = calc_probe_z_mad(positions, params['samples_tolerance'])
