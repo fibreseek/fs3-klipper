@@ -40,14 +40,12 @@
 #define SAMPLE_INTERVAL_US 200                        // 采样间隔200微秒
 #define SAMPLE_FREQUENCY_HZ (1000000/SAMPLE_INTERVAL_US) // 采样频率5000Hz
 #define TRIGGER_COUNT_MAX 5                       // 触发计数最大值
-#define SAMPLE_DELAY_US 100000                          
 
 static uint8_t log_flag = 0;                              // 0 数据上报关闭；1 数据上报开启
 static int32_t sample_step_acc;                       // 加速段对应电机微步数
 static int32_t sample_step_start;                     // 起始电机微步数
 static uint32_t sample_cycle_now;                     // 当前采样周期次数
 static uint32_t critical_tick = 1;                    // 临界拐点的时间戳
-static uint32_t stop_start_time = 0;                  // STOP阶段开始时间戳
 static enum aniso_state_machine_t state_machine_flag; // 状态机标志位
 static float sample_freq = 1.0f;                      // 采样频率
 static float sample_val_mean;                         // 采样均值
@@ -138,7 +136,8 @@ uint32_t get_critical3(void)
 static uint_fast8_t
 sample_adc_event(struct timer *timer)
 {
-    aniso_adc_sample(ANISO_STATE_PLACEHOLD);
+    if (state_machine_flag != ANISO_STATE_IDLE)
+        aniso_adc_sample(ANISO_STATE_PLACEHOLD);
     
     // 重新调度定时器，固定间隔采样
     timer->waketime += timer_from_us(SAMPLE_INTERVAL_US);
@@ -205,7 +204,6 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
         sample_cycle_now++;
         sample_val_mean += (sample_data.raw_val - sample_val_mean) / sample_cycle_now; // 在线计算历史均值
         sample_data.raw_val -= sample_val_mean;                // 去除直流分量
-        // if (abs(sample_data.step) >= sample_step_acc)
         if (sample_step_start >= sample_step_acc)
         {
             sample_data.flt_val = sample_data.raw_val;                                     // 数据预填充，避免下阶段起始无数据判断
@@ -242,10 +240,6 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
         // current_adc_sample_filtered = sample_data.flt_val;
         // current_adc_sample = sample_data.raw_val;
 
-        // struct aniso_adc_data_t maxmin_data;
-        // aniso_ring_buffer_pick(&sample_datas_rb, ALIGN_VALUE_CNT, &maxmin_data);
-        // adc_val_max = fmaxf(adc_val_max, maxmin_data.flt_val);
-        // adc_val_min = fminf(adc_val_min, maxmin_data.flt_val);
         sample_data.trigger = get_trigger1();                // 判断触发标志
         if (sample_data.trigger == 1)
         {
@@ -258,7 +252,6 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
         }
 
         if (trigger1_count > TRIGGER_COUNT_MAX) {
-            // printf_("ANISO_STATE_SAMPLE triggered 1\r\n");
             trigger1_count = 0;
             gpio_out_write_now(triggerPF, 0);
             state_machine_flag = ANISO_STATE_STOP;
@@ -269,25 +262,9 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
     // 停止阶段
     case ANISO_STATE_STOP:
     {
-        // 如果是第一次进入STOP阶段，记录开始时间
-        if (stop_start_time == 0) {
-            stop_start_time = timer_read_time();
-            gpio_out_write_now(triggerPF, 1);  // 设置触发引脚
-        }
-        
-        // 检查是否已经等待了100ms
-        uint32_t current_time = timer_read_time();
-        uint32_t wait_ticks = timer_from_us(SAMPLE_DELAY_US);
-        
-        if (timer_is_before(current_time, stop_start_time + wait_ticks)) {
-            // 还没有到100ms，继续等待
-            break;
-        }
-        
-        // 100ms等待完成，执行重置操作
+        gpio_out_write_now(triggerPF, 1);  // 设置触发引脚
         memset(sample_datas_ar, 0, sizeof(sample_datas_ar));
-        state_machine_flag = ANISO_STATE_INIT;
-        stop_start_time = 0;  // 重置计时器
+        state_machine_flag = ANISO_STATE_IDLE;
     }
     break;
 
@@ -306,8 +283,10 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
 
 // void sample_task(void)
 // {
-//     printf_("aniso_bed_mesh state_machine_flag=%u timer_running_count=%u sample_filtered=%u sample_raw=%u\r\n",
-//                 (uint16_t)state_machine_flag, timer_running_count, (uint32_t)(current_adc_sample_filtered * 1000), (uint32_t)(current_adc_sample * 1000));
+//     printf_("aniso_bed_mesh state_machine_flag=%u\r\n",
+//                 (uint16_t)state_machine_flag);
+//     // printf_("aniso_bed_mesh state_machine_flag=%u timer_running_count=%u sample_filtered=%u sample_raw=%u\r\n",
+//     //             (uint16_t)state_machine_flag, timer_running_count, (uint32_t)(current_adc_sample_filtered * 1000), (uint32_t)(current_adc_sample * 1000));
 // }
 // DECL_TASK(sample_task);
 
@@ -319,7 +298,7 @@ void command_config_aniso_bed_mesh(uint32_t *args)
     gPF = gpio_adc_setup(adc_pin);
     triggerPF = gpio_out_setup(trigger_pin, 1);
 
-    state_machine_flag = ANISO_STATE_INIT;
+    state_machine_flag = ANISO_STATE_IDLE;
     // printf_("aniso_bed_mesh configuring oid=%u op=%u adc_pin=%u trigger_pin=%u\r\n", goid, 0, adc_pin, trigger_pin);
 
     sched_del_timer(&sample_timer);
@@ -333,15 +312,15 @@ DECL_COMMAND(command_config_aniso_bed_mesh, "config_aniso_bed_mesh oid=%c adc_pi
 
 void command_setup_aniso_bed_mesh(uint32_t *args)
 {
-    // uint8_t goid = (uint8_t)args[0];
+    uint8_t goid = (uint8_t)args[0];
     switch (args[1]) // 功能码
     {
     case 1: // 设置工作模式
+        printf_("setup_aniso_bed_mesh oid=%u\r\n", goid);
         gpio_out_write_now(triggerPF, 1);
         state_machine_flag = ANISO_STATE_INIT;
         memset(sample_datas_ar, 0, sizeof(sample_datas_ar));
-        stop_start_time = 0;  // 重置计时器
-        // printf_("setup_aniso_bed_mesh oid=%u\r\n", goid);
+        trigger1_count = 0;
         break;
 
     case 2: // 获取寻位运动的加速段对应的电机微步数

@@ -611,7 +611,6 @@ class ProbeSessionHelper:
         sample_cache = [] #采样结果历史缓存初始化
         
         while len(positions) < sample_count:
-            # gcode.run_script_from_command("G4 P500")
             # Probe position
             pos = self._probe(gcmd)
             positions.append(pos)
@@ -619,7 +618,13 @@ class ProbeSessionHelper:
                 # probexy + [pos[2] + params['sample_retract_dist']],
                 probexy + [params['sample_retract_dist']],
                 params['lift_speed'])
-            gcode.run_script_from_command("G4 P600")
+
+            # Wait for the retract move to complete before sending commands
+            toolhead.wait_moves()
+
+            # # After move completes, switch aniso_bed_mesh to ADC sampling + trigger mode
+            # aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
+            # aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 1, 0])  # 切换为adc采样+触发判断模式
             # Check samples tolerance
             if len(positions) == sample_count:
                 result = calc_probe_z_mad(positions, params['samples_tolerance'])
