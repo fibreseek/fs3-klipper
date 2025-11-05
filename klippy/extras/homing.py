@@ -77,7 +77,6 @@ class HomingMove:
         # Notify start of homing/probing move
         self.printer.send_event("homing:homing_move_begin", self)
         aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
-        aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 1, 0])#切换为adc采样+触发判断模式
         # Note start location
         self.toolhead.flush_step_generation()
         kin = self.toolhead.get_kinematics()
@@ -104,6 +103,8 @@ class HomingMove:
                                           sample_count, rest_time,
                                           triggered=triggered)
             endstop_triggers.append(wait)
+            if name == 'z' or name == 'probe':
+                aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 1, 0]) #开始进行压电陶瓷采样
         all_endstop_trigger = multi_complete(self.printer, endstop_triggers)
         self.toolhead.dwell(HOMING_START_DELAY)
         # Issue move

@@ -39,7 +39,7 @@
 #define CRITICAL_VALUE_CNT 30                         // 回溯临界拐点的容量
 #define SAMPLE_INTERVAL_US 200                        // 采样间隔200微秒
 #define SAMPLE_FREQUENCY_HZ (1000000/SAMPLE_INTERVAL_US) // 采样频率5000Hz
-#define TRIGGER_COUNT_MAX 5                       // 触发计数最大值
+#define TRIGGER_COUNT_MAX 8                       // 触发计数最大值
 
 static uint8_t log_flag = 0;                              // 0 数据上报关闭；1 数据上报开启
 static int32_t sample_step_acc;                       // 加速段对应电机微步数
@@ -61,7 +61,7 @@ static struct timer sample_timer;                     // 采样定时器
 volatile float adc_val_min = INFINITY; // adc触发的负向阈值
 volatile float adc_val_max = -INFINITY; // adc触发的正向阈值
 volatile uint16_t trigger1_count = 0;
-// volatile uint16_t timer_running_count = 0;
+volatile uint16_t timer_running_count = 0;
 // volatile float current_adc_sample = 0.0f;
 // volatile float current_adc_sample_filtered = 0.0f;
 
@@ -173,7 +173,7 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
         sample_cycle_now = 0;
         // sample_step_start = get_step_count_z();
         // 过滤触发后，产生振荡的异常数据，以300ms振荡为例，0.3*(1000*1000/SAMPLE_INTERVAL_US)=1500个采样点
-        sample_step_acc = 0.3*SAMPLE_FREQUENCY_HZ;
+        sample_step_acc = 0.5*SAMPLE_FREQUENCY_HZ;
         sample_freq = SAMPLE_FREQUENCY_HZ;
         sample_step_start = 0;
         critical_tick = 1;
@@ -281,14 +281,14 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
     return sample_data.trigger;
 }
 
-// void sample_task(void)
-// {
-//     printf_("aniso_bed_mesh state_machine_flag=%u\r\n",
-//                 (uint16_t)state_machine_flag);
-//     // printf_("aniso_bed_mesh state_machine_flag=%u timer_running_count=%u sample_filtered=%u sample_raw=%u\r\n",
-//     //             (uint16_t)state_machine_flag, timer_running_count, (uint32_t)(current_adc_sample_filtered * 1000), (uint32_t)(current_adc_sample * 1000));
-// }
-// DECL_TASK(sample_task);
+void sample_task(void)
+{
+    printf_("aniso_bed_mesh state_machine_flag=%u timer_running_count=%u\r\n",
+                (uint16_t)state_machine_flag, timer_running_count);
+    // printf_("aniso_bed_mesh state_machine_flag=%u timer_running_count=%u sample_filtered=%u sample_raw=%u\r\n",
+    //             (uint16_t)state_machine_flag, timer_running_count, (uint32_t)(current_adc_sample_filtered * 1000), (uint32_t)(current_adc_sample * 1000));
+}
+DECL_TASK(sample_task);
 
 void command_config_aniso_bed_mesh(uint32_t *args)
 {

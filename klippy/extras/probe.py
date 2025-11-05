@@ -701,7 +701,10 @@ class ProbePointsHelper:
     def get_lift_speed(self):
         return self.lift_speed
     def _move(self, coord, speed):
-        self.printer.lookup_object('toolhead').manual_move(coord, speed)
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.manual_move(coord, speed)
+        # Wait for the retract move to complete before sending commands
+        toolhead.wait_moves()
     def _raise_tool(self, is_first=False):
         speed = self.lift_speed
         # if is_first:
