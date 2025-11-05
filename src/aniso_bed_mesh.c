@@ -265,6 +265,7 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
         gpio_out_write_now(triggerPF, 1);  // 设置触发引脚
         memset(sample_datas_ar, 0, sizeof(sample_datas_ar));
         state_machine_flag = ANISO_STATE_IDLE;
+        sched_del_timer(&sample_timer);
     }
     break;
 
@@ -281,14 +282,14 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
     return sample_data.trigger;
 }
 
-void sample_task(void)
-{
-    printf_("aniso_bed_mesh state_machine_flag=%u timer_running_count=%u\r\n",
-                (uint16_t)state_machine_flag, timer_running_count);
-    // printf_("aniso_bed_mesh state_machine_flag=%u timer_running_count=%u sample_filtered=%u sample_raw=%u\r\n",
-    //             (uint16_t)state_machine_flag, timer_running_count, (uint32_t)(current_adc_sample_filtered * 1000), (uint32_t)(current_adc_sample * 1000));
-}
-DECL_TASK(sample_task);
+// void sample_task(void)
+// {
+//     // printf_("aniso_bed_mesh state_machine_flag=%u timer_running_count=%u\r\n",
+//     //             (uint16_t)state_machine_flag, timer_running_count);
+//     printf_("aniso_bed_mesh state_machine_flag=%u timer_running_count=%u sample_filtered=%u sample_raw=%u\r\n",
+//                 (uint16_t)state_machine_flag, timer_running_count, (uint32_t)(current_adc_sample_filtered * 1000), (uint32_t)(current_adc_sample * 1000));
+// }
+// DECL_TASK(sample_task);
 
 void command_config_aniso_bed_mesh(uint32_t *args)
 {
@@ -304,7 +305,7 @@ void command_config_aniso_bed_mesh(uint32_t *args)
     sched_del_timer(&sample_timer);
     sample_timer.func = sample_adc_event;
     sample_timer.waketime = timer_read_time() + timer_from_us(SAMPLE_INTERVAL_US);
-    sched_add_timer(&sample_timer);
+    // sched_add_timer(&sample_timer);
     
     // printf_("aniso_bed_mesh config end\r\n");
 }
@@ -321,6 +322,7 @@ void command_setup_aniso_bed_mesh(uint32_t *args)
         state_machine_flag = ANISO_STATE_INIT;
         memset(sample_datas_ar, 0, sizeof(sample_datas_ar));
         trigger1_count = 0;
+        sched_add_timer(&sample_timer);
         break;
 
     case 2: // 获取寻位运动的加速段对应的电机微步数

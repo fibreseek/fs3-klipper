@@ -86,7 +86,7 @@ gpio_adc_setup(uint32_t pin)
 
 #if CONFIG_MACH_STM32F4x5 || CONFIG_MACH_STM32F446
     // On the STM32F405, channel 13 is only available from ADC3
-    if (chan == 13) {
+    if (chan == 10) {
         adc = ADC3;
         adc_base += 0x800;
     }
