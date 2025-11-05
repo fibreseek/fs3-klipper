@@ -208,7 +208,10 @@ class ProbeCommandHelper:
             logging.info("aniso_probe_adc_stop")
 
     def _move(self, coord, speed):
-        self.printer.lookup_object('toolhead').manual_move(coord, speed)
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.manual_move(coord, speed)
+        # Wait for the retract move to complete before sending commands
+        toolhead.wait_moves()
 
     def set_trigger_offset(self, offset):
         self.trigger_offset = offset
