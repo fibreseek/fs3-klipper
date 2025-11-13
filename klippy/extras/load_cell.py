@@ -6,8 +6,10 @@
 
 from . import hx71x
 from . import ads1220
+from . import ads131m08
 from .bulk_sensor import BatchWebhooksClient
 import collections, itertools
+import logging
 # We want either Python 3's zip() or Python 2's izip() but NOT 2's zip():
 zip_impl = zip
 try:
@@ -287,19 +289,32 @@ class LoadCellSampleCollector:
         self._overflows = 0
 
     def _on_samples(self, msg):
+        logger = logging.getLogger('load_cell')
         if not self.is_started:
+            logger.info("LoadCellSampleCollector: received samples while stopped; ignoring")
             return False  # already stopped, ignore
-        self._errors += msg['errors']
-        self._overflows += msg['overflows']
-        samples = msg['data']
+        errors = msg.get('errors', 0)
+        overflows = msg.get('overflows', 0)
+        self._errors += errors
+        self._overflows += overflows
+        samples = msg.get('data', [])
+        logger.info("LoadCellSampleCollector: processing %d samples (errors +%d, overflows +%d). totals: errors=%d, overflows=%d",
+                     len(samples), errors, overflows, self._errors, self._overflows)
         for sample in samples:
             time = sample[0]
             if self.min_time <= time <= self.max_time:
                 self._samples.append(sample)
+                try:
+                    counts = sample[2]
+                except Exception:
+                    counts = None
+                logger.info("Appended sample: time=%.6f counts=%s", time, str(counts))
             if time > self.max_time:
                 self.is_started = False
+                logger.info("Sample time %.6f exceeded max_time %.6f, stopping collection", time, self.max_time)
         if len(self._samples) >= self.min_count:
             self.is_started = False
+            logger.info("Collected %d samples >= min_count %d, stopping collection", len(self._samples), self.min_count)
         return self.is_started
 
     def _finish_collecting(self):
@@ -405,6 +420,11 @@ class LoadCell:
             samples.append([row[0], self.counts_to_grams(row[1]), row[1],
                             self.tare_counts])
         msg = {'data': samples, 'errors': errors, 'overflows': overflows}
+        logger = logging.getLogger('load_cell')
+        # Log sample count, errors, overflows and a short preview of the raw data
+        logger.info("LoadCell: broadcasting sensor data: samples=%d, errors=%s, overflows=%s, data_preview=%s",
+                len(samples), errors, overflows,
+                (data[:10] if isinstance(data, list) else data))
         self.clients.send(msg)
         return True
 
@@ -518,6 +538,7 @@ def load_config(config):
     sensors = {}
     sensors.update(hx71x.HX71X_SENSOR_TYPES)
     sensors.update(ads1220.ADS1220_SENSOR_TYPE)
+    sensors.update(ads131m08.ADS131M08_SENSOR_TYPE)
     sensor_class = config.getchoice('sensor_type', sensors)
     return LoadCell(config, sensor_class(config))
 

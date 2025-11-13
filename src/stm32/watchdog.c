@@ -32,8 +32,8 @@ watchdog_init(void)
     #if CONFIG_MACH_STM32F4
     dis = gpio_out_setup(GPIO('A', 8), 0);
     #else
-    // dis = gpio_out_setup(GPIO('B', 11), 1);
-    dis = gpio_out_setup(GPIO('G', 7), 0);
+    dis = gpio_out_setup(GPIO('B', 11), 1);
+    // dis = gpio_out_setup(GPIO('G', 7), 0);
     #endif
 }
 DECL_INIT(watchdog_init);

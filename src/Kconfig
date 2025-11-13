@@ -164,6 +164,10 @@ config WANT_ADS1220
     bool
     depends on WANT_SPI
     default y
+config WANT_ADS131M08
+    bool
+    depends on WANT_SPI
+    default y
 config WANT_LDC1612
     bool
     depends on WANT_I2C
@@ -175,7 +179,7 @@ config WANT_SENSOR_ANGLE
 config NEED_SENSOR_BULK
     bool
     depends on WANT_ADXL345 || WANT_LIS2DW || WANT_MPU9250 || WANT_ICM20948 \
-        || WANT_HX71X || WANT_ADS1220 || WANT_LDC1612 || WANT_SENSOR_ANGLE
+        || WANT_HX71X || WANT_ADS1220 || WANT_ADS131M08 || WANT_LDC1612 || WANT_SENSOR_ANGLE
     default y
 menu "Optional features (to reduce code size)"
     depends on HAVE_LIMITED_CODE_SIZE
@@ -239,6 +243,9 @@ config WANT_HX71X
     depends on HAVE_GPIO
 config WANT_ADS1220
     bool "Support ADS 1220 ADC chip"
+    depends on WANT_SPI
+config WANT_ADS131M08
+    bool "Support ADS131M08 ADC chip"
     depends on WANT_SPI
 comment "Other external sensor chips"
     depends on WANT_SPI || WANT_I2C
