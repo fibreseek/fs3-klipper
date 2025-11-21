@@ -427,6 +427,13 @@ class LookupZSteppers:
         for stepper in kin.get_steppers():
             if stepper.is_active_axis('z'):
                 self.add_stepper_cb(stepper)
+    
+    def get_z_stepper_oid(self):
+        kin = self.printer.lookup_object('toolhead').get_kinematics()
+        for stepper in kin.get_steppers():
+            if stepper.is_active_axis('z'):
+                return stepper.get_oid()
+        return None
 
 # Homing via probe:z_virtual_endstop
 class HomingViaProbeHelper:

@@ -29,4 +29,4 @@ src-$(CONFIG_WANT_LDC1612) += sensor_ldc1612.c
 src-$(CONFIG_WANT_SENSOR_ANGLE) += sensor_angle.c
 src-$(CONFIG_NEED_SENSOR_BULK) += sensor_bulk.c
 
-src-y += aniso_ring_buffer.c aniso_filter.c aniso_bed_mesh.c
+src-y += aniso_ring_buffer.c aniso_filter.c aniso_bed_mesh.c aniso_zoffset_align.c

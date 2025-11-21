@@ -74,6 +74,11 @@ float aniso_kalman_filter_process(struct aniso_kalman_filter_t *kf, float val)
     if (kf == NULL || !kf->enable)
         return val;
 
+    // Check for invalid input values
+    if (!isfinite(val)) {
+        return kf->y; // Return previous output if input is invalid
+    }
+
     kf->x = val;
     // Update prediction covariance: k-time prediction covariance = k-1-time prediction covariance + process noise covariance
     kf->p += kf->q;
@@ -82,13 +87,21 @@ float aniso_kalman_filter_process(struct aniso_kalman_filter_t *kf, float val)
     kf->p = (kf->p > 1e6f) ? 1e6f : ((kf->p < 0.0f) ? 0.0f : kf->p);
 
     // Calculate Kalman gain: Kalman gain = k-time prediction covariance / (k-time prediction covariance + observation noise covariance)
-    kf->k = kf->p / (kf->p + kf->r);
+    float denominator = kf->p + kf->r;
+    if (denominator <= 0.0f || !isfinite(denominator)) {
+        kf->k = 0.0f; // Avoid division by zero or invalid values
+    } else {
+        kf->k = kf->p / denominator;
+    }
 
     // Limit gain range to increase stability
     kf->k = (kf->k > 1.0f) ? 1.0f : ((kf->k < 0.0f) ? 0.0f : kf->k);
 
     // Update corrected value: k-time corrected value = k-1-time corrected value + Kalman gain * (k-time measured value - k-1-time corrected value)
-    kf->y += kf->k * (kf->x - kf->y);
+    float innovation = kf->x - kf->y;
+    if (isfinite(innovation)) {
+        kf->y += kf->k * innovation;
+    }
 
     // Update prediction covariance
     kf->p *= (1.0f - kf->k);
@@ -96,6 +109,11 @@ float aniso_kalman_filter_process(struct aniso_kalman_filter_t *kf, float val)
     // Prevent covariance from becoming negative
     if (kf->p < 0.0f)
         kf->p = 0.0f;
+
+    // Ensure output is finite
+    if (!isfinite(kf->y)) {
+        kf->y = val; // Reset to input value if output becomes invalid
+    }
 
     return kf->y;
 }
@@ -272,4 +290,368 @@ float aniso_iir_filter_process(struct aniso_iir_filter_t *iirf, float val)
         iirf->y[0] = res; // Keep previous output when non-finite value occurs
 
     return iirf->y[0];
+}
+
+/**
+ * @brief Initialize moving average filter
+ *
+ * @param maf Pointer to moving average filter structure
+ * @param window_size Size of the moving window
+ */
+void aniso_moving_average_filter_init(struct aniso_moving_average_filter_t *maf, uint16_t window_size)
+{
+    if (maf == NULL || window_size == 0 || window_size > ANISO_MAX_MOVING_AVERAGE_WINDOW)
+        return;
+
+    maf->size = window_size;
+    maf->index = 0;
+    maf->sum = 0.0f;
+    maf->filled = 0;
+    maf->enable = 1;
+
+    // Initialize buffer with zeros
+    for (uint16_t i = 0; i < window_size; i++) {
+        maf->buffer[i] = 0.0f;
+    }
+}
+
+/**
+ * @brief Reset moving average filter state
+ *
+ * @param maf Pointer to moving average filter structure
+ */
+void aniso_moving_average_filter_reset(struct aniso_moving_average_filter_t *maf)
+{
+    if (maf == NULL || !maf->enable)
+        return;
+
+    maf->index = 0;
+    maf->sum = 0.0f;
+    maf->filled = 0;
+
+    // Clear buffer
+    for (uint16_t i = 0; i < maf->size; i++) {
+        maf->buffer[i] = 0.0f;
+    }
+
+    maf->enable = 0;
+}
+
+/**
+ * @brief Process moving average filter
+ *
+ * @param maf Pointer to moving average filter structure
+ * @param val Input value for this cycle
+ * @return float Processed output value (moving average)
+ */
+float aniso_moving_average_filter_process(struct aniso_moving_average_filter_t *maf, float val)
+{
+    if (maf == NULL || !maf->enable)
+        return val;
+
+    // Check for invalid input values
+    if (!isfinite(val)) {
+        // Return current average if input is invalid
+        if (maf->filled) {
+            return maf->sum / maf->size;
+        } else if (maf->index > 0) {
+            return maf->sum / maf->index;
+        } else {
+            return 0.0f;
+        }
+    }
+
+    // If buffer is not yet filled, accumulate samples
+    if (!maf->filled) {
+        maf->sum += val;
+        maf->buffer[maf->index] = val;
+        maf->index++;
+        
+        // Check if buffer is now filled
+        if (maf->index >= maf->size) {
+            maf->filled = 1;
+            maf->index = 0; // Reset index for circular buffer
+        }
+        
+        // Return current average (partial if buffer not filled)
+        if (maf->index > 0) {
+            return maf->sum / maf->index;
+        } else {
+            return val;
+        }
+    }
+
+    // Buffer is filled, use circular buffer approach
+    // Subtract the oldest value and add the new value
+    float oldest_val = maf->buffer[maf->index];
+    if (isfinite(oldest_val)) {
+        maf->sum -= oldest_val;
+    }
+    maf->sum += val;
+    maf->buffer[maf->index] = val;
+    
+    // Update index for next iteration
+    maf->index = (maf->index + 1) % maf->size;
+
+    // Return the moving average
+    return maf->sum / maf->size;
+}
+
+/**
+ * @brief Process moving average filter with outlier removal (remove max and min values)
+ *
+ * @param maf Pointer to moving average filter structure
+ * @param val Input value for this cycle
+ * @return float Processed output value (moving average without max and min)
+ */
+float aniso_moving_average_filter_process_remove_outliers(struct aniso_moving_average_filter_t *maf, float val)
+{
+    if (maf == NULL || !maf->enable)
+        return val;
+
+    // Check for invalid input values
+    if (!isfinite(val)) {
+        // Return current average if input is invalid
+        if (maf->filled) {
+            return maf->sum / maf->size;
+        } else if (maf->index > 0) {
+            return maf->sum / maf->index;
+        } else {
+            return 0.0f;
+        }
+    }
+
+    // If buffer is not yet filled, use standard moving average
+    if (!maf->filled) {
+        maf->sum += val;
+        maf->buffer[maf->index] = val;
+        maf->index++;
+        
+        // Check if buffer is now filled
+        if (maf->index >= maf->size) {
+            maf->filled = 1;
+            maf->index = 0; // Reset index for circular buffer
+        }
+        
+        // Return current average (partial if buffer not filled)
+        if (maf->index > 0) {
+            return maf->sum / maf->index;
+        } else {
+            return val;
+        }
+    }
+
+    // Buffer is filled, use circular buffer approach
+    // Subtract the oldest value and add the new value
+    float oldest_val = maf->buffer[maf->index];
+    if (isfinite(oldest_val)) {
+        maf->sum -= oldest_val;
+    }
+    maf->sum += val;
+    maf->buffer[maf->index] = val;
+    
+    // Update index for next iteration
+    maf->index = (maf->index + 1) % maf->size;
+
+    // Find max and min values in the current buffer
+    float max_val = maf->buffer[0];
+    float min_val = maf->buffer[0];
+    uint16_t valid_count = 0;
+    float valid_sum = 0.0f;
+
+    for (uint16_t i = 0; i < maf->size; i++) {
+        float current_val = maf->buffer[i];
+        if (isfinite(current_val)) {
+            valid_count++;
+            valid_sum += current_val;
+            
+            if (current_val > max_val) {
+                max_val = current_val;
+            }
+            if (current_val < min_val) {
+                min_val = current_val;
+            }
+        }
+    }
+
+    // Remove outliers only if we have enough valid samples
+    if (valid_count >= 3) { // Need at least 3 samples to remove max and min
+        // Subtract max and min from sum
+        float sum_without_outliers = valid_sum - max_val - min_val;
+        uint16_t count_without_outliers = valid_count - 2;
+        
+        // Return average without outliers
+        if (count_without_outliers > 0 && isfinite(sum_without_outliers)) {
+            return sum_without_outliers / count_without_outliers;
+        }
+    }
+
+    // Fallback to standard moving average if not enough samples for outlier removal
+    return maf->sum / maf->size;
+}
+
+/**
+ * @brief Initialize integer moving average filter
+ *
+ * @param maf Pointer to integer moving average filter structure
+ * @param window_size Size of the moving window
+ */
+void aniso_moving_average_filter_int_init(struct aniso_moving_average_filter_int_t *maf, uint16_t window_size)
+{
+    if (maf == NULL || window_size == 0 || window_size > ANISO_MAX_MOVING_AVERAGE_WINDOW)
+        return;
+
+    maf->size = window_size;
+    maf->index = 0;
+    maf->sum = 0;
+    maf->filled = 0;
+    maf->enable = 1;
+
+    // Initialize buffer with zeros
+    for (uint16_t i = 0; i < window_size; i++) {
+        maf->buffer[i] = 0;
+    }
+}
+
+/**
+ * @brief Reset integer moving average filter state
+ *
+ * @param maf Pointer to integer moving average filter structure
+ */
+void aniso_moving_average_filter_int_reset(struct aniso_moving_average_filter_int_t *maf)
+{
+    if (maf == NULL || !maf->enable)
+        return;
+
+    maf->index = 0;
+    maf->sum = 0;
+    maf->filled = 0;
+
+    // Clear buffer
+    for (uint16_t i = 0; i < maf->size; i++) {
+        maf->buffer[i] = 0;
+    }
+
+    maf->enable = 0;
+}
+
+/**
+ * @brief Process integer moving average filter
+ *
+ * @param maf Pointer to integer moving average filter structure
+ * @param val Input value for this cycle
+ * @return int32_t Processed output value (moving average)
+ */
+int32_t aniso_moving_average_filter_int_process(struct aniso_moving_average_filter_int_t *maf, int32_t val)
+{
+    if (maf == NULL || !maf->enable)
+        return val;
+
+    // If buffer is not yet filled, accumulate samples
+    if (!maf->filled) {
+        maf->sum += val;
+        maf->buffer[maf->index] = val;
+        maf->index++;
+        
+        // Check if buffer is now filled
+        if (maf->index >= maf->size) {
+            maf->filled = 1;
+            maf->index = 0; // Reset index for circular buffer
+        }
+        
+        // Return current average (partial if buffer not filled)
+        if (maf->index > 0) {
+            return maf->sum / maf->index;
+        } else {
+            return val;
+        }
+    }
+
+    // Buffer is filled, use circular buffer approach
+    // Subtract the oldest value and add the new value
+    int32_t oldest_val = maf->buffer[maf->index];
+    maf->sum -= oldest_val;
+    maf->sum += val;
+    maf->buffer[maf->index] = val;
+    
+    // Update index for next iteration
+    maf->index = (maf->index + 1) % maf->size;
+
+    // Return the moving average
+    return maf->sum / maf->size;
+}
+
+/**
+ * @brief Process integer moving average filter with outlier removal (remove max and min values)
+ *
+ * @param maf Pointer to integer moving average filter structure
+ * @param val Input value for this cycle
+ * @return int32_t Processed output value (moving average without max and min)
+ */
+int32_t aniso_moving_average_filter_int_process_remove_outliers(struct aniso_moving_average_filter_int_t *maf, int32_t val)
+{
+    if (maf == NULL || !maf->enable)
+        return val;
+
+    // If buffer is not yet filled, use standard moving average
+    if (!maf->filled) {
+        maf->sum += val;
+        maf->buffer[maf->index] = val;
+        maf->index++;
+        
+        // Check if buffer is now filled
+        if (maf->index >= maf->size) {
+            maf->filled = 1;
+            maf->index = 0; // Reset index for circular buffer
+        }
+        
+        // Return current average (partial if buffer not filled)
+        if (maf->index > 0) {
+            return maf->sum / maf->index;
+        } else {
+            return val;
+        }
+    }
+
+    // Buffer is filled, use circular buffer approach
+    // Subtract the oldest value and add the new value
+    int32_t oldest_val = maf->buffer[maf->index];
+    maf->sum -= oldest_val;
+    maf->sum += val;
+    maf->buffer[maf->index] = val;
+    
+    // Update index for next iteration
+    maf->index = (maf->index + 1) % maf->size;
+
+    // Find max and min values in the current buffer
+    int32_t max_val = maf->buffer[0];
+    int32_t min_val = maf->buffer[0];
+    uint16_t valid_count = maf->size;
+    int32_t valid_sum = maf->sum;
+
+    for (uint16_t i = 1; i < maf->size; i++) {
+        int32_t current_val = maf->buffer[i];
+        
+        if (current_val > max_val) {
+            max_val = current_val;
+        }
+        if (current_val < min_val) {
+            min_val = current_val;
+        }
+    }
+
+    // Remove outliers only if we have enough samples
+    if (valid_count >= 3) { // Need at least 3 samples to remove max and min
+        // Subtract max and min from sum
+        int32_t sum_without_outliers = valid_sum - max_val - min_val;
+        uint16_t count_without_outliers = valid_count - 2;
+        
+        // Return average without outliers
+        if (count_without_outliers > 0) {
+            return sum_without_outliers / count_without_outliers;
+        }
+    }
+
+    // Fallback to standard moving average if not enough samples for outlier removal
+    return maf->sum / maf->size;
 }
