@@ -14,13 +14,14 @@
 #include "internal.h" // GPIO
 #include "sched.h" // DECL_INIT
 #include "board/misc.h"
+#include "gpio.h"
 
 static int32_t offset_z[10] = {0};
 static int32_t offset_xy[10][5] = {0};
 static uint8_t offset_index = 0;
 extern int32_t get_step_count_x(void);
 extern int32_t get_step_count_z(void);
-#define PG11_VALUE (GPIOG->IDR & (1 << 11)) ? 1 : 0
+#define PG10_VALUE (GPIOG->IDR & (1 << 10)) ? 1 : 0
 #define ABS(x) ((x) < 0 ? -(x) : (x))
 volatile uint8_t debounce = 0; // Debounce counter for interrupt filtering
 #define DEBOUNCE_CYCLES 10  // Increase debounce time for better filtering
@@ -44,12 +45,12 @@ void command_align_start(uint32_t *args)
     uint8_t res = 0;
     uint8_t oid = args[0];
     uint8_t val = args[1];
-    uint8_t i = 0, j = 0 ;
+    uint8_t i = 0, j = 0;
     switch(val)
     {
       case 0:
         offset_index = 0;
-        //printf_("command_align_start\r\n");
+        // printf_("command_align_start\r\n");
         break;
       case 1:
         if(offset_index == 50)
@@ -85,7 +86,8 @@ void command_align_start(uint32_t *args)
         break;
 
     case 2:
-        sendf("xyz_align_end oid=%c res=%c z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i", oid, 2, PG11_VALUE, 0, 0,0,0,0);
+        sendf("xyz_align_end oid=%c res=%c z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i", oid, 2, PG10_VALUE, 0, 0,0,0,0);
+        printf_("xyz align result=%i\r\n", PG10_VALUE);
     break;
 
     case 3:
@@ -114,9 +116,9 @@ void EXTI15_10_IRQHandler(void)
 {
     int32_t x,z;
     int32_t index;
-    if (EXTI->PR1 & (1UL << 11))  // 检查是否是 EXTI10 触发
+    if (EXTI->PR1 & (1UL << 10))  // 检查是否是 EXTI10 触发
     {
-        EXTI->PR1 = (1UL << 11);  // 清除挂起标志（写 1 清除）
+        EXTI->PR1 = (1UL << 10);  // 清除挂起标志（写 1 清除）
 
         if(debounce != 0)         // Check debounce counter
         {
@@ -141,38 +143,38 @@ void EXTI15_10_IRQHandler(void)
             index = offset_index - 25;
             offset_xy[(index%5) + 5][index/5] = x;
         }
-        offset_index ++;
-        //printf_("%d\r\n", offset_index);
+        offset_index++;
+        // printf_("offset_index=%d\r\n", offset_index);
         // 处理逻辑
     }
 }
 
-void gpio_irq_init_pg11(void) // PG11
+void gpio_irq_init_pg10(void) // PG10
 {
     // 1. 使能 GPIOG 时钟
     RCC->AHB4ENR |= RCC_AHB4ENR_GPIOGEN;
     
-    // 2. 将 PG11 配置为输入模式 (修改 MODER11)
-    GPIOG->MODER &= ~(3UL << (11 * 2)); // 00: 输入模式
+    // 2. 将 PG10 配置为输入模式 (修改 MODER10)
+    GPIOG->MODER &= ~(3UL << (10 * 2)); // 00: 输入模式
     
-    // 3. 将 PG11 配置为上拉输入
-    GPIOG->PUPDR &= ~(3UL << (11 * 2)); // 清除 PUPDR11
-    GPIOG->PUPDR |= (1UL << (11 * 2));  // 01: 上拉模式
+    // 3. 将 PG10 配置为上拉输入
+    GPIOG->PUPDR &= ~(3UL << (10 * 2)); // 清除 PUPDR10
+    GPIOG->PUPDR |= (1UL << (10 * 2));  // 01: 上拉模式
     
     // 4. 使能 SYSCFG 时钟
     RCC->APB4ENR |= RCC_APB4ENR_SYSCFGEN;
     
-    // 5. 选择 EXTI11 映射到 GPIOG
-    SYSCFG->EXTICR[2] &= ~(0xF << (3 * 4)); // 清除 EXTI11 选择
-    SYSCFG->EXTICR[2] |= (6 << (3 * 4));    // 选择 GPIOG (6: GPIOG)
+    // 5. 选择 EXTI10 映射到 GPIOG
+    SYSCFG->EXTICR[2] &= ~(0xF << (2 * 4)); // 清除 EXTI10 选择
+    SYSCFG->EXTICR[2] |= (6 << (2 * 4));    // 选择 GPIOG (6: GPIOG)
     
-    // 6. 配置 EXTI11 中断触发条件为上升沿触发
-    EXTI->FTSR1 &= ~(1 << 11);  // 清除下降沿触发
-    EXTI->RTSR1 |= (1 << 11);   // 设置上升沿触发
+    // 6. 配置 EXTI10 中断触发条件为上升沿触发
+    EXTI->FTSR1 &= ~(1 << 10);  // 清除下降沿触发
+    EXTI->RTSR1 |= (1 << 10);   // 设置上升沿触发
     
-    // 7. 使能 EXTI11 中断
-    EXTI->IMR1 |= (1 << 11);  // 使能中断
-    EXTI->EMR1 |= (1 << 11);  // 使能事件
+    // 7. 使能 EXTI10 中断
+    EXTI->IMR1 |= (1 << 10);  // 使能中断
+    EXTI->EMR1 |= (1 << 10);  // 使能事件
     
     // 8. 配置 NVIC 中断优先级和使能中断
     uint32_t irq_number = 40; // EXTI15_10 对应 NVIC 中断号为 40
@@ -197,5 +199,5 @@ void xyz_task(void)
 DECL_COMMAND(command_align_start, "align_start oid=%c val=%c");
 //DECL_ARMCM_IRQ(EXTI0_IRQHandler, EXTI0_IRQn);
 DECL_ARMCM_IRQ(EXTI15_10_IRQHandler, EXTI15_10_IRQn);
-DECL_INIT(gpio_irq_init_pg11);
+DECL_INIT(gpio_irq_init_pg10);
 DECL_TASK(xyz_task);
