@@ -32,6 +32,7 @@ class VirtualSD:
         self.work_timer = None
         # wait Pause 
         self.waiting_pause_request = False
+        self.extruder_switch_detected = False
         # Error handling
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.on_error_gcode = gcode_macro.load_template(
@@ -151,6 +152,7 @@ class VirtualSD:
             self.current_file.close()
             self.current_file = None
         self.file_position = self.file_size = 0
+        self.extruder_switch_detected = False
         self.print_stats.reset()
         self.printer.send_event("virtual_sdcard:reset_file")
     cmd_SDCARD_RESET_FILE_help = "Clears a loaded SD File. Stops the print "\
@@ -171,6 +173,7 @@ class VirtualSD:
             filename = filename[1:]
         self._load_file(gcmd, filename, check_subdirs=True)
         self.do_resume()
+        self.printer.send_event("virtual_sdcard:print_start")
     def cmd_M20(self, gcmd):
         # List SD card
         files = self.get_file_list()
@@ -282,12 +285,16 @@ class VirtualSD:
             self.cmd_from_sd = True
             line = lines.pop()
 
+            if not self.extruder_switch_detected and ("switch extruder type to" in line or "; switch extruder type to:" in line):
+                self.extruder_switch_detected = True
+                self.gcode.run_script("M118 [PAUSE] pause enabling")
+
             if "Cutting completed" in line or "; Cutting completed." in line:
                 if self.waiting_pause_request == 1:
                     self.gcode.run_script("M400")
                     self.gcode.run_script("PAUSE F=1")
                     self.gcode.run_script("WAITTING_PAUSE F=0")
-                    self.gcode.run_script("M118 [PAUSE] pause completed")
+                    self.gcode.run_script("M118 [PAUSE] Delay pause completed!")
 
             if sys.version_info.major >= 3:
                 next_file_position = self.file_position + len(line.encode()) + 1

@@ -136,6 +136,7 @@ class GCodeMove:
         if 'E' in params:
             self.mode = 0
             self.proportion = 0
+            self.printer.send_event("gcode:move_extruder", 'extruder1', float(params['E']), self.absolute_extrude)
         elif 'U' in params:
             if self.absolute_extrude:
                 raise gcmd.error("M83 MODE ONLY!")
@@ -155,6 +156,7 @@ class GCodeMove:
                     gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % ((float(params['U'])/float(params['V']))*V_rotation_distance))
                     self.proportion = float(params['U'])/float(params['V'])
                 self.mode = 1
+                self.printer.send_event("gcode:move_extruder", 'extruder2', float(params['V']), self.absolute_extrude)
             else:
                 if self.mode != 2:
                     gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder")
@@ -171,6 +173,7 @@ class GCodeMove:
                 gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % (V_rotation_distance))
                 self.mode = 3
                 self.proportion = 0
+            self.printer.send_event("gcode:move_extruder", 'extruder2', float(params['V']), self.absolute_extrude)
 
     def cmd_G1(self, gcmd):
         # Move
