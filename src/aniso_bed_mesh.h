@@ -11,6 +11,7 @@ enum aniso_state_machine_t
     ANISO_STATE_PREHEAT,   // 预热阶段
     ANISO_STATE_SAMPLE,    // 采样阶段
     ANISO_STATE_STOP,      // 停止阶段
+    ANISO_STATE_TRIGGERED,  // 触发阶段（预留）
     ANISO_STATE_PLACEHOLD, // 缺省占位（自动切换）
 };
 
