@@ -87,7 +87,7 @@ void command_align_start(uint32_t *args)
 
     case 2:
         sendf("xyz_align_end oid=%c res=%c z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i", oid, 2, PG10_VALUE, 0, 0,0,0,0);
-        printf_("xyz align result=%i\r\n", PG10_VALUE);
+        // printf_("xyz align result=%i\r\n", PG10_VALUE);
     break;
 
     case 3:

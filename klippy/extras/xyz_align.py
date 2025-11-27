@@ -29,6 +29,8 @@ class xyz_align:
         self.z_value = 1.0
         self.y_max_travel = self.session_y.getfloat('position_max', 337.0)
         self.x_min_travel = self.session_x.getfloat('position_min', -52.0)
+        self.button_triggered = False
+        self.wait_check_result = False
         # Use absolute path to avoid path resolution issues
         self.ini_path = os.path.expanduser("~/printer_data/config/xyz_offset.ini")
         ppins = self.printer.lookup_object('pins')
@@ -203,6 +205,7 @@ class xyz_align:
         elif(res == 2):
             self.z_value = params['z0']
             self.gcode.respond_info("handle_align_end: z = %d" % (self.z_value))
+            self.wait_check_result = True
         else:
             self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=0 count=%d" % (res))
 
@@ -211,21 +214,42 @@ class xyz_align:
         self.align_start_cmd.send([self.oid, 0])
        #self.gcode.respond_info("xyz_align: %d" % (self.oid))
     def get_z_press_val(self, t):
-        z_offset = 1
-        self.z_value = 1
-        while(z_offset <= (15 - t*3)):
-            self.gcode.run_script_from_command("G1 Z%f F80\n" % (self.offset_z - z_offset))
-            self.gcode.run_script_from_command("M400\n")
-            self.align_start_cmd.send([self.oid, 2])
-            #time.sleep(0.1) 
-            #self.gcode.run_script_from_command("G4 P1000\n")
-            self.printer.get_reactor().pause(0.1)
+        toolhead = self.printer.lookup_object('toolhead')
+        trigger_pos = toolhead.get_position()
+        move_distance = 0
+        move_step = 0.05 # mm
+        for i in range(2):
+            if i == 0: move_step = 0.05
+            if i == 1: 
+                self.gcode.run_script_from_command("G1 Z0.5 F80\n")
+                self.gcode.run_script_from_command("M400\n")
+                move_step = 0.01
+            move_distance = 0
+            self.z_value = 1
+            self.gcode.run_script_from_command("G91\n")
+            while(move_distance <= (15 - t*3)):
+                self.gcode.run_script_from_command("G1 Z%f F80\n" % (move_step))
+                self.gcode.run_script_from_command("M400\n")
+                self.align_start_cmd.send([self.oid, 2])
+                self.wait_check_result = False
+                start_time = self.printer.get_reactor().monotonic()
+                timeout = 1.0
+                while (not self.wait_check_result) and (self.printer.get_reactor().monotonic() - start_time) < timeout:
+                    self.printer.get_reactor().pause(0.1)
+                
+                #time.sleep(0.1) 
+                #self.gcode.run_script_from_command("G4 P1000\n")
+                # self.printer.get_reactor().pause(0.1)
 
-            if (self.z_value == 0):
-                self.offset_z_press = self.offset_z - z_offset -0.3
-                self.gcode.respond_info("cmd_XYZ_ALIGN: offset_z_press = %f, self.offset_z = %f, z_offset = %f" % (self.offset_z_press, self.offset_z, z_offset))
-                break
-            z_offset += 0.5    
+                if (self.z_value == 0):
+                    trigger_pos = toolhead.get_position()
+                    break
+                move_distance += move_step
+            self.gcode.run_script_from_command("G90\n")
+        
+        self.gcode.run_script_from_command("M114\n")
+        self.offset_z_press = trigger_pos[2] - 0.3
+        self.gcode.respond_info("cmd_XYZ_ALIGN: offset_z_press = %f, self.offset_z = %f, move_distance = %f" % (self.offset_z_press, self.offset_z, move_distance))
             
     def cmd_XYZ_ALIGN(self, gcmd):
         curtime = self.printer.get_reactor().monotonic()
