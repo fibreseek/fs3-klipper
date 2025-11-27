@@ -292,9 +292,7 @@ class BlindsHallMonitor:
                 key, value = part.split('=', 1)
                 params[key.upper()] = value
             else:
-                if part.upper().startswith('T'):
-                    params['T'] = part[1:]
-                elif part.upper().startswith('S'):
+                if part.upper().startswith('S'):
                     params['S'] = part[1:]
         
         return params
@@ -337,12 +335,13 @@ class BlindsHallMonitor:
             logging.error("Temperature wait error: %s" % str(e))
             raise
     
-    cmd_M141_help = "Close blinds, fan full speed, set chamber temperature (no wait) or T0 to open blinds and cool down"
+    cmd_M141_help = "Close blinds, fan full speed, set chamber temperature (no wait) or S0 to open blinds and cool down"
     def cmd_M141(self, gcmd):
         try:
             params = self._parse_gcode_parameters(gcmd)
             
-            if 'T' in params and params['T'] == '0':
+            # 检查是否为冷却模式 (S0)
+            if 'S' in params and params['S'] == '0':
                 self._execute_cooling_procedure(gcmd, wait_for_temp=False)
                 return
             
@@ -380,12 +379,13 @@ class BlindsHallMonitor:
             logging.error("M141 command error: %s" % str(e))
             gcmd.respond_info("ERROR: M141 command failed - %s" % str(e))
     
-    cmd_M191_help = "Close blinds, fan full speed, set chamber temperature and wait or T0 to open blinds and cool down (wait)"
+    cmd_M191_help = "Close blinds, fan full speed, set chamber temperature and wait or S0 to open blinds and cool down (wait)"
     def cmd_M191(self, gcmd):
         try:
             params = self._parse_gcode_parameters(gcmd)
             
-            if 'T' in params and params['T'] == '0':
+            # 检查是否为冷却模式 (S0)
+            if 'S' in params and params['S'] == '0':
                 self._execute_cooling_procedure(gcmd, wait_for_temp=True)
                 return
             
@@ -450,12 +450,12 @@ class BlindsHallMonitor:
             
             if wait_for_temp:
                 # 等待温度降到安全温度
-                gcmd.respond_info("M191 T0: Waiting for temperature to cool down to 30°C...")
+                gcmd.respond_info("M191 S0: Waiting for temperature to cool down to 30°C...")
                 self._wait_for_temperature(30.0, timeout=600)
-                gcmd.respond_info("M191 T0: Temperature cooled down to 30°C")
-                gcmd.respond_info("M191 T0 executed: Blinds opened, Fan off, Temperature cooled down")
+                gcmd.respond_info("M191 S0: Temperature cooled down to 30°C")
+                gcmd.respond_info("M191 S0 executed: Blinds opened, Fan off, Temperature cooled down")
             else:
-                gcmd.respond_info("M141 T0 executed: Blinds opened, Fan off, Temperature set to 0°C (no wait)")
+                gcmd.respond_info("M141 S0 executed: Blinds opened, Fan off, Temperature set to 0°C (no wait)")
                 
         except Exception as e:
             logging.error("Cooling procedure error: %s" % str(e))
