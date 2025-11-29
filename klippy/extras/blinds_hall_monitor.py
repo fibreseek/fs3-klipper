@@ -357,10 +357,14 @@ class BlindsHallMonitor:
             # 停止现有监控
             self._stop_monitoring()
             
-            # 第一步：关闭百叶窗和风扇全速
+            # 第一步：关闭百叶窗和风扇全速,过滤风扇关闭
             # 1. 风扇全速
             fan_command = "SET_FAN_SPEED FAN=fan6 SPEED=1.0"
             self.gcode.run_script_from_command(fan_command)
+
+            # 设置过滤风扇速度为0（关闭）
+            filtered_fan_command = "SET_FAN_SPEED FAN=fan5 SPEED=0"
+            self.gcode.run_script_from_command(filtered_fan_command)
             
             # 2. 百叶窗关闭
             blinds_command = "SET_PIN PIN=SENSOR_MOTOR VALUE=1.00"
@@ -401,10 +405,14 @@ class BlindsHallMonitor:
             # 停止现有监控
             self._stop_monitoring()
             
-            # 第一步：关闭百叶窗和风扇全速
+            # 第一步：关闭百叶窗和风扇全速，过滤风扇关闭
             # 1. 风扇全速
             fan_command = "SET_FAN_SPEED FAN=fan6 SPEED=1.0"
             self.gcode.run_script_from_command(fan_command)
+
+            # 设置过滤风扇速度为0（关闭）
+            filtered_fan_command = "SET_FAN_SPEED FAN=fan5 SPEED=0"
+            self.gcode.run_script_from_command(filtered_fan_command)
             
             # 2. 百叶窗关闭
             blinds_command = "SET_PIN PIN=SENSOR_MOTOR VALUE=1.00"
@@ -436,6 +444,9 @@ class BlindsHallMonitor:
             # 第一步：关闭风扇
             fan_command = "SET_FAN_SPEED FAN=fan6 SPEED=0.0"
             self.gcode.run_script_from_command(fan_command)
+
+            filtered_fan_command = "SET_FAN_SPEED FAN=fan5 SPEED=0"
+            self.gcode.run_script_from_command(filtered_fan_command)
             
             # 第二步：打开百叶窗
             blinds_command = "SET_PIN PIN=SENSOR_MOTOR VALUE=0.00"
