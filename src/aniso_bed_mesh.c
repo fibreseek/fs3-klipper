@@ -39,7 +39,7 @@
 #define CRITICAL_VALUE_CNT 30                         // 回溯临界拐点的容量
 #define SAMPLE_INTERVAL_US 200                        // 采样间隔200微秒
 #define SAMPLE_FREQUENCY_HZ (1000000/SAMPLE_INTERVAL_US) // 采样频率5000Hz
-#define TRIGGER_COUNT_MAX 6                       // 触发计数最大值
+#define TRIGGER_COUNT_MAX 7                       // 触发计数最大值
 
 static uint8_t log_flag = 0;                              // 0 数据上报关闭；1 数据上报开启
 static int32_t sample_step_acc;                       // 加速段对应电机微步数
