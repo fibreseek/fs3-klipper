@@ -233,6 +233,8 @@ class ResonanceTester:
                   accel_chips=None, test_point=None):
         toolhead = self.printer.lookup_object('toolhead')
         calibration_data = {axis: None for axis in axes}
+        
+        self.gcode.run_script_from_command("M118 Start Vibration Testing Calibration")
 
         self.generator.prepare_test(gcmd)
 
@@ -385,33 +387,18 @@ class ResonanceTester:
             toolhead_info = toolhead.get_status(systime)
             scv = toolhead_info['square_corner_velocity']
             max_freq = self._get_max_calibration_freq()
-            
             best_shaper, all_shapers = helper.find_best_shaper(
                     calibration_data[axis], max_smoothing=max_smoothing,
                     scv=scv, max_freq=max_freq, logger=gcmd.respond_info)
-                    
-            manual_shaper_type = 'ei'
-            manual_shaper = None
-            
-            for shaper in all_shapers:
-                if shaper.name == manual_shaper_type:
-                    manual_shaper = shaper
-                    break
-            
-            if not manual_shaper:
-                gcmd.respond_error("EI shaper not found in calibration results")
-                manual_shaper = best_shaper
             gcmd.respond_info(
-                "MANUAL SELECTION: shaper_type_%s = %s, shaper_freq_%s = %.1f Hz"
-                % (axis_name, manual_shaper.name,
-                   axis_name, manual_shaper.freq))
-                   
+                    "Recommended shaper_type_%s = %s, shaper_freq_%s = %.1f Hz"
+                    % (axis_name, best_shaper.name,
+                       axis_name, best_shaper.freq))
             if input_shaper is not None:
                 helper.apply_params(input_shaper, axis_name,
-                                    manual_shaper.name, manual_shaper.freq)
+                                    best_shaper.name, best_shaper.freq)
             helper.save_params(configfile, axis_name,
-                               manual_shaper.name, manual_shaper.freq)
-                               
+                               best_shaper.name, best_shaper.freq)
             csv_name = self.save_calibration_data(
                     'calibration_data', name_suffix, helper, axis,
                     calibration_data[axis], all_shapers, max_freq=max_freq)
