@@ -25,6 +25,8 @@ class xyz_align:
         self.default_t0_offset_y = self.t0_offset_y
         self.default_t1_offset_x = self.t1_offset_x
         self.default_t1_offset_y = self.t1_offset_y
+        self.default_left_move_offset = self.left_move_offset
+        self.default_right_move_offset = self.right_move_offset
         self.offset_z = 10.0
         self.z_value = 1.0
         self.y_max_travel = self.session_y.getfloat('position_max', 337.0)
@@ -46,6 +48,8 @@ class xyz_align:
         self.gcode.register_command('XYZ_ALIGN_T1', self.cmd_XYZ_ALIGN_T1, desc=self.cmd_XYZ_ALIGN_help)
         self.gcode.register_command('XYZ_ALIGN_T0', self.cmd_XYZ_ALIGN_T0, desc=self.cmd_XYZ_ALIGN_help)
         self.gcode.register_command('XYZ_ALIGN_CLEAR', self.cmd_XYZ_ALIGN_TEST, desc=self.cmd_XYZ_ALIGN_help)
+        self.gcode.register_command('XYZ_ALIGN_NEW', self.cmd_XYZ_ALIGN_NEW, desc=self.cmd_XYZ_ALIGN_NEW_help)
+
         self.mcu.register_response(self.handle_align_end,"xyz_align_end", self.oid)
         self.printer.register_event_handler("klippy:ready", self.xyz_init_offset)
 
@@ -59,20 +63,22 @@ class xyz_align:
                 if 't0_offset' in config:
                     self.t0_offset_x = config.getfloat('t0_offset', 'x_offset')
                     self.t0_offset_y = config.getfloat('t0_offset', 'y_offset')
+                    self.left_move_offset = config.getfloat('t0_offset', 'move_offset')
                     # If t0_offset_y + left_move_offset exceeds Y max travel, reset t0_offset_y
                     if self.t0_offset_y + self.left_move_offset > self.y_max_travel:
-                        self.t0_offset_y = self.y_max_travel - self.left_move_offset
-                    if self.t0_offset_x - self.left_move_offset < self.x_min_travel:
-                        self.t0_offset_x = self.x_min_travel + self.left_move_offset
+                        self.t0_offset_y = self.default_t0_offset_y
+                        self.t0_offset_x = self.default_t0_offset_x
+                        self.left_move_offset = self.default_left_move_offset
 
                 if 't1_offset' in config:
                     self.t1_offset_x = config.getfloat('t1_offset', 'x_offset')
                     self.t1_offset_y = config.getfloat('t1_offset', 'y_offset')
+                    self.right_move_offset = config.getfloat('t1_offset', 'move_offset')
                     # If t1_offset_y + right_move_offset exceeds Y max travel, reset t1_offset_y
                     if self.t1_offset_y + self.right_move_offset > self.y_max_travel:
-                        self.t1_offset_y = self.y_max_travel - self.right_move_offset
-                    if self.t1_offset_x - self.right_move_offset < self.x_min_travel:
-                        self.t1_offset_x = self.x_min_travel + self.right_move_offset
+                        self.t1_offset_y = self.default_t1_offset_y
+                        self.t1_offset_x = self.default_t1_offset_x
+                        self.right_move_offset = self.default_right_move_offset
                 
                 logging.info("Loaded xyz_offset.ini value: T0(%.3f,%.3f) T1(%.3f,%.3f)" % 
                            (self.t0_offset_x, self.t0_offset_y, self.t1_offset_x, self.t1_offset_y))
@@ -99,6 +105,36 @@ class xyz_align:
             print(f"{file_path} xyz_offset.ini deleted successfully.")
         else:
             print("xyz_offset.ini file does not exist.")
+    
+    def xyz_update_position(self, x0, y0, x1, y1):
+        config = configparser.ConfigParser()
+        
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(self.ini_path), exist_ok=True)
+        config.read(self.ini_path)
+
+        # Always update the configuration (remove the restrictive condition)
+        if 't0_offset' not in config:
+            config['t0_offset'] = {}
+        if 't1_offset' not in config:
+            config['t1_offset'] = {}
+
+        config['t0_offset']['x_offset'] = str(x0)
+        config['t0_offset']['y_offset'] = str(y0)
+        config['t0_offset']['move_offset'] = str(self.left_move_offset)
+        config['t1_offset']['x_offset'] = str(x1)
+        config['t1_offset']['y_offset'] = str(y1)
+        config['t1_offset']['move_offset'] = str(self.right_move_offset)
+        logging.info("Updated xyz_offset.ini: T0(%.3f,%.3f) T1(%.3f,%.3f)" % 
+                           (x0, y0, x1, y1))
+
+        try:
+            with open(self.ini_path, 'w') as configfile:
+                config.write(configfile)
+            self.gcode.respond_info("update xyz_offset.ini file success")
+        except Exception as e:
+            self.gcode.respond_info("update xyz_offset.ini file failed: %s" % str(e))
+            logging.error("Failed to update xyz_offset.ini: %s" % str(e))
 
     def xyz_update_offset(self, x0, y0, x1, y1):
         x_rotation_distance = self.session_x.getfloat('rotation_distance')
@@ -122,33 +158,38 @@ class xyz_align:
         temp_t1_offset_x = x1*x_rotation_distance/(x_microsteps*200)
         temp_t1_offset_y = y1*x_rotation_distance/(x_microsteps*200)
 
-        # self.t0_offset_x = self.t0_offset_x - int(temp_t0_offset_x)
-        # self.t0_offset_y = self.t0_offset_y - int(temp_t0_offset_y)
-        # self.t1_offset_x = self.t1_offset_x - int(temp_t1_offset_x)
-        # self.t1_offset_y = self.t1_offset_y - int(temp_t1_offset_y)
         self.t0_offset_x = self.t0_offset_x - temp_t0_offset_x
         self.t0_offset_y = self.t0_offset_y - temp_t0_offset_y
         self.t1_offset_x = self.t1_offset_x - temp_t1_offset_x
         self.t1_offset_y = self.t1_offset_y - temp_t1_offset_y
+
+        self.left_move_offset = 8
+        self.right_move_offset = 8
+
         # If t0_offset_y + left_move_offset exceeds Y max travel, reset t0_offset_y
         if self.t0_offset_y + self.left_move_offset > self.y_max_travel:
-            self.t0_offset_y = self.y_max_travel - self.left_move_offset
-        # If t0_offset_x < X min travel, reset t0_offset_x
-        if self.t0_offset_x - self.left_move_offset < self.x_min_travel:
-            self.t0_offset_x = self.x_min_travel + self.left_move_offset
+            self.t0_offset_y = self.default_t0_offset_y
+            self.t0_offset_x = self.default_t0_offset_x
+            self.left_move_offset = self.default_left_move_offset
+        # # If t0_offset_x < X min travel, reset t0_offset_x
+        # if self.t0_offset_x - self.left_move_offset < self.x_min_travel:
+        #     self.t0_offset_x = self.x_min_travel + self.left_move_offset
         # If t1_offset_y + right_move_offset exceeds Y max travel, reset t1_offset_y
         if self.t1_offset_y + self.right_move_offset > self.y_max_travel:
-            self.t1_offset_y = self.y_max_travel - self.right_move_offset
-        # If t1_offset_x < X min travel, reset t1_offset_x
-        if self.t1_offset_x - self.right_move_offset < self.x_min_travel:
-            self.t1_offset_x = self.x_min_travel + self.right_move_offset
+            self.t1_offset_y = self.default_t1_offset_y
+            self.t1_offset_x = self.default_t1_offset_x
+            self.right_move_offset = self.default_right_move_offset
+        # # If t1_offset_x < X min travel, reset t1_offset_x
+        # if self.t1_offset_x - self.right_move_offset < self.x_min_travel:
+        #     self.t1_offset_x = self.x_min_travel + self.right_move_offset
 
          # Write updated offsets to the configuration file
-
         config['t0_offset']['x_offset'] = str(self.t0_offset_x)
         config['t0_offset']['y_offset'] = str(self.t0_offset_y)
+        config['t0_offset']['move_offset'] = str(self.left_move_offset)
         config['t1_offset']['x_offset'] = str(self.t1_offset_x)
         config['t1_offset']['y_offset'] = str(self.t1_offset_y)
+        config['t1_offset']['move_offset'] = str(self.right_move_offset)
         logging.info("Updated xyz_offset.ini: T0(%.3f,%.3f) T1(%.3f,%.3f)" % 
                            (self.t0_offset_x, self.t0_offset_y, self.t1_offset_x, self.t1_offset_y))
 
@@ -168,7 +209,7 @@ class xyz_align:
     def handle_align_end(self, params):
         # Expand the message ack_count from 8-bit
         res = params['res']
-        self.gcode.respond_info("handle_align_end: res = %d" % (res))
+        # self.gcode.respond_info("handle_align_end: res = %d" % (res))
         
         if(res == 50):
             z0 = params['z0']
@@ -204,7 +245,7 @@ class xyz_align:
                 file.write("%f %f %f \n" % ((0-x_offset), (0-y_offset), (0-z_offset)))
         elif(res == 2):
             self.z_value = params['z0']
-            self.gcode.respond_info("handle_align_end: z = %d" % (self.z_value))
+            # self.gcode.respond_info("handle_align_end: z = %d" % (self.z_value))
             self.wait_check_result = True
         else:
             self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=0 count=%d" % (res))
@@ -253,6 +294,163 @@ class xyz_align:
         self.gcode.run_script_from_command("M114\n")
         self.offset_z_press = trigger_pos[2] - 0.3
         self.gcode.respond_info("cmd_XYZ_ALIGN: offset_z_press = %f, self.offset_z = %f, move_distance = %f" % (self.offset_z_press, self.offset_z, move_distance))
+        return trigger_pos[2]
+
+    def get_x_press_val_new(self, dir):
+        self.gcode.respond_info("cmd_XYZ_ALIGN: get_x_press_val_new dir = %d" % (dir))
+        toolhead = self.printer.lookup_object('toolhead')
+        trigger_pos = toolhead.get_position()
+        move_distance = 0
+        move_step = 0.5*dir # mm
+        self.gcode.run_script_from_command("G1 Z%f F180\n" % (self.offset_z_press))
+        self.gcode.run_script_from_command("M400\n")
+        
+        for i in range(2):
+            if i == 0: move_step = 0.5*dir
+            if i == 1: 
+                self.gcode.run_script_from_command("G91\n")
+                self.gcode.run_script_from_command("G1 Z3 F300\n")
+                self.gcode.run_script_from_command("G1 X%f F800\n" % (-1.2*dir))
+                self.gcode.run_script_from_command("G90\n")
+                self.gcode.run_script_from_command("G1 Z%f F180\n" % (self.offset_z_press))
+                self.gcode.run_script_from_command("M400\n")
+                move_step = 0.01*dir
+            move_distance = 0
+            self.z_value = 0
+            self.gcode.run_script_from_command("G91\n")
+            while(move_distance <= 15):
+                self.gcode.run_script_from_command("G1 X%f F%f\n" % (move_step, self.speed))
+                self.gcode.run_script_from_command("M400\n")
+                self.align_start_cmd.send([self.oid, 2])
+                self.wait_check_result = False
+                start_time = self.printer.get_reactor().monotonic()
+                timeout = 1.0
+                while (not self.wait_check_result) and (self.printer.get_reactor().monotonic() - start_time) < timeout:
+                    self.printer.get_reactor().pause(0.1)
+
+                if (self.z_value == 1):
+                    trigger_pos = toolhead.get_position()
+                    break
+                move_distance += move_step
+            self.gcode.run_script_from_command("G90\n")
+
+        self.gcode.run_script_from_command("M114\n")
+        self.gcode.respond_info("cmd_XYZ_ALIGN: move_distance = %f" % (move_distance))
+        return trigger_pos[0]
+    
+    def get_y_press_val_new(self, dir):
+        self.gcode.respond_info("cmd_XYZ_ALIGN: get_y_press_val_new dir = %d" % (dir))
+        toolhead = self.printer.lookup_object('toolhead')
+        trigger_pos = toolhead.get_position()
+        move_distance = 0
+        move_step = 0.5*dir # mm
+        self.gcode.run_script_from_command("G1 Z%f F180\n" % (self.offset_z_press))
+        self.gcode.run_script_from_command("M400\n")
+        
+        for i in range(2):
+            if i == 0: move_step = 0.5*dir
+            if i == 1: 
+                self.gcode.run_script_from_command("G91\n")
+                self.gcode.run_script_from_command("G1 Z3 F300\n")
+                self.gcode.run_script_from_command("G1 Y%f F800\n" % (-1.2*dir))
+                self.gcode.run_script_from_command("G90\n")
+                self.gcode.run_script_from_command("G1 Z%f F180\n" % (self.offset_z_press))
+                self.gcode.run_script_from_command("M400\n")
+                move_step = 0.01*dir
+            move_distance = 0
+            self.z_value = 0
+            self.gcode.run_script_from_command("G91\n")
+            while(move_distance <= 15):
+                self.gcode.run_script_from_command("G1 Y%f F%f\n" % (move_step, self.speed))
+                self.gcode.run_script_from_command("M400\n")
+                self.align_start_cmd.send([self.oid, 2])
+                self.wait_check_result = False
+                start_time = self.printer.get_reactor().monotonic()
+                timeout = 1.0
+                while (not self.wait_check_result) and (self.printer.get_reactor().monotonic() - start_time) < timeout:
+                    self.printer.get_reactor().pause(0.1)
+
+                if (self.z_value == 1):
+                    trigger_pos = toolhead.get_position()
+                    break
+                move_distance += move_step
+            self.gcode.run_script_from_command("G90\n")
+
+        self.gcode.run_script_from_command("M114\n")
+        self.gcode.respond_info("cmd_XYZ_ALIGN: move_distance = %f" % (move_distance))
+        return trigger_pos[1]
+
+    def cmd_XYZ_ALIGN_NEW(self, gcmd):
+        self.gcode.run_script_from_command(
+        "SAVE_GCODE_STATE NAME=pre_offset_state\n"
+        "G90\n"
+        "G1 Z%.3f\n"
+        "G1 F3000\n"
+        "T0\n"
+        # "G1 X100 Y100 F3000\n"
+        "G1 X%.3f Y%.3f F3000\n"
+        % (self.offset_z, self.t0_offset_x, self.t0_offset_y))
+
+        # 测试t0 x y z光电触发位置
+        trigger_z0 = self.get_z_press_val_new(0)
+        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        trigger_t0_x0 = self.get_x_press_val_new(-1)
+        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t0_offset_x, self.t0_offset_y))
+        trigger_t0_x1 = self.get_x_press_val_new(1) - 2
+        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t0_offset_x, self.t0_offset_y))
+        trigger_t0_y0 = self.get_y_press_val_new(-1)
+        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t0_offset_x, self.t0_offset_y))
+        trigger_t0_y1 = self.get_y_press_val_new(1) - 2
+
+        # 确定t0 中心位置
+        center_x0 = trigger_t0_x0 + abs(trigger_t0_x0 - trigger_t0_x1) / 2
+        center_y0 = trigger_t0_y0 + abs(trigger_t0_y0 - trigger_t0_y1) / 2
+        self.gcode.respond_info("cmd_XYZ_ALIGN_NEW: trigger_z0 = %f, trigger_t0_x0 = %f, trigger_t0_x1 = %f, trigger_t0_y0 = %f, trigger_t0_y1 = %f, center_x0 = %f, center_y0 = %f" % (trigger_z0, trigger_t0_x0, trigger_t0_x1, trigger_t0_y0, trigger_t0_y1, center_x0, center_y0))
+
+        # 测试t1 x y z光电触发位置
+        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        self.gcode.run_script_from_command("T1 NO_OFFSET=1\n") # 切换到右边但是不补偿右边喷嘴偏移
+        self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t1_offset_x, self.t1_offset_y))
+        trigger_z1 = self.get_z_press_val_new(1)
+        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        trigger_t1_x0 = self.get_x_press_val_new(-1)
+        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t1_offset_x, self.t1_offset_y))
+        trigger_t1_x1 = self.get_x_press_val_new(1) - 0.3
+        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t1_offset_x, self.t1_offset_y))
+        trigger_t1_y0 = self.get_y_press_val_new(-1)
+        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t1_offset_x, self.t1_offset_y))
+        trigger_t1_y1 = self.get_y_press_val_new(1) - 0.3
+
+        # 确定t1 中心位置
+        center_x1 = trigger_t1_x0 + abs(trigger_t1_x0 - trigger_t1_x1) / 2
+        center_y1 = trigger_t1_y0 + abs(trigger_t1_y0 - trigger_t1_y1) / 2
+        self.gcode.respond_info("cmd_XYZ_ALIGN_NEW: trigger_z1 = %f, trigger_t1_x0 = %f, trigger_t1_x1 = %f, trigger_t1_y0 = %f, trigger_t1_y1 = %f, center_x1 = %f, center_y1 = %f" % (trigger_z1, trigger_t1_x0, trigger_t1_x1, trigger_t1_y0, trigger_t1_y1, center_x1, center_y1))
+
+        # 计算xyz偏移量
+        x_offset = abs(center_x1 - center_x0)
+        y_offset = abs(center_y1 - center_y0)
+        z_offset = abs(trigger_z1 - trigger_z0)
+        self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (0-x_offset))
+        self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (y_offset))
+        self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=zoffset VALUE=%f" % (z_offset))
+        self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN_NEW x_offset=%f y_offset=%f z_offset=%f"% (x_offset,y_offset,z_offset))
+
+        self.t0_offset_x = center_x0
+        self.t0_offset_y = center_y0
+        self.t1_offset_x = center_x1
+        self.t1_offset_y = center_y1
+        self.xyz_update_position(self.t0_offset_x, self.t0_offset_y, self.t1_offset_x, self.t1_offset_y)
+
+        self.gcode.run_script_from_command("T0\n")
+        self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION\n")
+
+    cmd_XYZ_ALIGN_NEW_help = "This is a aniso customG-code command new"
 
     def get_z_press_val(self, t):
         z_offset = 1
@@ -261,14 +459,17 @@ class xyz_align:
             self.gcode.run_script_from_command("G1 Z%f F80\n" % (self.offset_z - z_offset))
             self.gcode.run_script_from_command("M400\n")
             self.align_start_cmd.send([self.oid, 2])
-            #time.sleep(0.1) 
-            #self.gcode.run_script_from_command("G4 P1000\n")
-            self.printer.get_reactor().pause(0.1)
+            self.wait_check_result = False
+            start_time = self.printer.get_reactor().monotonic()
+            timeout = 1.0
+            while (not self.wait_check_result) and (self.printer.get_reactor().monotonic() - start_time) < timeout:
+                self.printer.get_reactor().pause(0.1)
 
             if (self.z_value == 0):
-                self.offset_z_press = self.offset_z - z_offset -0.3
+                self.offset_z_press = self.offset_z - z_offset - 0.3
                 break
-            z_offset += 0.5   
+            z_offset += 0.2
+        self.gcode.run_script_from_command("G1 Z%f F300\n" % (self.offset_z))
                        
     def cmd_XYZ_ALIGN(self, gcmd):
         curtime = self.printer.get_reactor().monotonic()

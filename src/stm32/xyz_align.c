@@ -105,9 +105,7 @@ void command_align_start(uint32_t *args)
             }
             printf_("%d \r\n",offset_z[i]);
         }
-        
     break;
-
     }
 }    //sendf("uart_get_cmd oid=%c val=%c", oid, val);
 
