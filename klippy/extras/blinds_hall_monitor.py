@@ -161,12 +161,18 @@ class BlindsHallMonitor:
         return True
     
     def _validate_state_change(self, initial_state, target_state):
+        # 如果初始状态已经是目标状态
         if initial_state == target_state:
-            error_msg = "Blinds Hall state exception: Initial state is same as target state - %s" % initial_state
-            logging.error(error_msg)
-            self.gcode.respond_info("ERROR: " + error_msg)
-            self.printer.invoke_shutdown(error_msg)
-            return False
+            # 如果初始状态是异常状态，则报错
+            if initial_state in ["BOTH_HIGH", "BOTH_LOW", "UNKNOWN"]:
+                error_msg = "Blinds Hall state exception: Invalid initial state - %s" % initial_state
+                logging.error(error_msg)
+                self.gcode.respond_info("ERROR: " + error_msg)
+                self.printer.invoke_shutdown(error_msg)
+                return False
+            else:
+                # 如果是正常的OPEN或CLOSED状态，返回True表示验证通过，但监控会提前结束
+                return True
         return True
     
     def _check_state_change(self):
@@ -243,6 +249,11 @@ class BlindsHallMonitor:
             return
         
         if not self._validate_state_change(current_state, target_state):
+            return
+        
+        # 如果已经是目标状态且不是异常状态，直接返回，不启动监控
+        if current_state == target_state:
+            logging.info(f"BlindsHallMonitor: Already in target state {target_state}, no monitoring needed")
             return
         
         self.initial_state = current_state
@@ -481,14 +492,18 @@ class BlindsHallMonitor:
             self.start_open_to_close_monitoring()
             if self.recovery_mode_active:
                 gcmd.respond_info("Recovery mode started: Waiting for CLOSED state, timeout: %.1fs" % self.recovery_timeout)
-            else:
+            elif self.monitoring_active:
                 gcmd.respond_info("Started monitoring: OPEN -> CLOSED, timeout: %.1fs" % self.state_change_timeout)
+            else:
+                gcmd.respond_info("Already in CLOSED state, no monitoring needed")
         elif direction.upper() in ["CLOSE2OPEN", "CLOSE_TO_OPEN"]:
             self.start_close_to_open_monitoring()
             if self.recovery_mode_active:
                 gcmd.respond_info("Recovery mode started: Waiting for CLOSED state, timeout: %.1fs" % self.recovery_timeout)
-            else:
+            elif self.monitoring_active:
                 gcmd.respond_info("Started monitoring: CLOSED -> OPEN, timeout: %.1fs" % self.state_change_timeout)
+            else:
+                gcmd.respond_info("Already in OPEN state, no monitoring needed")
         else:
             gcmd.respond_info("ERROR: Invalid DIRECTION. Use OPEN2CLOSE or CLOSE2OPEN")
     
