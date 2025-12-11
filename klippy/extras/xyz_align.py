@@ -408,7 +408,7 @@ class xyz_align:
 
         self.gcode.run_script_from_command("G1 Z10 F600\n")
         self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t0_offset_x, self.t0_offset_y))
-        trigger_t0_x1 = self.get_x_press_val_new(1) - 2
+        trigger_t0_x1 = self.get_x_press_val_new(1)
         if self.z_value != 1:
             self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=0 T0 X+ trigger failed, aborting.")
             self.gcode.run_script_from_command("RESTORE_GCODE_STATE NAME=pre_offset_state\n")
@@ -424,7 +424,7 @@ class xyz_align:
 
         self.gcode.run_script_from_command("G1 Z10 F600\n")
         self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t0_offset_x, self.t0_offset_y))
-        trigger_t0_y1 = self.get_y_press_val_new(1) - 2
+        trigger_t0_y1 = self.get_y_press_val_new(1)
         if self.z_value != 1:
             self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=0 T0 Y+ trigger failed, aborting.")
             self.gcode.run_script_from_command("RESTORE_GCODE_STATE NAME=pre_offset_state\n")
@@ -454,7 +454,7 @@ class xyz_align:
 
         self.gcode.run_script_from_command("G1 Z10 F600\n")
         self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t1_offset_x, self.t1_offset_y))
-        trigger_t1_x1 = self.get_x_press_val_new(1) - 0.3
+        trigger_t1_x1 = self.get_x_press_val_new(1)
         if self.z_value != 1:
             self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=0 T1 X+ trigger failed, aborting.")
             self.gcode.run_script_from_command("RESTORE_GCODE_STATE NAME=pre_offset_state\n")
@@ -470,7 +470,7 @@ class xyz_align:
 
         self.gcode.run_script_from_command("G1 Z10 F600\n")
         self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t1_offset_x, self.t1_offset_y))
-        trigger_t1_y1 = self.get_y_press_val_new(1) - 0.3
+        trigger_t1_y1 = self.get_y_press_val_new(1)
         if self.z_value != 1:
             self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=0 T1 Y+ trigger failed, aborting.")
             self.gcode.run_script_from_command("RESTORE_GCODE_STATE NAME=pre_offset_state\n")
