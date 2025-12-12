@@ -486,7 +486,7 @@ class xyz_align:
         y_offset = abs(center_y1 - center_y0)
         z_offset = abs(trigger_z1 - trigger_z0)
         self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (0-x_offset))
-        self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (y_offset))
+        self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (0-y_offset))
         self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=zoffset VALUE=%f" % (z_offset))
         self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=1 x_offset=%f y_offset=%f z_offset=%f"% (x_offset,y_offset,z_offset))
 
