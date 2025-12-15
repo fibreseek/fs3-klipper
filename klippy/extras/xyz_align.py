@@ -482,11 +482,11 @@ class xyz_align:
         self.gcode.respond_info("cmd_XYZ_ALIGN_NEW: trigger_z1 = %f, trigger_t1_x0 = %f, trigger_t1_x1 = %f, trigger_t1_y0 = %f, trigger_t1_y1 = %f, center_x1 = %f, center_y1 = %f" % (trigger_z1, trigger_t1_x0, trigger_t1_x1, trigger_t1_y0, trigger_t1_y1, center_x1, center_y1))
 
         # 计算xyz偏移量
-        x_offset = abs(center_x1 - center_x0)
-        y_offset = abs(center_y1 - center_y0)
-        z_offset = abs(trigger_z1 - trigger_z0)
-        self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (0-x_offset))
-        self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (0-y_offset))
+        x_offset = center_x1 - center_x0
+        y_offset = center_y1 - center_y0
+        z_offset = trigger_z1 - trigger_z0
+        self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (x_offset))
+        self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=yoffset VALUE=%f" % (y_offset))
         self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=zoffset VALUE=%f" % (z_offset))
         self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=1 x_offset=%f y_offset=%f z_offset=%f"% (x_offset,y_offset,z_offset))
 
