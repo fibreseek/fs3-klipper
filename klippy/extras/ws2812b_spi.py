@@ -96,9 +96,10 @@ class LEDController:
         # LED数据发送器
         self.data_sender = LEDDataSender()
         
-        # Blinking control variables
-        self.blink_counter = 0
-        self.blink_toggle = False
+        # Progress bar variables
+        self.progress_index = 0  # 当前亮起的LED数量
+        self.progress_direction = 1  # 1表示增加，-1表示减少
+        self.progress_speed = 1  # 每次更新增加的LED数量
         
         # Printer state variables
         self.printer_state = "idle"
@@ -127,11 +128,15 @@ class LEDController:
         self.print_progress = 0.0
         self.progress_timer = None
         
+        # 固定数量模式相关
+        self.fixed_count = 10  # 默认点亮10个LED
+        self.fixed_start = 0   # 默认从第一个LED开始
+        
         # Initialize LED data
         self.update_led_data()
         
         self.gcode.register_command("M2000", self.cmd_M2000,
-                                   desc="Set LED mode: M2000 L<mode> [S<print_mode>] [R<red> G<green> B<blue>]")
+                                   desc="Set LED mode: M2000 L<mode> [S<print_mode>] [R<red> G<green> B<blue>] [C<count>] [F<start>]")
         
         self.progress_timer = self.reactor.register_timer(
             self._check_print_progress, self.reactor.monotonic() + 1.0)
@@ -157,16 +162,28 @@ class LEDController:
         color_data = []
         r, g, b = self.current_color
         
-        # Handle print progress mode (mode 6)
-        if self.printer_state == "printing":
+        if self.printer_state == "progress_cycle":
+            for i in range(LEDController.LED_TOTAL_COUNT):
+                if i < self.progress_index:
+                    color_data.extend([r, g, b])  # RGB顺序 - 亮灯
+                else:
+                    color_data.extend([0, 0, 0])   # RGB顺序 - 灭灯
+        elif self.printer_state == "printing":
             led_count = int(round(print_progress * LEDController.LED_TOTAL_COUNT))
             # Ensure at least 1 LED is lit for minimal progress
             if print_progress > 0 and led_count == 0:
                 led_count = 1
-            # Progress bar with current color (RGB顺序)
+            # Progress bar with current color
             for i in range(LEDController.LED_TOTAL_COUNT):
                 if i < led_count:
-                    color_data.extend([r, g, b])  # RGB顺序
+                    color_data.extend([r, g, b])
+                else:
+                    color_data.extend([0, 0, 0])
+        elif self.printer_state == "fixed_count":
+            # 固定数量模式：只点亮指定数量的LED
+            for i in range(LEDController.LED_TOTAL_COUNT):
+                if self.fixed_start <= i < self.fixed_start + self.fixed_count:
+                    color_data.extend([r, g, b]) 
                 else:
                     color_data.extend([0, 0, 0])
         else:
@@ -245,11 +262,13 @@ class LEDController:
     def cmd_M2000(self, gcmd):
         """Handle M2000 command to set LED mode"""
         # Parse parameters
-        mode = gcmd.get_int('L', minval=0, maxval=6)
+        mode = gcmd.get_int('L', minval=0, maxval=7)
         print_mode = gcmd.get_int('S', -1, minval=0, maxval=4)
         r = gcmd.get_int('R', -1, minval=0, maxval=255)
         g = gcmd.get_int('G', -1, minval=0, maxval=255)
         b = gcmd.get_int('B', -1, minval=0, maxval=255)
+        count = gcmd.get_int('C', -1, minval=1, maxval=LEDController.LED_TOTAL_COUNT)
+        start = gcmd.get_int('F', 0, minval=0, maxval=LEDController.LED_TOTAL_COUNT-1)
         
         # Handle restore command (L2)
         if mode == 2:
@@ -261,7 +280,7 @@ class LEDController:
                 self.write_timer = None
             
             # Start timer for animated effects if needed
-            if new_state in ["breathing", "blinking"]:
+            if new_state in ["breathing", "blinking", "progress_cycle"]:
                 self.write_timer = self.reactor.register_timer(
                     self._run_write, self.reactor.NOW + 0.1)
             
@@ -274,6 +293,8 @@ class LEDController:
                 "solid": "常亮",
                 "breathing": "呼吸",
                 "blinking": "闪烁",
+                "progress_cycle": "进度循环",
+                "fixed_count": "固定数量",
                 "printing": "打印进度",
                 "idle": "空闲"
             }
@@ -290,6 +311,13 @@ class LEDController:
             new_state = "solid"
         elif mode == 1:
             new_state = "breathing"
+        elif mode == 3:  # 新增：进度循环模式
+            new_state = "progress_cycle"
+            self.progress_index = 0  # 重置进度
+            self.progress_direction = 1  # 正向增加
+            self.progress_speed = 1  # 每次增加1盏灯
+        elif mode == 4:  # 新增：固定数量模式
+            new_state = "fixed_count"
         elif mode == 5:
             new_state = "blinking"
         elif mode == 6:
@@ -312,13 +340,24 @@ class LEDController:
         else:
             pass
         
+        # Set fixed count parameters if specified
+        if count >= 0:
+            self.fixed_count = count
+        if start >= 0:
+            self.fixed_start = start
+        
+        if count >= 0 and self.fixed_start + self.fixed_count > LEDController.LED_TOTAL_COUNT:
+            self.fixed_start = LEDController.LED_TOTAL_COUNT - self.fixed_count
+            if self.fixed_start < 0:
+                self.fixed_start = 0
+        
         # Cancel existing timer if not needed
         if self.write_timer is not None:
             self.reactor.unregister_timer(self.write_timer)
             self.write_timer = None
         
         # Start timer for animated effects
-        if new_state in ["breathing", "blinking"]:
+        if new_state in ["breathing", "blinking", "progress_cycle"]:
             self.write_timer = self.reactor.register_timer(
                 self._run_write, self.reactor.NOW + 0.1)
         
@@ -334,11 +373,17 @@ class LEDController:
             "solid": "常亮",
             "breathing": "呼吸",
             "blinking": "闪烁",
+            "progress_cycle": "进度循环",
+            "fixed_count": "固定数量",
             "printing": "打印进度",
             "idle": "空闲"
         }
         mode_name = state_names.get(new_state, "未知")
-        gcmd.respond_info(f"LED模式已设置: {mode_name}, 颜色: {self.current_color}")
+        
+        if new_state == "fixed_count":
+            gcmd.respond_info(f"LED模式已设置: {mode_name}, 颜色: {self.current_color}, 数量: {self.fixed_count}, 起始位置: {self.fixed_start}")
+        else:
+            gcmd.respond_info(f"LED模式已设置: {mode_name}, 颜色: {self.current_color}")
 
     def _send_led_data(self):
         if self.data_sender:
@@ -348,12 +393,25 @@ class LEDController:
 
     def _run_write(self, eventtime):
         try:
+            # 如果是进度循环模式，更新进度索引
+            if self.printer_state == "progress_cycle":
+                # 更新进度
+                self.progress_index += self.progress_speed
+                
+                # 检查是否到达边界
+                if self.progress_index >= LEDController.LED_TOTAL_COUNT:
+                    self.progress_index = 0  # 重置从头开始
+            
+            # 更新并发送LED数据
             self.update_led_data()
             self._send_led_data()
         except Exception as e:
             logging.error(f"LED data send failed: {str(e)}")
         
-        return eventtime + 0.1
+        if self.printer_state == "progress_cycle":
+            return eventtime + 0.1
+        else:
+            return eventtime + 0.1
 
 def load_config(config):
     return LEDController(config)
