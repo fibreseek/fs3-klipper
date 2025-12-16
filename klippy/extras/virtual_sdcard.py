@@ -3,7 +3,7 @@
 # Copyright (C) 2018-2024  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import os, sys, logging, io
+import os, sys, logging, io, re
 
 VALID_GCODE_EXTS = ['gcode', 'g', 'gco']
 
@@ -240,6 +240,54 @@ class VirtualSD:
         self.next_file_position = pos
     def is_cmd_from_sd(self):
         return self.cmd_from_sd
+    
+    def parse_p_value(self, line):
+        """Parse P parameter value from G-code line"""
+        match = re.search(r'P([\d\.]+)', line)
+        return float(match.group(1)) if match else None
+    
+    def get_uv_case(self, line):
+        """Determine U/V parameter presence: 'both', 'only_u', 'only_v', or None"""
+        has_u = bool(re.search(r'\bU[\d\.\-]+\b', line))
+        has_v = bool(re.search(r'\bV[\d\.\-]+\b', line))
+        
+        if has_u and has_v:
+            return 'both'
+        elif has_u:
+            return 'only_u'
+        elif has_v:
+            return 'only_v'
+        return None
+
+    def generate_insertion_code(self, case, p_value=None):
+        """Generate G-code based on U/V case"""
+        commands = {
+            'both': f"SET_EXTRUDER_MODE S=1 P={p_value}",
+            'only_u': "SET_EXTRUDER_MODE S=0",
+            'only_v': "SET_EXTRUDER_MODE S=2"
+        }
+        return [commands[case]] if case in commands else []
+
+    def handle_extruder_mode(self, lines):
+        """Process lines and insert extruder mode commands"""
+        processed_lines = []
+        
+        for line in lines:
+            # Skip comments
+            if line.strip().startswith(';'):
+                processed_lines.append(line)
+                continue
+            
+            case = self.get_uv_case(line)
+            if case:
+                p_value = self.parse_p_value(line) if case == 'both' else None
+                insertion_code = self.generate_insertion_code(case, p_value)
+                processed_lines.extend([cmd + "\n" for cmd in insertion_code])
+            
+            processed_lines.append(line)
+        
+        return processed_lines
+
     # Background work timer
     def work_handler(self, eventtime):
         logging.info("Starting SD card print (position %d)", self.file_position)
@@ -274,6 +322,7 @@ class VirtualSD:
                 lines = data.split('\n')
                 lines[0] = partial_input + lines[0]
                 partial_input = lines.pop()
+                lines = self.handle_extruder_mode(lines)
                 lines.reverse()
                 self.reactor.pause(self.reactor.NOW)
                 continue
@@ -302,6 +351,7 @@ class VirtualSD:
                 next_file_position = self.file_position + len(line) + 1
             self.next_file_position = next_file_position
             try:
+                # logging.info("SD card line (%d): %s", self.file_position, repr(line))
                 self.gcode.run_script(line)
             except self.gcode.error as e:
                 error_message = str(e)
