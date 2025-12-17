@@ -150,20 +150,17 @@ class GCodeMove:
                 if 'P' in params:
                     p =  float(params['P']) # p=v/u
                     if self.proportion != p:
-                        gcode.run_script_from_command("M400")
                         gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % (V_rotation_distance/p))
                         self.proportion = p
                 else:
                     p = float(params['V']) / float(params['U']) # p=v/u
                     if self.proportion != p:
-                        gcode.run_script_from_command("M400")
                         gcode.run_script_from_command("SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=extruder2 DISTANCE=%f" % (V_rotation_distance/p))
                         self.proportion = p
                 self.mode = 1
                 self.printer.send_event("gcode:move_extruder", 'extruder2', float(params['V']), self.absolute_extrude)
             else:
                 if self.mode != 2:
-                    gcode.run_script_from_command("M400")
                     gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder")
                     gcode.run_script_from_command("SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder2")
                     self.proportion = 0
@@ -172,7 +169,6 @@ class GCodeMove:
             if self.mode != 3:
                 if self.absolute_extrude:
                     raise gcmd.error("M83 MODE ONLY!")
-                gcode.run_script_from_command("M400")
                 gcode.run_script_from_command("ACTIVATE_EXTRUDER EXTRUDER=extruder2")
                 V_rotation_distance = self.config.getsection('extruder2').getfloat('rotation_distance')
                 gcode.run_script_from_command("SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder2")
