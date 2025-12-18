@@ -96,6 +96,9 @@ class LEDController:
         # LED数据发送器
         self.data_sender = LEDDataSender()
         
+        # Blinking control variables
+        self.blink_counter = 0
+        self.blink_toggle = False
         # Progress bar variables
         self.progress_index = 0  # 当前亮起的LED数量
         self.progress_direction = 1  # 1表示增加，-1表示减少
