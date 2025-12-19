@@ -25,6 +25,9 @@ extern int32_t get_step_count_z(void);
 #define ABS(x) ((x) < 0 ? -(x) : (x))
 volatile uint8_t debounce = 0; // Debounce counter for interrupt filtering
 #define DEBOUNCE_CYCLES 10  // Increase debounce time for better filtering
+static int32_t step_x = 0;
+static int32_t step_y = 0;
+static int32_t step_z = 0;
 
 void sort_array(int arr[], int n) {
     int i, j, temp;
@@ -86,8 +89,9 @@ void command_align_start(uint32_t *args)
         break;
 
     case 2:
-        sendf("xyz_align_end oid=%c res=%c z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i", oid, 2, PG10_VALUE, 0, 0,0,0,0);
-        // printf_("xyz align result=%i\r\n", PG10_VALUE);
+        // printf_("trigger result value=%d x=%d y=%d z=%d\r\n", PG11_VALUE, step_x, step_y, step_z);
+        sendf("xyz_align_trigger oid=%c val=%c x0=%i y0=%i z0=%i", oid, PG11_VALUE, step_x, step_y, step_z);
+        // sendf("xyz_align_end oid=%c res=%c z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i", oid, 2, PG11_VALUE, step_z, step_x, step_y, 0, 0);
     break;
 
     case 3:
@@ -126,6 +130,9 @@ void EXTI15_10_IRQHandler(void)
 
         x = get_step_count_x();
         z = get_step_count_z();
+        step_x = x;
+        step_y = x;
+        step_z = z;
 
         if(offset_index %5==0)
         {
