@@ -278,11 +278,13 @@ class VirtualSD:
                 processed_lines.append(line)
                 continue
             
-            case = self.get_uv_case(line)
-            if case:
-                p_value = self.parse_p_value(line) if case == 'both' else None
-                insertion_code = self.generate_insertion_code(case, p_value)
-                processed_lines.extend([cmd + "\n" for cmd in insertion_code])
+            # Only process G0/G1 commands with U/V parameters
+            if re.match(r'^\s*G[01]\b', line):
+                case = self.get_uv_case(line)
+                if case:
+                    p_value = self.parse_p_value(line) if case == 'both' else None
+                    insertion_code = self.generate_insertion_code(case, p_value)
+                    processed_lines.extend([cmd + "\n" for cmd in insertion_code])
             
             processed_lines.append(line)
         
