@@ -37,6 +37,11 @@ class VirtualSD:
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.on_error_gcode = gcode_macro.load_template(
             config, 'on_error_gcode', DEFAULT_ERROR_GCODE)
+        # Precompile regex patterns for performance
+        self.gcode_pattern = re.compile(r'^\s*G[01]\b')
+        self.p_pattern = re.compile(r'P([\d\.]+)')
+        self.u_pattern = re.compile(r'\bU[\d\.\-]+\b')
+        self.v_pattern = re.compile(r'\bV[\d\.\-]+\b')
         # Register commands
         self.gcode = self.printer.lookup_object('gcode')
         for cmd in ['M20', 'M21', 'M23', 'M24', 'M25', 'M26', 'M27']:
@@ -241,50 +246,38 @@ class VirtualSD:
     def is_cmd_from_sd(self):
         return self.cmd_from_sd
     
-    def parse_p_value(self, line):
-        """Parse P parameter value from G-code line"""
-        match = re.search(r'P([\d\.]+)', line)
-        return float(match.group(1)) if match else None
-    
-    def get_uv_case(self, line):
-        """Determine U/V parameter presence: 'both', 'only_u', 'only_v', or None"""
-        has_u = bool(re.search(r'\bU[\d\.\-]+\b', line))
-        has_v = bool(re.search(r'\bV[\d\.\-]+\b', line))
-        
-        if has_u and has_v:
-            return 'both'
-        elif has_u:
-            return 'only_u'
-        elif has_v:
-            return 'only_v'
-        return None
-
-    def generate_insertion_code(self, case, p_value=None):
-        """Generate G-code based on U/V case"""
-        commands = {
-            'both': f"SET_EXTRUDER_MODE S=1 P={p_value}",
-            'only_u': "SET_EXTRUDER_MODE S=0",
-            'only_v': "SET_EXTRUDER_MODE S=2"
-        }
-        return [commands[case]] if case in commands else []
-
     def handle_extruder_mode(self, lines):
         """Process lines and insert extruder mode commands"""
         processed_lines = []
+        gcode_pattern = self.gcode_pattern
+        u_pattern = self.u_pattern
+        v_pattern = self.v_pattern
+        p_pattern = self.p_pattern
         
         for line in lines:
-            # Skip comments
-            if line.strip().startswith(';'):
+            # Skip comments early
+            stripped = line.strip()
+            if stripped.startswith(';'):
                 processed_lines.append(line)
                 continue
             
             # Only process G0/G1 commands with U/V parameters
-            if re.match(r'^\s*G[01]\b', line):
-                case = self.get_uv_case(line)
-                if case:
-                    p_value = self.parse_p_value(line) if case == 'both' else None
-                    insertion_code = self.generate_insertion_code(case, p_value)
-                    processed_lines.extend([cmd + "\n" for cmd in insertion_code])
+            if gcode_pattern.match(line):
+                # Check for U and V parameters in one pass
+                has_u = u_pattern.search(line)
+                has_v = v_pattern.search(line)
+                
+                if has_u and has_v:
+                    # Both U and V present
+                    p_match = p_pattern.search(line)
+                    p_value = float(p_match.group(1)) if p_match else 0
+                    processed_lines.append(f"SET_EXTRUDER_MODE S=1 P={p_value}\n")
+                elif has_u:
+                    # Only U present
+                    processed_lines.append("SET_EXTRUDER_MODE S=0\n")
+                elif has_v:
+                    # Only V present
+                    processed_lines.append("SET_EXTRUDER_MODE S=2\n")
             
             processed_lines.append(line)
         
