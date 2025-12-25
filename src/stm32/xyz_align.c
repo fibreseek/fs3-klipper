@@ -90,7 +90,7 @@ void command_align_start(uint32_t *args)
 
     case 2:
         // printf_("trigger result value=%d x=%d y=%d z=%d\r\n", PG11_VALUE, step_x, step_y, step_z);
-        sendf("xyz_align_trigger oid=%c val=%c x0=%i y0=%i z0=%i", oid, PG11_VALUE, step_x, step_y, step_z);
+        sendf("xyz_align_trigger oid=%c val=%c x0=%i y0=%i z0=%i", oid, PG10_VALUE, step_x, step_y, step_z);
         // sendf("xyz_align_end oid=%c res=%c z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i", oid, 2, PG11_VALUE, step_z, step_x, step_y, 0, 0);
     break;
 
