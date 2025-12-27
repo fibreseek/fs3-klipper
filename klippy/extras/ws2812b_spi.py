@@ -18,7 +18,7 @@ class LEDDataSender:
             self.spi.open(bus, device)  # 打开SPI设备，注意：要有打开这个SPI设备的权限
 
             # 设置时钟频率（Hz），实际速率可能受硬件限制
-            self.spi.max_speed_hz = 6_400_000 # 设置最大速度为6.4MHz
+            self.spi.max_speed_hz = 6_250_000 # 设置最大速度为8MHz
 
             # 设置 SPI 模式（0-3），决定时钟极性（CPOL）和相位（CPHA）
             # 模式 0：CPOL=0，CPHA=0（空闲时低电平，第一个时钟沿采样）
@@ -34,8 +34,8 @@ class LEDDataSender:
         # 因为ws812b有其自身的驱动原理，所以这里需要将RGB的3个字节的数据扩展成24个字节的数据
         # 每个字节的每一位扩展成8位，1扩展成11111000(0xF8)，0扩展成11100000(0xE0)
         # 并且需要将RGB顺序调整为GRB顺序
-        extend_1 = 0xF8  # 二进制11111000
-        extend_0 = 0xE0  # 二进制11100000
+        extend_1 = 0xF8
+        extend_0 = 0xC0
         buf = []
         element = 0
         for i in range(0, len(led_data), 3):
@@ -404,7 +404,7 @@ class LEDController:
                 self.progress_index += self.progress_speed
                 
                 # 检查是否到达边界
-                if self.progress_index >= LEDController.LED_TOTAL_COUNT:
+                if self.progress_index > LEDController.LED_TOTAL_COUNT:
                     self.progress_index = 0  # 重置从头开始
             
             # 更新并发送LED数据
