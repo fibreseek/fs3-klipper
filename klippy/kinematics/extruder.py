@@ -117,6 +117,10 @@ class ExtruderStepper:
             toolhead.flush_step_generation()
             self.stepper.set_rotation_distance(rotation_dist)
             self.stepper.set_dir_inverted(next_invert_dir)
+
+            # 添加这行：标记配置需要保存
+            configfile = self.printer.lookup_object('configfile')
+            configfile.set(self.stepper.get_name(), 'rotation_distance', rotation_dist)
         else:
             rotation_dist, spr = self.stepper.get_rotation_distance()
         invert_dir, orig_invert_dir = self.stepper.get_dir_inverted()
