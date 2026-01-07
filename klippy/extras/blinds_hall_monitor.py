@@ -114,7 +114,7 @@ class BlindsHallMonitor:
                     self.recovery_timeout)
         
         # 启动监控循环
-        self._start_monitoring_loop()
+        # self._start_monitoring_loop()
     
     def _check_recovery_state(self):
         if not self.recovery_mode_active:
@@ -268,7 +268,7 @@ class BlindsHallMonitor:
                     (current_state, target_state, self.state_change_timeout))
         
         # 启动监控循环
-        self._start_monitoring_loop()
+        # self._start_monitoring_loop()
     
     def _stop_monitoring(self):
         self.monitoring_active = False
