@@ -50,7 +50,6 @@ class HomingMove:
             toolhead = printer.lookup_object('toolhead')
         self.toolhead = toolhead
         self.stepper_positions = []
-        self.gcode = printer.lookup_object("gcode")
     def get_mcu_endstops(self):
         return [es for es, name in self.endstops]
     def _calc_endstop_rate(self, mcu_endstop, movepos, speed):
@@ -78,8 +77,6 @@ class HomingMove:
         # Notify start of homing/probing move
         self.printer.send_event("homing:homing_move_begin", self)
         aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
-        # disable servo switch during homing
-        self.gcode.run_script_from_command("SET_PIN PIN=servo_switch VALUE=0.0")
         # Note start location
         self.toolhead.flush_step_generation()
         kin = self.toolhead.get_kinematics()
@@ -174,8 +171,6 @@ class HomingMove:
         # 更新停止与触发的z轴位置偏差
         probe = self.printer.lookup_object('probe')
         probe.set_trigger_offset(haltpos[2] - trigpos[2])
-        # enable servo switch after homing
-        self.gcode.run_script_from_command("SET_PIN PIN=servo_switch VALUE=1.0")
         return trigpos
     def check_no_movement(self):
         if self.printer.get_start_args().get('debuginput') is not None:
