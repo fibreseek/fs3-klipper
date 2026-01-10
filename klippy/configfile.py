@@ -483,6 +483,8 @@ class PrinterConfig:
         return self.printer
     def read_config(self, filename):
         cfgrdr = ConfigFileReader()
+        filename = os.path.expanduser(filename) # 将 ~/ 映射为 /home/username/
+        filename = os.path.abspath(filename) # 将 相对路径 映射为 绝对路径
         data = cfgrdr.read_config_file(filename)
         fileconfig = cfgrdr.build_fileconfig(data, filename)
         return ConfigWrapper(self.printer, fileconfig, {}, 'printer')

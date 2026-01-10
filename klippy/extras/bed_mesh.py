@@ -5,8 +5,6 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging, math, json, collections
 from . import probe
-import configparser
-import os
 
 
 PROFILE_VERSION = 1
@@ -1267,14 +1265,15 @@ class MoveSplitter:
         self.gcode = gcode
 
         self.printer = config.get_printer()
-        self.variables = config.getsection('save_variables')
-          
-        cfg_path = os.path.expanduser(self.variables.get('filename'))
-        config = configparser.ConfigParser()
-        config.read(cfg_path)
-        self.xoffset = config.getfloat('Variables', 'xoffset')
-        self.yoffset = config.getfloat('Variables', 'yoffset')
-        logging.info("offset:  X:%f, Y:%f"  % (self.xoffset, self.yoffset)) 
+        # 使用klipper自有模块的接口方法，维护代码风格的一致性
+        pconfig = self.printer.lookup_object('configfile')
+        sconfig = config.getsection('save_variables')
+        filename = sconfig.get("filename", "~/printer_data/config/variables.cfg")
+        fconfig = pconfig.read_config(filename)
+        sconfig = fconfig.getsection('Variables')
+        self.xoffset = sconfig.getfloat('xoffset', 0.0)
+        self.yoffset = sconfig.getfloat('yoffset', 0.0)
+        logging.debug("offset:  X:%f, Y:%f"  % (self.xoffset, self.yoffset)) 
 
     def initialize(self, mesh, fade_offset):
         self.z_mesh = mesh
