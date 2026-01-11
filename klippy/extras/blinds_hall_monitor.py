@@ -114,7 +114,7 @@ class BlindsHallMonitor:
                     self.recovery_timeout)
         
         # 启动监控循环
-        self._start_monitoring_loop()
+        # self._start_monitoring_loop()
     
     def _check_recovery_state(self):
         if not self.recovery_mode_active:
@@ -148,7 +148,7 @@ class BlindsHallMonitor:
         
         # 检查恢复超时
         if current_time > self.expected_state_change_time:
-            error_msg = "Louver closing failure. Please inspect the drive unit."
+            error_msg = "Blinds Hall state exception: Failed to reach CLOSED state after recovery timeout"
             logging.error(error_msg)
             self.gcode.respond_info("ERROR: " + error_msg)
             self.printer.invoke_shutdown(error_msg)
@@ -165,7 +165,7 @@ class BlindsHallMonitor:
         if initial_state == target_state:
             # 如果初始状态是异常状态，则报错
             if initial_state in ["BOTH_HIGH", "BOTH_LOW", "UNKNOWN"]:
-                error_msg = "Louver state exception. Please inspect the drive unit."
+                error_msg = "Blinds Hall state exception: Invalid initial state - %s" % initial_state
                 logging.error(error_msg)
                 self.gcode.respond_info("ERROR: " + error_msg)
                 self.printer.invoke_shutdown(error_msg)
@@ -194,13 +194,13 @@ class BlindsHallMonitor:
         current_blinds_state = self._get_blinds_state(sensor1_state, sensor2_state)
         
         # 检查是否处于异常状态
-        # if current_blinds_state in ["BOTH_HIGH", "BOTH_LOW"]:
-        #     error_msg = "Louver state exception. Please inspect the drive unit."
-        #     logging.error(error_msg)
-        #     self.gcode.respond_info("ERROR: " + error_msg)
-        #     self.printer.invoke_shutdown(error_msg)
-        #     self._stop_monitoring()
-        #     return
+        if current_blinds_state in ["BOTH_HIGH", "BOTH_LOW"]:
+            error_msg = "Blinds Hall state exception: Invalid state detected during monitoring - %s" % current_blinds_state
+            logging.error(error_msg)
+            self.gcode.respond_info("ERROR: " + error_msg)
+            self.printer.invoke_shutdown(error_msg)
+            self._stop_monitoring()
+            return
         
         # 更新状态缓存
         state_changed = (sensor1_state != self.last_sensor1_state or 
@@ -223,12 +223,7 @@ class BlindsHallMonitor:
         # 检查超时
         if (self.expected_state_change_time is not None and 
             current_time > self.expected_state_change_time):
-            if self.expected_final_state == "CLOSED":
-                error_msg = "Louver closing failure. Please inspect the drive unit."
-            elif self.expected_final_state == "OPEN":
-                error_msg = "Louver opening failure. Please inspect the drive unit."
-            else:
-                error_msg = "Blinds state change timeout."
+            error_msg = "Blinds Hall state exception: State change timeout"
             logging.error(error_msg)
             self.gcode.respond_info("ERROR: " + error_msg)
             self.printer.invoke_shutdown(error_msg)
@@ -273,7 +268,7 @@ class BlindsHallMonitor:
                     (current_state, target_state, self.state_change_timeout))
         
         # 启动监控循环
-        self._start_monitoring_loop()
+        # self._start_monitoring_loop()
     
     def _stop_monitoring(self):
         self.monitoring_active = False
