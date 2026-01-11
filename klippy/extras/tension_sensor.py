@@ -362,8 +362,8 @@ class MySerial:
             current_value = self.read_spi_once()
             
             if current_value is not None:
-                if current_value < 800000 or current_value > 900000:
-                    logging.warning(f"Invalid data detected: {current_value}, valid range: 800000 to 900000")
+                if current_value < 1000 or current_value > 8380000:
+                    logging.warning(f"Invalid data detected: {current_value}, valid range: 1000 to 8380000")
                     time.sleep(1)
                     continue
                 
