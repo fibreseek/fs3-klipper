@@ -5,7 +5,9 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging, math, json, collections
 from . import probe
-
+import numpy as np
+from scipy.interpolate import griddata
+from scipy.spatial.distance import pdist, squareform
 
 PROFILE_VERSION = 1
 PROFILE_OPTIONS = {
@@ -83,6 +85,167 @@ def parse_gcmd_coord(gcmd, name):
         raise gcmd.error("Unable to parse parameter '%s'" % (name,))
     return v1, v2
 
+def calc_open_tsp(pts):
+    """
+    轻量级tsp求解器
+    - 点数不超过10组
+    - 起点固定为首组点（当前点）
+    - 各组点仅访问一次的最短开放路径
+    - 输出中不再包含首组点（已到达）
+    
+    参数:
+        pts: List[List[float]]，如 [[x0,y0], [x1,y1], ...]
+        
+    返回:
+        List[List[float]]: 最短路径点序列
+    """
+    n = len(pts)
+    if n < 2:
+        return pts[1:]
+    
+    # 转换为numpy数组
+    pts = np.array(pts)
+
+    # 1. 计算初始上界（原始顺序路径长度）
+    upper_bound = 0.0
+    for i in range(n - 1):
+        dx = pts[i+1][0] - pts[i][0]
+        dy = pts[i+1][1] - pts[i][1]
+        upper_bound += np.sqrt(dx**2 + dy**2)
+
+    # 2. 预计算距离矩阵
+    dist = squareform(pdist(pts, metric='euclidean'))
+
+    # 3. 初始化 DP 和 parent
+    # dp[mask, i]=从某起点到点i、已访问点集为mask的最小路径长度
+    # parent[mask, i]=状态(mask, i)的前一个点索引（用于回溯路径）
+    dp = np.full((1 << n, n), np.inf, dtype=np.float32)
+    parent = np.full((1 << n, n), -1, dtype=np.int16)
+    HEAD_IDX = 0 # 起点索引，指定使用pts首点作为起点
+    mask_now = 1 << HEAD_IDX
+    dp[mask_now, HEAD_IDX] = 0.0 # 起点无前驱
+    full_mask = (1 << n) - 1 # 所有点都已访问的掩码
+
+    # 4. 动态规划
+    # 遍历所有可能的已访问点集（位掩码）
+    for mask_now in range(1, 1 << n):
+        for i in range(n):
+            # 跳过无效状态：当前点i不在mask 中
+            if not (mask_now & (1 << i)) or dp[mask_now, i] >= np.inf:
+                continue
+            cost_now = dp[mask_now, i]
+            
+            # 剪枝 1: 当前成本已不优于已知上界，无需扩展
+            if cost_now >= upper_bound:
+                continue
+
+            # 尝试从当前点 i 走到每一个未访问的点 j
+            for j in range(n):
+                if mask_now & (1 << j):
+                    continue  # j 已访问，跳过
+                
+                mask_new = mask_now | (1 << j)
+                cost_new = cost_now + dist[i][j]
+                
+                # 剪枝 2: 新路径已不优于上界，跳过
+                if cost_new >= upper_bound:
+                    continue
+
+                # 更新DP表
+                if cost_new < dp[mask_new, j]:
+                    dp[mask_new, j] = cost_new
+                    parent[mask_new, j] = i
+                    
+                    # 动态更新上界：当完成全访问时
+                    if mask_new == full_mask and cost_new < upper_bound:
+                        upper_bound = cost_new
+    
+    del dist, mask_now # 及时释放不再需要的变量
+
+    # 5. 找最优终点（全访问状态下成本最小的终点）
+    best_end = -1
+    best_cost = np.inf
+    for i in range(n):
+        if dp[full_mask, i] < best_cost:
+            best_cost = dp[full_mask, i]
+            best_end = i
+
+    # 安全回退：理论上不应发生
+    if best_end == -1:
+        return pts[1:]
+
+    # 6. 回溯路径
+    path_idx = []
+    curr = best_end
+    curr_mask = full_mask
+    while curr != -1:
+        path_idx.append(curr)
+        prev = parent[curr_mask, curr] # 找到前一个状态
+        curr_mask ^= (1 << curr) # 从掩码中移除当前点
+        curr = prev
+
+    del dp, parent # 及时释放不再需要的变量
+    path_idx.reverse() # 反转路径，因为是回溯得到的
+    
+    # 按索引顺序返回原始点坐标（不含当前起点）
+    return [pts[i] for i in path_idx if i != HEAD_IDX]
+
+def calc_z_compensate(x, y, t):
+    """
+    预测给定 (x, y, t) 下的z相对形变量, 基准t=20℃。
+    
+    Args:
+        x (float): X-coordinate on the bed (e.g., 150.0).
+        y (float): Y-coordinate on the bed (e.g., 150.0).
+        t (float or array-like): Temperature in Celsius.
+            Can be a scalar or an array.
+            (e.g., 53.1 or [78.9, 45.6]).
+                                     
+    Returns:
+        float or array: Predicted relative deformation.
+    """
+    # 1. 加载模型
+    a = 0.004262145006659417
+    b = -3.348508592366509e-05
+
+    pos = []
+    ranges = range(0, 301, int(300/6)) # [0,300]区间，7*7点阵模型
+    for xx in ranges:
+        for yy in ranges:
+            pos.append([xx,yy])
+
+    coeff = [     
+        -0.020196736477250166, 0.6463132661297226, 0.9840422541803013,
+        1.0211779448429177, 0.9649474698075476, 0.3869065381725384,
+        0.17476558311164928, 0.6452784633353884, 0.8642271469414533,
+        1.0836711885957573, 1.22693478374715, 1.1898833712622001,
+        0.9159937271517113, 0.5106198573141001, 0.9819942104652803,
+        1.157559359799062, 1.116408953057619, 1.2017527929204788,
+        1.2156702332280336, 1.0155472541594968, 0.7996910834653771,
+        1.1833818293506684, 1.2579787461546108, 1.2258269834421123,
+        1.131733632967438, 1.2280043167340453, 1.1607989478852714,
+        1.0380350957398234, 1.1936571033597811, 1.2605182312266616,
+        1.201642785066598, 1.2622602779646845, 1.1775966065463948,
+        1.1821803114120242, 0.9214090367333628, 0.993360594688061,
+        1.1651816254221268, 1.3367551764565428, 1.383820015419407,
+        1.1238747808383602, 1.2444850057997374, 0.5394488606567082,
+        0.5552031181741607, 1.002837761900388, 1.3756666622465332,
+        1.2502931816685263, 1.0886359101101635, 0.9199774258651509,
+        0.512247230960108]
+    
+    # 2. 计算空间缩放因子 g(x, y)
+    g_xy = griddata(points=pos, values=coeff, xi=(x, y), method='cubic')
+    if np.isnan(g_xy):  # 如果在凸包外，回退到最近邻
+        g_xy = griddata(points=pos, values=coeff, xi=(x, y), method='nearest')
+    
+    # 3. 计算温度响应 f(t) = a*(t-20) + b*(t-20)**2
+    T_BASE = 20.0 # 基准温度
+    t = np.asarray(t) - T_BASE # 转换为Δt
+    f_t = (a + b * t) * t
+    
+    # 4. 预测 d = g(x, y) * f(t)
+    res = g_xy * f_t
+    return res.tolist()
 
 class BedMesh:
     FADE_DISABLE = 0x7FFFFFFF
@@ -348,6 +511,10 @@ class BedMeshCalibrate:
         self.gcode.register_command(
             'BED_MESH_CALIBRATE', self.cmd_BED_MESH_CALIBRATE,
             desc=self.cmd_BED_MESH_CALIBRATE_help)
+        self.gcode.register_command(
+            'BED_MESH_CALIBRATE_FAST', self.cmd_BED_MESH_CALIBRATE_FAST)
+        self.gcode.register_command(
+            'BED_TEMP_MEASURE', self.cmd_BED_TEMP_MEASURE)
     def print_generated_points(self, print_func, truncate=False):
         x_offset = y_offset = 0.
         probe = self.printer.lookup_object('probe', None)
@@ -652,6 +819,149 @@ class BedMeshCalibrate:
         except BedMeshError as e:
             raise gcmd.error(str(e))
         self.probe_mgr.start_probe(gcmd)
+
+    def cmd_BED_MESH_CALIBRATE_FAST(self, gcmd):
+        # 1. 卸载mesh（参考cmd_BED_MESH_CALIBRATE方法）
+        self._profile_name = gcmd.get('PROFILE', "default")
+        if not self._profile_name.strip():
+            raise gcmd.error("Value for parameter 'PROFILE' must be specified")
+        self.bedmesh.set_mesh(None)
+        try:
+            self.update_config(gcmd)
+        except BedMeshError as e:
+            raise gcmd.error(str(e))
+        
+        # 2. 路径规划（旅行商问题）
+        toolhead = self.printer.lookup_object('toolhead')
+        pt_now = toolhead.get_position()
+        edge = gcmd.get("PRINT_MIN", "140.0,140.0")
+        pt_min = [float(x.strip()) for x in edge.split(',')]
+        edge = gcmd.get("PRINT_MAX", "160.0,160.0")
+        pt_max = [float(x.strip()) for x in edge.split(',')]
+        pts = [[pt_now[0], pt_now[1]], # 当前位置
+               [pt_min[0], pt_min[1]], # xmin, ymin
+               [pt_min[0], pt_max[1]], # xmin, ymax
+               [pt_max[0], pt_min[1]], # xmax, ymin
+               [pt_max[0], pt_max[1]], # xmax, ymax
+               [0.5*(pt_min[0]+pt_max[0]), 0.5*(pt_min[1]+pt_max[1])]]
+        pts = calc_open_tsp(pts) # 旅行商路线规划
+
+        # 3. 获取偏移（参考_move_next方法）
+        pprobe = self.printer.lookup_object('probe', None) # 获取探针对象
+        if pprobe is None:
+            raise gcmd.error("bed_mesh: probe not configured")
+        poffset = (0., 0., 0.) # 探针偏移初值
+        if self.probe_mgr.probe_helper.use_offsets:
+            poffset = pprobe.get_offsets() # 探针偏移更新
+
+        # 4. 依次探点（参考cmd_PROBE方法）
+        trig_pts = [[pt, None] for pt in pts]
+        for i, (pt, _) in enumerate(trig_pts):
+            pt[0] -= poffset[0] # 消除x轴探针偏移
+            pt[1] -= poffset[1] # 消除y轴探针偏移
+            # TODO: pt未包含z坐标，有待观察是否存在z运动干涉
+            toolhead.manual_move(pt, 25) # 移动到目标坐标
+            toolhead.wait_moves() # 等待移动完成
+            trig_pos = probe.run_single_probe(pprobe, None) # 触发探针测量
+            trig_pts[i][1] = trig_pos[2] # 保存触发时刻的目标点z坐标
+
+        # 5. 加载mesh（参考load_profile方法）
+        profile = self.bedmesh.pmgr.profiles.get(self._profile_name, None)
+        if profile is None:
+            raise gcmd.error(
+                f"bed_mesh: Unknown profile {self._profile_name}")
+        z_mesh = ZMesh(profile['mesh_params'], self._profile_name)
+        try:
+            z_mesh.build_mesh(profile['points'])
+        except BedMeshError as e:
+            raise gcmd.error(str(e))
+
+        # 6. 计算偏差
+        temp_default = profile['temperature'] # 探测default床网的热床温度
+        temp_now = 20.0 # 当前热床温度（基准值为20℃）
+        heater_bed = self.printer.lookup_object("heater_bed", None)
+        if heater_bed is not None: # ["target"]期望温度, ["temperature"]实测温度
+            temp_now = heater_bed.get_status(0)['temperature']
+        
+        z_delta_max, z_delta_min = float('-inf'), float('inf')
+        for pt, z_trig in trig_pts:
+            z_comp = calc_z_compensate(pt[0], pt[1], [temp_default, temp_now])
+            # default床网在当前热床温度下的预测值
+            z_pred = z_mesh.calc_z(pt[0], pt[1]) - z_comp[0] + z_comp[1]
+            z_delta = z_trig - z_pred
+            if z_delta > z_delta_max:
+                z_delta_max = z_delta
+            if z_delta < z_delta_min:
+                z_delta_min = z_delta
+        z_delta_range = z_delta_max - z_delta_min
+
+        # 7. 分类处理
+        Z_DELTA_THRESHOLD = 0.03 # 容许的z偏差阈值
+        # if Z_DELTA_THRESHOLD > z_delta_range * 0.5: # 偏差不大，不必重新探点
+        if Z_DELTA_THRESHOLD > z_delta_max: # 偏差不大，不必重新探点
+            # z_offset = (z_delta_max + z_delta_min) * 0.5 # 临时更新z偏移
+            self.bedmesh.set_mesh(z_mesh) # 使用已有的mesh
+            cmd = (
+                "G28.1 Z\n"
+                "BED_MESH_PROFILE LOAD=default\n"
+                # "MOVE_CLEAN_POSITION\n"
+                )
+        else: # 差值太大，重新探床 model_leveling
+            cmd = (
+                "BED_MESH_CLEAR\n"
+                f"BED_MESH_CALIBRATE {gcmd.get_raw_command_parameters()}\n"
+                "BED_MESH_PROFILE SAVE=model_leveling\n"
+                "BED_MESH_PROFILE LOAD=model_leveling\n"
+                "G1 Z10 F600\n"# 下降Z轴到10mm, 移动到清洁位置
+                #MOVE_CLEAN_POSITION\n"
+                )
+        self.gcode.run_script_from_command(cmd)
+
+    def cmd_BED_TEMP_MEASURE(self, gcmd):
+        #获取离线数据的临时gcode，正式部署后会删除
+
+        heater_bed = self.printer.lookup_object("heater_bed", None)
+        probe = self.printer.lookup_object('probe', None)
+        
+        # 待测点位
+        points = []
+        start = 0
+        stop = 300
+        n = 7
+        step = (stop-start)/(n-1)
+        ranges = [start + step * i for i in range(n)]
+        for x in ranges: # n*n点阵
+            for y in ranges:
+                points.append((x, y))
+        
+        # 回零
+        cmd = ("G28")
+        self.gcode.run_script_from_command(cmd)
+
+        # 待测温度 20℃-80℃
+        for temp_e in range(20, 81, 5):
+            # 等待加热完成
+            cmd = ("M400\n"
+                   f"M190 S{temp_e}\n"
+                   "G4 P500\n")
+            self.gcode.run_script_from_command(cmd)
+            # 遍历待测点
+            for pt in points:
+                cmd = (f"G1 X{pt[0]} Y{pt[1]} F1800\n"
+                       "M400\n"
+                       "PROBE SAMPLES=50\n"
+                       "G1 Z10 F600\n")
+                self.gcode.run_script_from_command(cmd)
+                temp_m = heater_bed.get_status(0)["temperature"]
+                pos_z = probe.get_status(0)["last_z_result"]
+                cmd = (f"bed_temp,{temp_e},{temp_m},"
+                       f"{int(pt[0])},{int(pt[1])},{pos_z}")
+                gcmd.respond_info(cmd)
+        # 结束
+        cmd = ("M140 S0\n"
+               "G1 X150 Y150 F1800\n")
+        self.gcode.run_script_from_command(cmd)
+
     def probe_finalize(self, offsets, positions):
         z_offset = offsets[2]
         positions = [[round(p[0], 2), round(p[1], 2), p[2]]
@@ -1676,6 +1986,8 @@ class ProfileManager:
                     params[key] = profile.getfloat(key)
                 elif t is str:
                     params[key] = profile.get(key)
+            temp = profile.getfloat('temperature', 20.0)
+            self.profiles[name]['temperature'] = temp
         # Register GCode
         self.gcode.register_command(
             'BED_MESH_PROFILE', self.cmd_BED_MESH_PROFILE,
@@ -1702,6 +2014,11 @@ class ProfileManager:
             return
         probed_matrix = z_mesh.get_probed_matrix()
         mesh_params = z_mesh.get_mesh_params()
+        temp_now = None # 探测default床网的热床温度
+        if prof_name == "default":
+            heater_bed = self.printer.lookup_object("heater_bed", None)
+            if heater_bed is not None: # ["target"]期望温度, ["temperature"]实测温度
+                temp_now = heater_bed.get_status(0)["temperature"]
         configfile = self.printer.lookup_object('configfile')
         cfg_name = self.name + " " + prof_name
         # set params
@@ -1712,10 +2029,12 @@ class ProfileManager:
                 z_values += "%.6f, " % p
             z_values = z_values[:-2]
 
-        with open('zdata_bedmesh.txt', 'a') as file:
-            file.write("%s \n" % (z_values))
+        # TODO: 为什么要写这个文件？
+        # with open('zdata_bedmesh.txt', 'a') as file:
+        #     file.write("%s \n" % (z_values))
 
 
+        configfile.set(cfg_name, 'temperature', temp_now)
         configfile.set(cfg_name, 'version', PROFILE_VERSION)
         configfile.set(cfg_name, 'points', z_values)
         for key, value in mesh_params.items():
