@@ -878,7 +878,8 @@ class BedMeshCalibrate:
 
         # 6. 计算偏差
         temp_default = profile['temperature'] # 探测default床网的热床温度
-        temp_now = 20.0 # 当前热床温度（基准值为20℃）
+        TEMP_BASE = 20.0
+        temp_now = TEMP_BASE # 当前热床温度（基准值为20℃）
         heater_bed = self.printer.lookup_object("heater_bed", None)
         if heater_bed is not None: # ["target"]期望温度, ["temperature"]实测温度
             temp_now = heater_bed.get_status(0)['temperature']
@@ -897,10 +898,10 @@ class BedMeshCalibrate:
 
         # 7. 分类处理
         Z_DELTA_THRESHOLD = 0.03 # 容许的z偏差阈值
-        # if Z_DELTA_THRESHOLD > z_delta_range * 0.5: # 偏差不大，不必重新探点
         if Z_DELTA_THRESHOLD > z_delta_max: # 偏差不大，不必重新探点
+        # if Z_DELTA_THRESHOLD > z_delta_range * 0.5: # 偏差不大，不必重新探点
             # z_offset = (z_delta_max + z_delta_min) * 0.5 # 临时更新z偏移
-            self.bedmesh.set_mesh(z_mesh) # 使用已有的mesh
+            # self.bedmesh.set_mesh(z_mesh) # 使用已有的mesh
             cmd = (
                 "G28.1 Z\n"
                 "BED_MESH_PROFILE LOAD=default\n"
