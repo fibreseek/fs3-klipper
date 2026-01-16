@@ -4,6 +4,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging, logging.handlers, threading, queue, time
+from datetime import datetime
 
 # Class to forward all messages through a queue to a background thread
 class QueueHandler(logging.Handler):
@@ -13,7 +14,8 @@ class QueueHandler(logging.Handler):
     def emit(self, record):
         try:
             self.format(record)
-            record.msg = record.message
+            timeStamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S.%f] ")
+            record.msg = timeStamp+record.message  
             record.args = None
             record.exc_info = None
             self.queue.put_nowait(record)
@@ -21,10 +23,10 @@ class QueueHandler(logging.Handler):
             self.handleError(record)
 
 # Class to poll a queue in a background thread and log each message
-class QueueListener(logging.handlers.TimedRotatingFileHandler):
+class QueueListener(logging.handlers.RotatingFileHandler):
     def __init__(self, filename):
-        logging.handlers.TimedRotatingFileHandler.__init__(
-            self, filename, when='midnight', backupCount=5)
+        logging.handlers.RotatingFileHandler.__init__(
+            self, filename, maxBytes=1024*1024*5, backupCount=5,)
         self.bg_queue = queue.Queue()
         self.bg_thread = threading.Thread(target=self._bg_thread)
         self.bg_thread.start()
@@ -46,7 +48,7 @@ class QueueListener(logging.handlers.TimedRotatingFileHandler):
     def clear_rollover_info(self):
         self.rollover_info.clear()
     def doRollover(self):
-        logging.handlers.TimedRotatingFileHandler.doRollover(self)
+        logging.handlers.RotatingFileHandler.doRollover(self)
         lines = [self.rollover_info[name]
                  for name in sorted(self.rollover_info)]
         lines.append(
@@ -64,6 +66,7 @@ def setup_bg_logging(filename, debuglevel):
     root = logging.getLogger()
     root.addHandler(MainQueueHandler)
     root.setLevel(debuglevel)
+
     return ql
 
 def clear_bg_logging():
