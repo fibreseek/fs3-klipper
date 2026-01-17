@@ -809,8 +809,8 @@ class BedMeshCalibrate:
             # TODO: pt未包含z坐标，有待观察是否存在z运动干涉
             toolhead.manual_move(pt, 25) # 移动到目标坐标
             toolhead.wait_moves() # 等待移动完成
-            trig_pos = probe.run_single_probe(pprobe, None) # 触发探针测量
-            trig_pts[i][1] = trig_pos[2] # 保存触发时刻的目标点z坐标
+            trig_pt = probe.run_single_probe(pprobe, None) # 触发探针测量
+            trig_pts[i][1] = trig_pt[2] # 保存触发时刻的目标点z坐标
 
         # 5. 加载mesh（参考load_profile方法）
         profile = self.bedmesh.pmgr.profiles.get(self._profile_name, None)
@@ -848,7 +848,7 @@ class BedMeshCalibrate:
                 z_delta_min = z_delta
         z_delta_range = z_delta_max - z_delta_min
         # cmd += f"\n{z_delta_max}, {z_delta_min}, {z_delta_range}\n"
-        logging.info(cmd)
+        # logging.info(cmd)
 
         # 7. 分类处理
         Z_DELTA_THRESHOLD = 0.03 # 容许的z偏差阈值

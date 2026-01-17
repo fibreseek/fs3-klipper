@@ -220,7 +220,7 @@ class AnisoTempCompensation:
             return outputs
     def save_model(self, filepath=None):
         """
-        保存模型参数到JSON文件
+        保存模型参数到pkl文件
         """
         if filepath is None:
             filepath = self.fname
@@ -250,7 +250,7 @@ class AnisoTempCompensation:
 
     def load_model(self, filepath=None):
         """
-        从JSON文件加载模型参数
+        从pkl文件加载模型参数
         """
         if filepath is None:
             filepath = self.fname
@@ -277,7 +277,6 @@ class AnisoTempCompensation:
             self.limit_x = model_data['limit_x']
             self.limit_y = model_data['limit_y']
             self.limit_t = model_data['limit_t']
-            self.base_t = model_data['base_t']
             
             logging.info(f"模型已从 {filepath} 加载")
             return True
