@@ -4,9 +4,8 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging, math, json, collections
-from . import probe
+from . import probe, aniso_temp_compensation
 import numpy as np
-from scipy.interpolate import griddata
 from scipy.spatial.distance import pdist, squareform
 
 PROFILE_VERSION = 1
@@ -189,63 +188,6 @@ def calc_open_tsp(pts):
     
     # 按索引顺序返回原始点坐标（不含当前起点）
     return [pts[i] for i in path_idx if i != HEAD_IDX]
-
-def calc_z_compensate(x, y, t):
-    """
-    预测给定 (x, y, t) 下的z相对形变量, 基准t=20℃。
-    
-    Args:
-        x (float): X-coordinate on the bed (e.g., 150.0).
-        y (float): Y-coordinate on the bed (e.g., 150.0).
-        t (float or array-like): Temperature in Celsius.
-            Can be a scalar or an array.
-            (e.g., 53.1 or [78.9, 45.6]).
-                                     
-    Returns:
-        float or array: Predicted relative deformation.
-    """
-    # 1. 加载模型
-    a = 0.004262145006659417
-    b = -3.348508592366509e-05
-
-    pos = []
-    ranges = range(0, 301, int(300/6)) # [0,300]区间，7*7点阵模型
-    for xx in ranges:
-        for yy in ranges:
-            pos.append([xx,yy])
-
-    coeff = [     
-        -0.020196736477250166, 0.6463132661297226, 0.9840422541803013,
-        1.0211779448429177, 0.9649474698075476, 0.3869065381725384,
-        0.17476558311164928, 0.6452784633353884, 0.8642271469414533,
-        1.0836711885957573, 1.22693478374715, 1.1898833712622001,
-        0.9159937271517113, 0.5106198573141001, 0.9819942104652803,
-        1.157559359799062, 1.116408953057619, 1.2017527929204788,
-        1.2156702332280336, 1.0155472541594968, 0.7996910834653771,
-        1.1833818293506684, 1.2579787461546108, 1.2258269834421123,
-        1.131733632967438, 1.2280043167340453, 1.1607989478852714,
-        1.0380350957398234, 1.1936571033597811, 1.2605182312266616,
-        1.201642785066598, 1.2622602779646845, 1.1775966065463948,
-        1.1821803114120242, 0.9214090367333628, 0.993360594688061,
-        1.1651816254221268, 1.3367551764565428, 1.383820015419407,
-        1.1238747808383602, 1.2444850057997374, 0.5394488606567082,
-        0.5552031181741607, 1.002837761900388, 1.3756666622465332,
-        1.2502931816685263, 1.0886359101101635, 0.9199774258651509,
-        0.512247230960108]
-    
-    # 2. 计算空间缩放因子 g(x, y)
-    g_xy = griddata(points=pos, values=coeff, xi=(x, y), method='cubic')
-    if np.isnan(g_xy):  # 如果在凸包外，回退到最近邻
-        g_xy = griddata(points=pos, values=coeff, xi=(x, y), method='nearest')
-    
-    # 3. 计算温度响应 f(t) = a*(t-20) + b*(t-20)**2
-    T_BASE = 20.0 # 基准温度
-    t = np.asarray(t) - T_BASE # 转换为Δt
-    f_t = (a + b * t) * t
-    
-    # 4. 预测 d = g(x, y) * f(t)
-    res = g_xy * f_t
-    return res.tolist()
 
 class BedMesh:
     FADE_DISABLE = 0x7FFFFFFF
@@ -506,6 +448,11 @@ class BedMeshCalibrate:
             )
         except BedMeshError as e:
             raise config.error(str(e))
+        # 初始化热床的温度补偿器
+        self.temp_cpst = aniso_temp_compensation.AnisoTempCompensation(
+            self.mesh_min, self.mesh_max,
+            self.mesh_config['x_count'],
+            self.mesh_config['y_count'])
         self._profile_name = "default"
         self.gcode = self.printer.lookup_object('gcode')
         self.gcode.register_command(
@@ -514,7 +461,7 @@ class BedMeshCalibrate:
         self.gcode.register_command(
             'BED_MESH_CALIBRATE_FAST', self.cmd_BED_MESH_CALIBRATE_FAST)
         self.gcode.register_command(
-            'BED_TEMP_MEASURE', self.cmd_BED_TEMP_MEASURE)
+            'BED_MESH_TEMP', self.cmd_BED_MESH_TEMP) # 温度补偿接口
     def print_generated_points(self, print_func, truncate=False):
         x_offset = y_offset = 0.
         probe = self.printer.lookup_object('probe', None)
@@ -877,24 +824,31 @@ class BedMeshCalibrate:
             raise gcmd.error(str(e))
 
         # 6. 计算偏差
-        temp_default = profile['temperature'] # 探测default床网的热床温度
-        TEMP_BASE = 20.0
-        temp_now = TEMP_BASE # 当前热床温度（基准值为20℃）
+        # temp_default = profile['temperature'] # 探测default床网的热床温度
+        temp_now = 70.0 # 当前热床温度（基准值为70℃）
         heater_bed = self.printer.lookup_object("heater_bed", None)
         if heater_bed is not None: # ["target"]期望温度, ["temperature"]实测温度
             temp_now = heater_bed.get_status(0)['temperature']
         
+        # cmd = "cpst----\n"
         z_delta_max, z_delta_min = float('-inf'), float('inf')
         for pt, z_trig in trig_pts:
-            z_comp = calc_z_compensate(pt[0], pt[1], [temp_default, temp_now])
-            # default床网在当前热床温度下的预测值
-            z_pred = z_mesh.calc_z(pt[0], pt[1]) - z_comp[0] + z_comp[1]
-            z_delta = z_trig - z_pred
+            # 点xy在default温度的绝对z
+            z_default = z_mesh.calc_z(pt[0], pt[1])
+            # 点xy从default温度到当前温度的相对补偿z
+            z_comp = self.temp_cpst.predict(pt[0], pt[1], temp_now)
+            # 点xy在当前温度的绝对z(预测估算的)
+            # cmd += f"[{pt[0]},{pt[1]}]:{z_default}, {z_comp}, {z_default+z_comp}, {z_trig}\n" 
+            z_default += z_comp
+            # 点xy的实测z值与预测z值的偏差
+            z_delta = z_trig - z_default
             if z_delta > z_delta_max:
                 z_delta_max = z_delta
             if z_delta < z_delta_min:
                 z_delta_min = z_delta
         z_delta_range = z_delta_max - z_delta_min
+        # cmd += f"\n{z_delta_max}, {z_delta_min}, {z_delta_range}\n"
+        logging.info(cmd)
 
         # 7. 分类处理
         Z_DELTA_THRESHOLD = 0.03 # 容许的z偏差阈值
@@ -918,50 +872,15 @@ class BedMeshCalibrate:
                 )
         self.gcode.run_script_from_command(cmd)
 
-    def cmd_BED_TEMP_MEASURE(self, gcmd):
-        #获取离线数据的临时gcode，正式部署后会删除
+    def cmd_BED_MESH_TEMP(self, gcmd):
+        flag = gcmd.get_int('P', 0)
 
-        heater_bed = self.printer.lookup_object("heater_bed", None)
-        probe = self.printer.lookup_object('probe', None)
-        
-        # 待测点位
-        points = []
-        start = 0
-        stop = 300
-        n = 7
-        step = (stop-start)/(n-1)
-        ranges = [start + step * i for i in range(n)]
-        for x in ranges: # n*n点阵
-            for y in ranges:
-                points.append((x, y))
-        
-        # 回零
-        cmd = ("G28")
-        self.gcode.run_script_from_command(cmd)
-
-        # 待测温度 20℃-80℃
-        for temp_e in range(20, 81, 5):
-            # 等待加热完成
-            cmd = ("M400\n"
-                   f"M190 S{temp_e}\n"
-                   "G4 P500\n")
-            self.gcode.run_script_from_command(cmd)
-            # 遍历待测点
-            for pt in points:
-                cmd = (f"G1 X{pt[0]} Y{pt[1]} F1800\n"
-                       "M400\n"
-                       "PROBE SAMPLES=50\n"
-                       "G1 Z10 F600\n")
-                self.gcode.run_script_from_command(cmd)
-                temp_m = heater_bed.get_status(0)["temperature"]
-                pos_z = probe.get_status(0)["last_z_result"]
-                cmd = (f"bed_temp,{temp_e},{temp_m},"
-                       f"{int(pt[0])},{int(pt[1])},{pos_z}")
-                gcmd.respond_info(cmd)
-        # 结束
-        cmd = ("M140 S0\n"
-               "G1 X150 Y150 F1800\n")
-        self.gcode.run_script_from_command(cmd)
+        if flag == 1:
+            z_mesh = self.bedmesh.get_mesh()
+            probed_matrix = z_mesh.get_probed_matrix()
+            self.temp_cpst.receive(probed_matrix)
+        elif flag == 2:
+            self.temp_cpst.fit()
 
     def probe_finalize(self, offsets, positions):
         z_offset = offsets[2]
@@ -1987,8 +1906,8 @@ class ProfileManager:
                     params[key] = profile.getfloat(key)
                 elif t is str:
                     params[key] = profile.get(key)
-            temp = profile.getfloat('temperature', 20.0)
-            self.profiles[name]['temperature'] = temp
+            # temp = profile.getfloat('temperature', 20.0)
+            # self.profiles[name]['temperature'] = temp
         # Register GCode
         self.gcode.register_command(
             'BED_MESH_PROFILE', self.cmd_BED_MESH_PROFILE,
@@ -2015,11 +1934,7 @@ class ProfileManager:
             return
         probed_matrix = z_mesh.get_probed_matrix()
         mesh_params = z_mesh.get_mesh_params()
-        temp_now = None # 探测default床网的热床温度
-        if prof_name == "default":
-            heater_bed = self.printer.lookup_object("heater_bed", None)
-            if heater_bed is not None: # ["target"]期望温度, ["temperature"]实测温度
-                temp_now = heater_bed.get_status(0)["temperature"]
+
         configfile = self.printer.lookup_object('configfile')
         cfg_name = self.name + " " + prof_name
         # set params
@@ -2030,12 +1945,12 @@ class ProfileManager:
                 z_values += "%.6f, " % p
             z_values = z_values[:-2]
 
-        # TODO: 为什么要写这个文件？
-        # with open('zdata_bedmesh.txt', 'a') as file:
-        #     file.write("%s \n" % (z_values))
-
-
-        configfile.set(cfg_name, 'temperature', temp_now)
+        # temp_now = None # 探测default床网的热床温度
+        # if prof_name == "default":
+        #     heater_bed = self.printer.lookup_object("heater_bed", None)
+        #     if heater_bed is not None: # ["target"]期望温度, ["temperature"]实测温度
+        #         temp_now = heater_bed.get_status(0)["temperature"]
+        # configfile.set(cfg_name, 'temperature', temp_now)
         configfile.set(cfg_name, 'version', PROFILE_VERSION)
         configfile.set(cfg_name, 'points', z_values)
         for key, value in mesh_params.items():
