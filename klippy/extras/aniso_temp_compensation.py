@@ -1,6 +1,9 @@
 import numpy as np
 from scipy.interpolate import interpn
-import pickle, os, logging
+import logging, os
+
+class error(Exception):
+    pass
 
 class AnisoTempCompensation:
     # 热床温度补偿器，用于快速调平的跨温度对比
@@ -15,14 +18,20 @@ class AnisoTempCompensation:
         n_y: y方向探测点数
         """
         if n_x <= 0 or n_y <= 0:
-            raise ValueError("n_x 和 n_y 必须为正整数")
+            raise error("[TempComp] n_x and n_y must be positive integer")
         if mesh_min[0] >= mesh_max[0] or mesh_min[1] >= mesh_max[1]:
-            raise ValueError("范围必须是递增的元组")
+            raise error("[TempComp] range must be an increasing tuple")
+        
+        self.grid_t = None
+        self.grid_x = None
+        self.grid_y = None
+        self.grid_z = None
 
         self.val_x = np.linspace(mesh_min[0], mesh_max[0], n_x)
         self.val_y = np.linspace(mesh_min[1], mesh_max[1], n_y)
         # TODO: 最好写成config参数，校准宏也要同步读取
         self.val_t = np.array([30.0, 70.0], dtype=np.float32)
+        self.val_z = []
 
         self.n_x = n_x
         self.n_y = n_y
@@ -35,21 +44,14 @@ class AnisoTempCompensation:
         # TODO: 需同步heater_bed模块: min_temp, max_temp
         self.limit_t = (0.0, 130.0)
 
-        self.matrix_z = np.zeros([n_x, n_y, self.n_t])
-        self.ndim_z = 0
-        self.fname = "klippy/extras/aniso_temp_compensation_model.pkl"
+        self.fitted = False
+        self.fname = "~/printer_data/config/temp_comp.npz"
 
-        self.grid_t = None
-        self.grid_x = None
-        self.grid_y = None
-        self.grid_z = None
-        
     def setup(self, val_t=None, limit_x=None, limit_y=None, limit_t=None):
         # TODO: 修改val_t和limit_t，可能存在干涉，需判断
         if val_t is not None:
             self.val_t = np.asarray(val_t, dtype=np.float32)
             self.n_t = len(self.val_t)
-            self.matrix_z = np.zeros([self.n_x, self.n_y, self.n_t])
         if limit_x is not None:
             self.limit_x = limit_x
         if limit_y is not None:
@@ -58,19 +60,13 @@ class AnisoTempCompensation:
             self.limit_t = limit_t
 
     def receive(self, matrix_p):
-        # matrix_p 是 (ny,nx)形状的二维数组，需转置
-        matrix_p = np.asarray(matrix_p)
-        self.matrix_z[...,self.ndim_z] = matrix_p.T
-        self.ndim_z += 1
-        # logging.info(f"cpst----\n{self.matrix_z}")
+        # 注意 matrix_p 是 (ny,nx) 形状的二维数组
+        self.val_z.append(matrix_p)
+        # logging.debug(f"cpst----\n{self.val_z}")
 
     def fit(self):
         """
         拟合模型，基于预设的网格结构
-
-        参数:
-        matrix_z: 形状为 (n_x, n_y, n_t) 的三维数组
-                第三维表示不同温度下的变形数据
         """
         # 评估XYT外推需求
         ext_head_x = self.limit_x[0] < self.val_x[0]
@@ -121,18 +117,21 @@ class AnisoTempCompensation:
         # cmd += f"{self.grid_y}\n-----\n"
         # cmd += f"{self.grid_t}\n-----\n"
 
+        # 形状调整
+        # 修改为(n_x,n_y,n_t)三维数组，第三维表示不同温度下的 Z 形变
+        self.val_z = np.stack(self.val_z, axis=-1).swapaxes(0, 1) 
+
         # 转为相对形变 Z 矩阵
-        base_z = self.matrix_z[...,-1:]
-        self.matrix_z -= base_z
+        base_z = self.val_z[...,-1:]
+        self.val_z -= base_z
         del base_z
 
         # 创建网格Z
         self.grid_z = np.full((len_x, len_y, len_t), np.nan, dtype=np.float32)
         self.grid_z[idx_head_x:idx_head_x + self.n_x, 
                     idx_head_y:idx_head_y + self.n_y, 
-                    idx_head_t:idx_head_t + self.n_t] = self.matrix_z
-        self.matrix_z = np.zeros([self.n_x, self.n_y, self.n_t])
-        self.ndim_z = 0
+                    idx_head_t:idx_head_t + self.n_t] = self.val_z
+        self.val_z = []
         # cmd += f"{self.grid_z}\n----\n"
 
         # 填充网格Z温度外推数据
@@ -176,10 +175,10 @@ class AnisoTempCompensation:
             self.grid_z[:, -1, :] = self.grid_z[:, -2, :]
         
         self.save_model()
+        self.fitted = True
         
         # cmd += f"{self.grid_z}\n----\n"
-        # logging.info(cmd)
-        # cmd=""
+        # logging.debug(cmd)
 
     def predict(self, x, y, t):
         """
@@ -195,7 +194,7 @@ class AnisoTempCompensation:
             y = np.full(n, y, dtype=np.float32)
             outputs = np.full(n, outputs)
 
-        if self.grid_z is None:
+        if self.fitted == False:
             if self.load_model() == False:
                 return outputs
 
@@ -220,67 +219,49 @@ class AnisoTempCompensation:
             return outputs
     def save_model(self, filepath=None):
         """
-        保存模型参数到pkl文件
+        保存模型参数到npz文件
         """
         if filepath is None:
             filepath = self.fname
+        filepath = os.path.expanduser(filepath) # 将 ~ 映射为 /home/anisoprint/
             
-        model_data = {
-            'grid_x': self.grid_x,
-            'grid_y': self.grid_y,
-            'grid_t': self.grid_t,
-            'grid_z': self.grid_z,
-            'val_x': self.val_x,
-            'val_y': self.val_y,
-            'val_t': self.val_t,
-            'n_x': self.n_x,
-            'n_y': self.n_y,
-            'n_t': self.n_t,
-            'limit_x': self.limit_x,
-            'limit_y': self.limit_y,
-            'limit_t': self.limit_t
-            }
-        
         try:
-            with open(filepath, 'wb') as f:
-                pickle.dump(model_data, f)
-            logging.info(f"模型已保存至 {filepath}")
+            # 只保存必需的网格数据
+            np.savez_compressed(
+                filepath,
+                grid_x=self.grid_x,
+                grid_y=self.grid_y,
+                grid_t=self.grid_t,
+                grid_z=self.grid_z
+            )
+            logging.debug(f"[TempComp] model save success {filepath}")
         except Exception as e:
-            logging.error(f"保存模型失败: {e}")
+            logging.debug(f"[TempComp] model save fail {e}")
 
     def load_model(self, filepath=None):
         """
-        从pkl文件加载模型参数
+        从npz文件加载模型参数
         """
         if filepath is None:
             filepath = self.fname
-            
+        filepath = os.path.expanduser(filepath) # 将 ~ 映射为 /home/anisoprint/
+
         if not os.path.exists(filepath):
-            logging.info(f"模型文件不存在: {filepath}")
+            logging.debug("[TempComp] model path not exist")
             return False
             
         try:
-            with open(filepath, 'rb') as f:
-                model_data = pickle.load(f)
+            # 加载保存的数据
+            with np.load(filepath) as data:
+                # 恢复网格数据
+                self.grid_x = data['grid_x']
+                self.grid_y = data['grid_y']
+                self.grid_t = data['grid_t']
+                self.grid_z = data['grid_z']
             
-            # 恢复模型参数
-            self.grid_x = model_data['grid_x']
-            self.grid_y = model_data['grid_y']
-            self.grid_t = model_data['grid_t']
-            self.grid_z = model_data['grid_z']
-            self.val_x = model_data['val_x']
-            self.val_y = model_data['val_y']
-            self.val_t = model_data['val_t']
-            self.n_x = model_data['n_x']
-            self.n_y = model_data['n_y']
-            self.n_t = model_data['n_t']
-            self.limit_x = model_data['limit_x']
-            self.limit_y = model_data['limit_y']
-            self.limit_t = model_data['limit_t']
-            
-            logging.info(f"模型已从 {filepath} 加载")
+            logging.debug(f"[TempComp] model load success {filepath}")
+            self.fitted = True
             return True
         except Exception as e:
-            logging.info(f"加载模型失败: {e}")
+            logging.debug(f"[TempComp] model load fail {e}")
             return False
-        
