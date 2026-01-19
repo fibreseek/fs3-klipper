@@ -43,7 +43,7 @@ int8_t aniso_ring_buffer_update(struct aniso_ring_buffer_t *rb, int16_t index, c
 }
 
 // 获取环形缓冲区当前元素数量
-int16_t aniso_ring_buffer_size(const struct aniso_ring_buffer_t *rb)
+uint16_t aniso_ring_buffer_size(const struct aniso_ring_buffer_t *rb)
 {
     return rb->count;
 }

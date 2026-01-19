@@ -182,30 +182,6 @@ class ProbeCommandHelper:
         gcode.register_command('Z_OFFSET_APPLY_PROBE',
                                self.cmd_Z_OFFSET_APPLY_PROBE,
                                desc=self.cmd_Z_OFFSET_APPLY_PROBE_help)
-        
-        # debug：独立控制压电陶瓷信号采样的命令
-        gcode.register_command('ANISO_PROBE_ADC_START', self.cmd_ANISO_PROBE_ADC_START)
-        gcode.register_command('ANISO_PROBE_ADC_STOP', self.cmd_ANISO_PROBE_ADC_STOP)
-        self.aniso_probe_session = None
-
-    def cmd_ANISO_PROBE_ADC_START(self, gcmd):
-        logging.info("aniso_probe_adc_start")
-        aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
-        aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 1, 1])#切换为仅adc采样模式
-
-        print_time = self.printer.lookup_object('toolhead').get_last_move_time()+0.01 #打印时间
-        sample_time = 0.000015 # 摘抄自 homing.py，ENDSTOP_SAMPLE_TIME
-        sample_count = 4 # 摘抄自 homing.py，ENDSTOP_SAMPLE_COUNT
-        rest_time = 0.001 # 采样周期，freq = 1/rest_time
-
-        self.aniso_probe_session = self.probe.start_probe_session(gcmd)
-        self.aniso_probe_session.mcu_probe.sample_start(print_time, sample_time, sample_count, rest_time)
-
-    def cmd_ANISO_PROBE_ADC_STOP(self, gcmd):
-        if self.aniso_probe_session is not None:
-            self.aniso_probe_session.mcu_probe.sample_stop()
-            self.aniso_probe_session.end_probe_session()
-            logging.info("aniso_probe_adc_stop")
 
     def _move(self, coord, speed):
         toolhead = self.printer.lookup_object('toolhead')
@@ -603,10 +579,6 @@ class ProbeSessionHelper:
             raise self.printer.command_error(reason)
         # Allow axis_twist_compensation to update results
         self.printer.send_event("probe:update_results", epos)
-        # Report results
-        gcode = self.printer.lookup_object('gcode')
-        gcode.respond_info("probe at %.3f,%.3f is z=%.6f"
-                           % (epos[0], epos[1], epos[2]))
         return epos[:3]
     def run_probe(self, gcmd):
         if self.hw_probe_session is None:
@@ -615,19 +587,23 @@ class ProbeSessionHelper:
         toolhead = self.printer.lookup_object('toolhead')
         gcode = self.printer.lookup_object('gcode')
         probexy = toolhead.get_position()[:2]
+        cnt = 0
         retries = 0
         positions = []
         sample_count = params['samples']
         sample_cache = [] #采样结果历史缓存初始化
         
-        while len(positions) < sample_count:
+        while cnt < sample_count:
             # Probe position
             pos = self._probe(gcmd)
             positions.append(pos)
+            cnt += 1
             toolhead.manual_move(
                 # probexy + [pos[2] + params['sample_retract_dist']],
                 probexy + [params['sample_retract_dist']],
                 params['lift_speed'])
+            gcode.respond_info("%d: probe at %.3f,%.3f is z=%.6f" 
+                               % (cnt, pos[0], pos[1], pos[2]))
 
             # Wait for the retract move to complete before sending commands
             toolhead.wait_moves()
@@ -636,7 +612,7 @@ class ProbeSessionHelper:
             # aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
             # aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 1, 0])  # 切换为adc采样+触发判断模式
             # Check samples tolerance
-            if len(positions) == sample_count:
+            if cnt == sample_count:
                 result = calc_probe_z_mad(positions, params['samples_tolerance'])
                 if len(result)*2 >= sample_count: #筛选结果不得少于样本半数
                     positions = result #更新为筛选后的坐标组合
@@ -652,6 +628,7 @@ class ProbeSessionHelper:
                     break
                 
                 gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
+                cnt = 0
                 retries += 1
                 positions = []
         # Calculate result
@@ -824,8 +801,6 @@ class ProbeEndstopWrapper:
         self.home_start = self.mcu_endstop.home_start
         self.home_wait = self.mcu_endstop.home_wait
         self.query_endstop = self.mcu_endstop.query_endstop
-        self.sample_start = self.mcu_endstop.sample_start
-        self.sample_stop = self.mcu_endstop.sample_stop
         # multi probes state
         self.multi = 'OFF'
     def _raise_probe(self):
