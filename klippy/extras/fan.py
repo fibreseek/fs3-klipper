@@ -150,6 +150,8 @@ class PrinterFan:
                     error_msg = "Right print head throat fan malfunction, please check the hardware!"
                 elif name == "fan":
                     error_msg = "Mainboard cooling fan malfunction, please check the hardware!"
+                elif name == "fan_generic fan6":
+                    error_msg = "Constant flow fan malfunction, please check the hardware!"
                 else:
                     error_msg = f"Fan '{name}' RPM too low: {rpm:.1f} RPM (speed: {speed:.2f})"
                 self.printer.invoke_shutdown(error_msg)
