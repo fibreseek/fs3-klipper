@@ -119,7 +119,8 @@ class AnisoTempCompensation:
 
         # 形状调整
         # 修改为(n_x,n_y,n_t)三维数组，第三维表示不同温度下的 Z 形变
-        self.val_z = np.stack(self.val_z, axis=-1).swapaxes(0, 1) 
+        self.val_z = np.stack(self.val_z, axis=0)  # (n_t, n_y, n_x)
+        self.val_z = np.transpose(self.val_z, (2, 1, 0))  # (n_x, n_y, n_t)
 
         # 转为相对形变 Z 矩阵
         base_z = self.val_z[...,-1:]
@@ -140,10 +141,8 @@ class AnisoTempCompensation:
             for i in range(idx_head_x, idx_head_x + self.n_x):
                 for j in range(idx_head_y, idx_head_y + self.n_y):
                     known_z = self.grid_z[i, j, slice_t]
-                    if np.all(np.isnan(known_z)):
-                        continue
                     valid_mask = ~np.isnan(known_z)
-                    if np.sum(valid_mask) < 2:
+                    if np.count_nonzero(valid_mask) < 2:
                         continue
 
                     known_t = self.grid_t[slice_t][valid_mask]
@@ -157,10 +156,16 @@ class AnisoTempCompensation:
                             self.grid_z[i, j, -1] = \
                                 np.polyval(coeffs, self.limit_t[1])
                     except np.linalg.LinAlgError:
-                        if ext_head_t and valid_mask[0]:
-                            self.grid_z[i, j, 0] = known_z[0]
-                        if ext_tail_t and valid_mask[-1]:
-                            self.grid_z[i, j, -1] = known_z[-1]
+                        if ext_head_t:
+                            if valid_mask[0]:
+                                self.grid_z[i, j, 0] = known_z_filtered[0]
+                            else:
+                                self.grid_z[i, j, 0] = 0.0
+                        if ext_tail_t:
+                            if valid_mask[-1]:
+                                self.grid_z[i, j, -1] = known_z_filtered[-1]
+                            else:
+                                self.grid_z[i, j, -1] = 0.0
 
         # cmd += f"{self.grid_z}\n----\n"
 
