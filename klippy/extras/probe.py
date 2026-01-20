@@ -314,7 +314,7 @@ class ProbeCommandHelper:
             # Prepare temporary input file for analysis script
             # Create a timestamped filename like: probe_samples_20251022_154747.txt
             now = __import__('datetime').datetime.now()
-            fname = f"probe_samples_{now.strftime('%Y%m%d_%H%M%S')}.txt"
+            fname = f"probe_samples_{pos[0]:.1f}_{pos[1]:.1f}_{now.strftime('%Y%m%d_%H%M%S')}.txt"
             tmp_dir = tempfile.gettempdir()
             tmp_path = os.path.join(tmp_dir, fname)
             fd = os.open(tmp_path, os.O_CREAT | os.O_WRONLY, 0o600)
