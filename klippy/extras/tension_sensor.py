@@ -217,7 +217,7 @@ class MySerial:
             gcmd.respond_info(f"Reading {i+1}: {current_reading}")
             
             if i < 9:
-                time.sleep(1)
+                time.sleep(2)
 
         if len(readings) >= 3:
             sorted_readings = sorted(readings)
@@ -251,7 +251,7 @@ class MySerial:
             gcmd.respond_info(f"Reading {i+1}: {current_reading}")
 
             if i < 9:
-                time.sleep(1)
+                time.sleep(2)
 
         if len(readings) >= 3:
             sorted_readings = sorted(readings)
@@ -360,11 +360,12 @@ class MySerial:
         """Polling detection main loop with block detection based on weight drop"""
         while getattr(self, 'polling_enabled', False):
             current_value = self.read_spi_once()
+            logging.info(f"data detected: {current_value}")
             
             if current_value is not None:
                 if current_value < 1000 or current_value > 8380000:
                     logging.warning(f"Invalid data detected: {current_value}, valid range: 1000 to 8380000")
-                    time.sleep(1)
+                    time.sleep(2)
                     continue
                 
                 if not hasattr(self, 'weight_before_drop'):
@@ -378,7 +379,7 @@ class MySerial:
                     diff = previous_weight - current_value
                     
                     # Detect weight drop
-                    if diff >= 3900:
+                    if diff >= 4000:
                         if self.weight_before_drop is None:
                             self.weight_before_drop = previous_weight
                             self.reactor.register_callback(
@@ -388,9 +389,9 @@ class MySerial:
                     # If weight before drop has been recorded, check total drop amount
                     if self.weight_before_drop is not None:
                         drop_diff = self.weight_before_drop - current_value
-                        if drop_diff >= 3900:
+                        if drop_diff >= 4000:
                             self.block_count += 1
-                            if self.block_count >= 5 and not self.block_status:
+                            if self.block_count >= 10 and not self.block_status:
                                 self.block_status = True
                                 self.block_warning_sent = False
                         else:
@@ -424,7 +425,7 @@ class MySerial:
             elif current_value is None:
                 logging.error("SPI read failed")
                 
-            time.sleep(1)
+            time.sleep(2)
 
 def load_config(config):
     return MySerial(config)
