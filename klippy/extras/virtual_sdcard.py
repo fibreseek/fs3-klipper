@@ -18,6 +18,7 @@ DEFAULT_ERROR_GCODE = """
 
 class VirtualSD:
     def __init__(self, config):
+        self.config = config
         self.printer = config.get_printer()
         self.printer.register_event_handler("klippy:shutdown",
                                             self.handle_shutdown)
@@ -110,9 +111,9 @@ class VirtualSD:
                          self.file_position, repr(data[readcount:]))
     
     def get_zmove_value(self, z_move_val):
-        self.gcode.respond_raw("get z move value %.3f"%(z_move_val))
-        self.printed_pos_z = z_move_val
-        if self.work_timer is not None and self.current_file is not None:
+        if self.work_timer is not None and self.is_start_move:
+            # self.gcode.respond_raw("get z move value %.3f"%(z_move_val))
+            self.printed_pos_z = z_move_val
             self.powerloss_progress.record(self.file_position, "", self.printed_pos_z)
     def stats(self, eventtime):
         if self.work_timer is None:
@@ -184,6 +185,8 @@ class VirtualSD:
             self.print_stats.note_cancel()
         self.file_position = self.file_size = 0
         self.powerloss_record_time = self.reactor.monotonic()
+        self.powerloss_file_exist = False
+        self.powerloss_progress.clear_record()
     # G-Code commands
     def cmd_error(self, gcmd):
         raise gcmd.error("SD write not supported")
@@ -194,6 +197,8 @@ class VirtualSD:
             self.current_file = None
         self.file_position = self.file_size = 0
         self.extruder_switch_detected = False
+        self.powerloss_file_exist = False
+        self.powerloss_progress.clear_record()
         self.print_stats.reset()
         self.printer.send_event("virtual_sdcard:reset_file")
     cmd_SDCARD_RESET_FILE_help = "Clears a loaded SD File. Stops the print "\
@@ -215,6 +220,7 @@ class VirtualSD:
         self.print_progress = 0
         self._load_file(gcmd, filename, check_subdirs=True)
         file_path = self.current_file.name if self.current_file else None
+        self.powerloss_file_exist = False
         self.powerloss_progress.clear_record()
         self.powerloss_progress.start_record(file_path)
         self.do_resume()
@@ -531,7 +537,16 @@ class VirtualSD:
 
         # 等待喷嘴加热到位
         gcode_script.append("M109 S%.1f T%d" % (pre_nozzle_temp, current_tool))
+
+        # 加载调平数据
+        if self.config.has_section('bed_mesh model_leveling'):
+            gcode_script.append("BED_MESH_PROFILE LOAD=model_leveling")
+            gcmd.respond_raw("Loading bed mesh profile: model_leveling")
+        elif self.config.has_section('bed_mesh default'):
+            gcode_script.append("BED_MESH_PROFILE LOAD=default")
+            gcmd.respond_raw("Loading bed mesh profile: default")
         
+        # 获取z offset值
         cfg_path = os.path.expanduser(self.variables.get('filename'))
         config = configparser.ConfigParser()
         config.read(cfg_path)
@@ -794,6 +809,7 @@ class VirtualSD:
                     # End of file
                     self.current_file.close()
                     self.current_file = None
+                    self.powerloss_file_exist = False
                     self.powerloss_progress.clear_record()
                     logging.info("Finished SD card print")
                     self.gcode.run_script("PRINT_COMPLETED")

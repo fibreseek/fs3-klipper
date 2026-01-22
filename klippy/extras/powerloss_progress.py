@@ -26,7 +26,6 @@ class PowerlossProgress():
         self.scan_callbacks = {}
         self.scan_counter = 0
         self.scan_lock = threading.Lock()
-        self.current_z = 0.0
 
     def exit(self):
         self.bg_queue.put_nowait(None)
@@ -155,6 +154,7 @@ class PowerlossProgress():
             logging.exception("record progress put queue fail.")
 
     def check_powerloss_file(self):
+        init_file_found, powerloss_file_found = False, False
         if os.path.exists(self.powerloss_init_file):
             try:
                 with open(self.powerloss_init_file, "r") as f:
@@ -162,10 +162,18 @@ class PowerlossProgress():
                     file_path = data.get('FILE_PATH')
                     if file_path and os.path.exists(file_path):
                         self.current_print_file = file_path
-                        return True
+                        init_file_found = True
             except Exception:
                 logging.exception("Failed to read powerloss init file.")
-        return False
+            
+            try:
+                for i in range(self.max_file_num):
+                    file_path = self.prefix + ".%d" % i
+                    if os.path.exists(file_path):
+                        powerloss_file_found = True   
+            except Exception:
+                logging.exception("Failed to read powerloss files.")
+        return init_file_found and powerloss_file_found
     
     def scan_print_file_info(self, stop_byte=None):
         """Scan the current print file and extract gcode information.
@@ -524,6 +532,7 @@ class PowerlossProgress():
                 os.remove(self.powerloss_init_file)
         except Exception:
             logging.exception("Failed to remove powerloss init file: %s" % self.powerloss_init_file)
+        self.current_print_file = None
 
 MainPowerlossProgress = None
 
