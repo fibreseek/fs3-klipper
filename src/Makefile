@@ -24,9 +24,8 @@ src-$(CONFIG_WANT_MPU9250) += sensor_mpu9250.c
 src-$(CONFIG_WANT_ICM20948) += sensor_icm20948.c
 src-$(CONFIG_WANT_HX71X) += sensor_hx71x.c
 src-$(CONFIG_WANT_ADS1220) += sensor_ads1220.c
-src-$(CONFIG_WANT_ADS131M08) += sensor_ads131m08.c
 src-$(CONFIG_WANT_LDC1612) += sensor_ldc1612.c
 src-$(CONFIG_WANT_SENSOR_ANGLE) += sensor_angle.c
 src-$(CONFIG_NEED_SENSOR_BULK) += sensor_bulk.c
 
-src-y += aniso_ring_buffer.c aniso_filter.c aniso_bed_mesh.c aniso_zoffset_align.c
+src-y += aniso_ring_buffer.c aniso_filter.c aniso_bed_mesh.c

@@ -19,7 +19,7 @@ void aniso_ring_buffer_init(struct aniso_ring_buffer_t *rb, void *buffer, uint16
 void aniso_ring_buffer_push(struct aniso_ring_buffer_t *rb, const void *data);
 int8_t aniso_ring_buffer_pick(struct aniso_ring_buffer_t *rb, int16_t index, void *data);
 int8_t aniso_ring_buffer_update(struct aniso_ring_buffer_t *rb, int16_t index, const void *data);
-int16_t aniso_ring_buffer_size(const struct aniso_ring_buffer_t *rb);
+uint16_t aniso_ring_buffer_size(const struct aniso_ring_buffer_t *rb);
 uint16_t aniso_ring_buffer_capacity(const struct aniso_ring_buffer_t *rb);
 
 #endif // _ANISO_RING_BUFFER_H
