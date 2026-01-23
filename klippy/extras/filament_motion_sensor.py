@@ -66,37 +66,18 @@ class EncoderSensor:
 
     def _handle_move_extruder(self, move_extruder, move_pos, absolute_mode):
         if move_extruder == self.extruder_name:
-            self.extruder_pos += move_pos
-            if move_pos != 0:
-                self.last_move_dir = 1 if move_pos > 0 else -1
-                self.last_move_t = self.reactor.monotonic()
-                self.dir_expire = 1e9
-
-    def encoder_event(self, eventtime, state):
-        direction = self.last_move_dir if eventtime < self.dir_expire else 1
-        move_idle = eventtime - self.last_move_t
-        if move_idle > self.max_pulse_interval:
-            direction = 1
-            self.dir_expire = eventtime  # 立即失效
-
-        delta = direction / self.pulse_per_mm
-        self.encoder_pos += delta
-        self.last_pulse_t = eventtime
-        # 刷新阈值
-        self._update_filament_runout_pos(eventtime)
-        self.runout_helper.note_filament_present(eventtime, True)
-        logging.info("Encoder tick: dir=%+1d  enc_pos=%.3f  threshold=%.3f",
-                     direction, self.encoder_pos, self.filament_runout_pos)
-
-    def _timer_handler(self, eventtime):
-        # 纯 retract 静默期：方向为负且 1 s 内无脉冲 → 不报断料
-        pure_retract = (eventtime < self.dir_expire and self.last_move_dir < 0 and
-                        (eventtime - self.last_pulse_t) > 1.0)
-        if pure_retract:
-            self.runout_helper.note_filament_present(eventtime, True)
-            return eventtime + CHECK_RUNOUT_TIMEOUT
-
-        triggered = (self.encoder_pos > self.filament_runout_pos)
+            if move_pos > 0:
+                if absolute_mode:
+                    self.extruder_pos = move_pos
+                else:
+                    self.extruder_pos += move_pos
+            # logging.info("_handle_move_extruder: extruder_name=%s, extruder_pos=%.3f, "
+            #         "filament_runout_pos=%.3f, absolute_mode=%d", self.extruder_name,
+            #         self.extruder_pos, self.filament_runout_pos, absolute_mode)
+    def _extruder_pos_update_event(self, eventtime):
+        extruder_pos = self._get_extruder_pos(eventtime)
+        # Check for filament runout
+        triggered = (extruder_pos > self.filament_runout_pos)
         if triggered:
             self.trigger_count += 1
             logging.info("Runout detected: enc_pos=%.3f  threshold=%.3f  count=%d",
