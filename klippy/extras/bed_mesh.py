@@ -809,7 +809,7 @@ class BedMeshCalibrate:
             # TODO: pt未包含z坐标，有待观察是否存在z运动干涉
             toolhead.manual_move(pt, 25) # 移动到目标坐标
             toolhead.wait_moves() # 等待移动完成
-            trig_pt = probe.run_single_probe(pprobe, None) # 触发探针测量
+            trig_pt = probe.run_single_probe(pprobe, gcmd) # 触发探针测量
             trig_pts[i][1] = trig_pt[2] # 保存触发时刻的目标点z坐标
 
         # 5. 加载mesh（参考load_profile方法）
@@ -855,14 +855,10 @@ class BedMeshCalibrate:
         if Z_DELTA_THRESHOLD > z_delta_max: # 偏差不大，不必重新探点
         # if Z_DELTA_THRESHOLD > z_delta_range * 0.5: # 偏差不大，不必重新探点
             # z_offset = (z_delta_max + z_delta_min) * 0.5 # 临时更新z偏移
-            # self.bedmesh.set_mesh(z_mesh) # 使用已有的mesh
-            cmd = (
-                "G28.1 Z\n"
-                "BED_MESH_PROFILE LOAD=default\n"
-                # "MOVE_CLEAN_POSITION\n"
-                )
+            self.bedmesh.set_mesh(z_mesh) # 使用已有的mesh
+            logging.info("bed_fast: default")
         else: # 差值太大，重新探床 model_leveling
-            cmd = (
+            self.gcode.run_script_from_command(
                 "BED_MESH_CLEAR\n"
                 f"BED_MESH_CALIBRATE {gcmd.get_raw_command_parameters()}\n"
                 "BED_MESH_PROFILE SAVE=model_leveling\n"
@@ -870,7 +866,7 @@ class BedMeshCalibrate:
                 "G1 Z10 F600\n"# 下降Z轴到10mm, 移动到清洁位置
                 #MOVE_CLEAN_POSITION\n"
                 )
-        self.gcode.run_script_from_command(cmd)
+            logging.info("bed_fast: model_leveling")
 
     def cmd_BED_MESH_TEMP(self, gcmd):
         flag = gcmd.get_int('P', 0)
@@ -880,7 +876,8 @@ class BedMeshCalibrate:
             probed_matrix = z_mesh.get_probed_matrix()
             self.temp_cpst.receive(probed_matrix)
         elif flag == 2:
-            self.temp_cpst.fit()
+            reactor = self.printer.get_reactor()
+            self.temp_cpst.fit(reactor)
 
     def probe_finalize(self, offsets, positions):
         z_offset = offsets[2]
@@ -1998,24 +1995,27 @@ class ProfileManager:
                 "No profile named [%s] to remove" % (prof_name))
     cmd_BED_MESH_PROFILE_help = "Bed Mesh Persistent Storage management"
     def cmd_BED_MESH_PROFILE(self, gcmd):
-        options = collections.OrderedDict({
-            'LOAD': self.load_profile,
-            'SAVE': self.save_profile,
-            'REMOVE': self.remove_profile
-        })
-        for key in options:
+        options = (
+            ('LOAD', self.load_profile),
+            ('SAVE', self.save_profile),
+            ('REMOVE', self.remove_profile)
+            )
+
+        for key, func in options:
             name = gcmd.get(key, None)
             if name is not None:
-                if not name.strip():
+                name = name.strip()
+                if not name:
                     raise gcmd.error(
                         "Value for parameter '%s' must be specified" % (key)
                     )
+                
                 if name == "default" and key == 'SAVE':
                     gcmd.respond_info(
                         "Profile 'default' is reserved, please choose"
                         " another profile name.")
                 else:
-                    options[key](name)
+                    func(name)
                 return
         gcmd.respond_info("Invalid syntax '%s'" % (gcmd.get_commandline(),))
 
