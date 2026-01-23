@@ -3,7 +3,7 @@
 # Copyright (C) 2016-2024  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import sys, os, glob, re, time, logging, configparser, io
+import sys, os, glob, re, time, logging, configparser, io, threading
 
 error = configparser.Error
 
@@ -352,11 +352,6 @@ class ConfigAutoSave:
     def cmd_SAVE_CONFIG(self, gcmd):
         if not self.fileconfig.sections():
             return
-
-        #aniso add
-        restart_flag = gcmd.get_float('R', 1)
-        #aniso add
-
         # Create string containing autosave data
         cfgrdr = ConfigFileReader()
         autosave_data = cfgrdr.build_config_string(self.fileconfig)
@@ -398,22 +393,37 @@ class ConfigAutoSave:
             temp_name = cfgname[:-4] + "_autosave.cfg"
         # Create new config file with temporary name and swap with main config
         logging.info("SAVE_CONFIG to '%s' (backup in '%s')",
-                     cfgname, backup_name)
-        try:
-            f = open(temp_name, 'w')
-            f.write(data)
-            f.close()
-            os.rename(cfgname, backup_name)
-            os.rename(temp_name, cfgname)
-        except:
-            msg = "Unable to write config file during SAVE_CONFIG"
-            logging.exception(msg)
-            raise gcmd.error(msg)
-        # Request a restart
-        #aniso add
-        if restart_flag == 1:
-            gcode = self.printer.lookup_object('gcode')
-            gcode.request_restart('restart')
+                    cfgname, backup_name)
+
+        def save_config_finish(eventtime, msg=None):
+            if msg is not None:
+                logging.exception(msg)
+                raise gcmd.error(msg)            
+            # Request a restart
+            restart_flag = gcmd.get_float('R', 1)
+            if restart_flag == 1: # aniso add
+                gcode = self.printer.lookup_object('gcode')
+                gcode.request_restart('restart')
+
+        def save_config_thread():
+            msg = None
+            try:
+                f = open(temp_name, 'w')
+                f.write(data)
+                f.close()
+                os.rename(cfgname, backup_name)
+                os.rename(temp_name, cfgname)
+            except:
+                msg = "Unable to write config file during SAVE_CONFIG"
+
+            # Use register_async_callback to return to main thread
+            reactor = self.printer.get_reactor()
+            reactor.register_async_callback(
+                lambda e: save_config_finish(e, msg))
+            
+        # Start background thread for file save operation
+        save_thread = threading.Thread(target=save_config_thread)
+        save_thread.start()
 
 
 ######################################################################
@@ -483,6 +493,8 @@ class PrinterConfig:
         return self.printer
     def read_config(self, filename):
         cfgrdr = ConfigFileReader()
+        filename = os.path.expanduser(filename) # 将 ~/ 映射为 /home/username/
+        filename = os.path.abspath(filename) # 将 相对路径 映射为 绝对路径
         data = cfgrdr.read_config_file(filename)
         fileconfig = cfgrdr.build_fileconfig(data, filename)
         return ConfigWrapper(self.printer, fileconfig, {}, 'printer')

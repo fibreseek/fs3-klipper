@@ -5,6 +5,8 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import os, sys, logging, io, re
 from . import powerloss_progress
+import threading
+import queue
 import configparser
 
 VALID_GCODE_EXTS = ['gcode', 'GCODE', 'g', 'gco']
@@ -86,6 +88,13 @@ class VirtualSD:
         self.powerloss_file_exist = self.powerloss_progress.check_powerloss_file()
         self.powerloss_info = None
         self.powerloss_position = None
+        
+        # Double buffer mechanism for prefetching
+        self.prefetch_queue = queue.Queue(maxsize=1)  # Queue for prefetched data
+        self.prefetch_thread = None
+        self.prefetch_stop_event = threading.Event()
+        self.prefetch_partial_input = ""  # Shared partial input between buffers
+        self.file_lock = threading.Lock()  # Lock for protecting file operations
 
     def cmd_WAITTING_PAUSE(self, gcmd):
         F = gcmd.get_int('F', 0)
@@ -172,7 +181,7 @@ class VirtualSD:
                 self.powerloss_record_time = self.reactor.monotonic()
     def do_resume(self):
         if self.work_timer is not None:
-            raise self.gcode.error("SD busy")
+            raise self.gcode.error("RESUME called when already printing")
         self.must_pause_work = False
         self.work_timer = self.reactor.register_timer(
             self.work_handler, self.reactor.NOW)
@@ -212,7 +221,7 @@ class VirtualSD:
         "include files in subdirectories."
     def cmd_SDCARD_PRINT_FILE(self, gcmd):
         if self.work_timer is not None:
-            raise gcmd.error("SD busy")
+            raise gcmd.error("Printer is already printing")
         self._reset_file()
         filename = gcmd.get("FILENAME")
         if filename[0] == '/':
@@ -238,7 +247,7 @@ class VirtualSD:
     def cmd_M23(self, gcmd):
         # Select SD file
         if self.work_timer is not None:
-            raise gcmd.error("SD busy")
+            raise gcmd.error("Printer is currently printing")
         self._reset_file()
         filename = gcmd.get_raw_command_parameters().strip()
         if filename.startswith('/'):
@@ -314,7 +323,7 @@ class VirtualSD:
     def cmd_M26(self, gcmd):
         # Set SD position
         if self.work_timer is not None:
-            raise gcmd.error("SD busy")
+            raise gcmd.error("Printer is currently printing")
         pos = gcmd.get_int('S', minval=0)
         self.file_position = pos
     def cmd_M27(self, gcmd):
@@ -343,7 +352,7 @@ class VirtualSD:
     """
     def cmd_M39(self, gcmd):
         if self.work_timer is not None:
-            raise gcmd.error("SD busy")
+            raise gcmd.error("Printer is currently printing")
         try:
             orig = gcmd.get_commandline()
             command_line = orig[orig.find("M39") + 4:].strip()
@@ -393,7 +402,7 @@ class VirtualSD:
     
     def cmd_PREPARE_RECOVER_PRINT_FILE(self, gcmd):
         if self.work_timer is not None:
-            raise gcmd.error("SD busy")
+            raise gcmd.error("PREPARE RECOVER PRINT Error: Printer is currently printing.")
         
         # Check if powerloss file exists
         if not self.powerloss_file_exist:
@@ -486,9 +495,9 @@ class VirtualSD:
         right_nozzle_temp = file_info.get('right_nozzle_temp')
 
         if current_tool == 0 and left_nozzle_temp is not None:
-            pre_nozzle_temp = left_nozzle_temp
+            pre_nozzle_temp = left_nozzle_temp - 50
         elif current_tool == 1 and right_nozzle_temp is not None:
-            pre_nozzle_temp = right_nozzle_temp
+            pre_nozzle_temp = right_nozzle_temp - 50
         
         if pre_nozzle_temp < 180: pre_nozzle_temp = 180
         gcode_script.append("M104 S%.1f T%d" % (pre_nozzle_temp, current_tool))
@@ -536,7 +545,12 @@ class VirtualSD:
             gcode_script.append(vl_cmd)
 
         # 等待喷嘴加热到位
+        gcode_script.append("M118 [POWERLOSS] Preparing to heat nozzle T%d to %.1f°C" % (current_tool, pre_nozzle_temp))
         gcode_script.append("M109 S%.1f T%d" % (pre_nozzle_temp, current_tool))
+
+        # 如果是左喷嘴，切换纤维
+        if current_tool == 0:
+            gcode_script.append("M2800")
 
         # 加载调平数据
         if self.config.has_section('bed_mesh model_leveling'):
@@ -562,6 +576,7 @@ class VirtualSD:
         gcode_script.append("G1 Z%.3f F300" % (new_powerloss_z + 4.0))
 
         # xy归零
+        gcode_script.append("M118 [POWERLOSS] Prepare to home X and Y axes")
         gcode_script.append("G28 X Y")
 
         # 移动到擦料站位置,结束
@@ -576,7 +591,6 @@ class VirtualSD:
                 try:
                     cmd = cmd + '\n'
                     self.gcode.run_script_from_command(cmd)
-                    gcmd.respond_raw("  %s" % cmd)
                 except Exception as e:
                     logging.warning("Failed to execute recovery command %s: %s" % (cmd, str(e)))
                     gcmd.respond_raw("Warning: Failed to execute %s" % cmd)
@@ -591,7 +605,7 @@ class VirtualSD:
     
     def cmd_RECOVER_PRINT_FILE(self, gcmd):
         if self.work_timer is not None:
-            raise gcmd.error("SD busy")
+            raise gcmd.error("RECOVER PRINT Error: Printer is currently printing.")
         
         if self.powerloss_info is None:
             gcmd.respond_raw("Error: No prepared powerloss info found. Please run PREPARE_RECOVER_PRINT_FILE first.")
@@ -674,6 +688,7 @@ class VirtualSD:
             gcode_script.append("M104 S%.1f T1" % (right_nozzle_temp))
             
         # Wait for temperatures
+        gcode_script.append("M118 [POWERLOSS] Heating nozzles to target temperatures.")
         if left_nozzle_temp is not None:
             gcode_script.append("M109 S%.1f T0" % (left_nozzle_temp))
         if right_nozzle_temp is not None:
@@ -687,6 +702,7 @@ class VirtualSD:
             gcode_script.append("M141 S%.1f" % chamber_temp)
         
         # Tool-specific cleaning procedures
+        gcode_script.append("M118 [POWERLOSS] Cleaning nozzle T%d before resuming print." % current_tool)
         if current_tool == 0:
             gcode_script.append("CLEAN_LEFT_NOZZLE")
         elif current_tool == 1:
@@ -697,7 +713,8 @@ class VirtualSD:
             gcode_script.append("MOVE_RIGHT_BRUSH_POSITION")
             gcode_script.append("BRUSH_NOZZLE2")
             gcode_script.append("MOVE_OUT_WASTE_STATION")
-            
+        
+        gcode_script.append("M118 [POWERLOSS] Recovering print with nozzle T%d" % current_tool)
         gcode_script.append("T%d" % current_tool)
         
         # Apply position (X, Y, Z, E) if available
@@ -737,15 +754,113 @@ class VirtualSD:
                 try:
                     cmd = cmd + '\n'
                     self.gcode.run_script_from_command(cmd)
-                    gcmd.respond_raw("  %s" % cmd)
                 except Exception as e:
                     logging.warning("Failed to execute recovery command %s: %s" % (cmd, str(e)))
                     gcmd.respond_raw("Warning: Failed to execute %s" % cmd)
         else:
             gcmd.respond_raw("No recovery parameters to apply.")
     
+    def _prefetch_worker(self, initial_partial):
+        """
+        Background worker thread for prefetching and processing file data.
+        Uses shared self.current_file with lock protection.
+        Reads 8192 bytes, splits into lines, processes with handle_extruder_mode,
+        and puts the result into prefetch_queue for the main thread.
+        """
+        partial_input = initial_partial
+        pending_data = None  # Buffer to hold data if queue is full
+        
+        while not self.prefetch_stop_event.is_set():
+            try:
+                # If we have pending data from previous iteration, try to put it first
+                if pending_data is not None:
+                    try:
+                        self.prefetch_queue.put(pending_data, timeout=0.5)
+                        pending_data = None  # Successfully put, clear pending
+                    except queue.Full:
+                        if self.prefetch_stop_event.is_set():
+                            break
+                        continue  # Keep trying to put pending data
+                
+                # Read next chunk with lock protection
+                with self.file_lock:
+                    if self.current_file is None:
+                        self.prefetch_queue.put((None, partial_input, True))
+                        break
+                    try:
+                        data = self.current_file.read(8192)
+                    except Exception as e:
+                        logging.exception("virtual_sdcard prefetch worker read error")
+                        self.prefetch_queue.put((None, partial_input, True))
+                        break
+                
+                if not data:
+                    # End of file - signal with None
+                    self.prefetch_queue.put((None, partial_input, True))
+                    break
+                
+                # Process the data (outside lock - CPU work)
+                lines = data.split('\n')
+                lines[0] = partial_input + lines[0]
+                partial_input = lines.pop()  # Save incomplete line for next iteration
+                
+                # Process lines with handle_extruder_mode
+                processed_lines = self.handle_extruder_mode(lines)
+                processed_lines.reverse()  # Reverse for pop() usage
+                
+                # Put processed data into queue (blocks if queue is full)
+                try:
+                    self.prefetch_queue.put(
+                        (processed_lines, partial_input, False), 
+                        timeout=0.5
+                    )
+                except queue.Full:
+                    # Save data for next iteration, don't discard!
+                    pending_data = (processed_lines, partial_input, False)
+                    if self.prefetch_stop_event.is_set():
+                        break
+                    continue
+                    
+            except Exception as e:
+                logging.exception("virtual_sdcard prefetch worker error")
+                self.prefetch_queue.put((None, partial_input, True))
+                break
+    
+    def _start_prefetch_thread(self, initial_partial):
+        """Start the prefetch worker thread using shared file handle with lock."""
+        self.prefetch_stop_event.clear()
+        # Clear any old data in queue
+        while not self.prefetch_queue.empty():
+            try:
+                self.prefetch_queue.get_nowait()
+            except queue.Empty:
+                break
+        
+        self.prefetch_thread = threading.Thread(
+            target=self._prefetch_worker,
+            args=(initial_partial,),
+            daemon=True
+        )
+        self.prefetch_thread.start()
+    
+    def _stop_prefetch_thread(self):
+        """Stop the prefetch worker thread."""
+        self.prefetch_stop_event.set()
+        if self.prefetch_thread is not None:
+            self.prefetch_thread.join(timeout=2.0)
+            self.prefetch_thread = None
+        # Clear queue
+        while not self.prefetch_queue.empty():
+            try:
+                self.prefetch_queue.get_nowait()
+            except queue.Empty:
+                break
+
     def handle_extruder_mode(self, lines):
-        """Process lines and insert extruder mode commands"""
+        """Process lines and insert extruder mode commands.
+        Inserted commands are tuples (line, is_injected) where is_injected=True
+        means the line should not count towards file_position.
+        """
         processed_lines = []
         gcode_pattern = self.gcode_pattern
         u_pattern = self.u_pattern
@@ -756,7 +871,7 @@ class VirtualSD:
             # Skip comments early
             stripped = line.strip()
             if stripped.startswith(';'):
-                processed_lines.append(line)
+                processed_lines.append((line, False))  # Original line
                 continue
             
             # Only process G0/G1 commands with U/V parameters
@@ -769,66 +884,117 @@ class VirtualSD:
                     # Both U and V present
                     p_match = p_pattern.search(line)
                     p_value = float(p_match.group(1)) if p_match else 0
-                    processed_lines.append(f"SET_EXTRUDER_MODE S=1 P={p_value}\n")
+                    processed_lines.append((f"SET_EXTRUDER_MODE S=1 P={p_value}", True))  # Injected
                 elif has_u:
                     # Only U present
-                    processed_lines.append("SET_EXTRUDER_MODE S=0\n")
+                    processed_lines.append(("SET_EXTRUDER_MODE S=0", True))  # Injected
                 elif has_v:
                     # Only V present
-                    processed_lines.append("SET_EXTRUDER_MODE S=2\n")
+                    processed_lines.append(("SET_EXTRUDER_MODE S=2", True))  # Injected
             
-            processed_lines.append(line)
+            processed_lines.append((line, False))  # Original line
         
         return processed_lines
 
-    # Background work timer
+    # Background work timer with double-buffer prefetching
     def work_handler(self, eventtime):
         logging.info("Starting SD card print (position %d)", self.file_position)
         self.reactor.unregister_timer(self.work_timer)
         try:
-            self.current_file.seek(self.file_position)
+            with self.file_lock:
+                self.current_file.seek(self.file_position)
         except:
             logging.exception("virtual_sdcard seek")
             self.work_timer = None
             return self.reactor.NEVER
         self.print_stats.note_start()
         gcode_mutex = self.gcode.get_mutex()
-        partial_input = ""
-        lines = []
+        
+        # Double buffer mechanism:
+        # - current_buffer: lines being processed by main thread
+        # - prefetch_queue: next buffer being prepared by worker thread (with lock protection)
+        current_buffer = []  # Current lines being processed
+        partial_input = ""   # Partial line from previous read
+        prefetch_started = False
+        end_of_file = False
         error_message = None
         data_flag = False
+        
         while not self.must_pause_work:
-            if not lines:
-                # Read more data
-                try:
-                    data = self.current_file.read(8192)
-                except:
-                    logging.exception("virtual_sdcard read")
-                    break
-                if not data:
-                    # End of file
-                    self.current_file.close()
-                    self.current_file = None
+            if not current_buffer:
+                if end_of_file:
+                    # Already processed all data, exit
+                    with self.file_lock:
+                        if self.current_file is not None:
+                            self.current_file.close()
+                            self.current_file = None
                     self.powerloss_file_exist = False
                     self.powerloss_progress.clear_record()
                     logging.info("Finished SD card print")
                     self.gcode.run_script("PRINT_COMPLETED")
                     self.gcode.respond_raw("Done printing file")
                     break
-                lines = data.split('\n')
-                lines[0] = partial_input + lines[0]
-                partial_input = lines.pop()
-                lines = self.handle_extruder_mode(lines)
-                lines.reverse()
-                self.reactor.pause(self.reactor.NOW)
-                continue
+                
+                if not prefetch_started:
+                    # First read - do synchronously by main thread to fill first buffer
+                    try:
+                        with self.file_lock:
+                            data = self.current_file.read(8192)
+                    except:
+                        logging.exception("virtual_sdcard read")
+                        break
+                    if not data:
+                        # Empty file
+                        end_of_file = True
+                        continue
+                    
+                    lines = data.split('\n')
+                    lines[0] = partial_input + lines[0]
+                    partial_input = lines.pop()
+                    current_buffer = self.handle_extruder_mode(lines)
+                    current_buffer.reverse()
+                    
+                    # Start prefetch thread for next buffer (uses shared file handle with lock)
+                    self._start_prefetch_thread(partial_input)
+                    prefetch_started = True
+                    self.reactor.pause(self.reactor.NOW)
+                    continue
+                else:
+                    # Get next buffer from prefetch queue
+                    try:
+                        prefetch_data = self.prefetch_queue.get(timeout=0.1)
+                        prefetched_lines, new_partial, is_eof = prefetch_data
+                        
+                        if is_eof or prefetched_lines is None:
+                            end_of_file = True
+                            partial_input = new_partial
+                            self._stop_prefetch_thread()
+                            continue
+                        
+                        current_buffer = prefetched_lines
+                        partial_input = new_partial
+                        self.reactor.pause(self.reactor.NOW)
+                        continue
+                        
+                    except queue.Empty:
+                        # Prefetch not ready yet, wait a bit
+                        self.reactor.pause(self.reactor.monotonic() + 0.001)
+                        continue
+            
             # Pause if any other request is pending in the gcode class
             if gcode_mutex.test():
                 self.reactor.pause(self.reactor.monotonic() + 0.100)
                 continue
+            
             # Dispatch command
             self.cmd_from_sd = True
-            line = lines.pop()
+            item = current_buffer.pop()
+            
+            # Handle both tuple (line, is_injected) and plain string formats
+            if isinstance(item, tuple):
+                line, is_injected = item
+            else:
+                line, is_injected = item, False
 
             if not self.extruder_switch_detected and ("switch extruder type to" in line or "; switch extruder type to:" in line):
                 self.extruder_switch_detected = True
@@ -841,11 +1007,14 @@ class VirtualSD:
                     self.gcode.run_script("WAITTING_PAUSE F=0")
                     self.gcode.run_script("M118 [PAUSE] Delay pause completed!")
 
-            if sys.version_info.major >= 3:
-                next_file_position = self.file_position + len(line.encode()) + 1
-            else:
-                next_file_position = self.file_position + len(line) + 1
-            self.next_file_position = next_file_position
+            # Only update file_position for original lines, not injected commands
+            if not is_injected:
+                if sys.version_info.major >= 3:
+                    next_file_position = self.file_position + len(line.encode()) + 1
+                else:
+                    next_file_position = self.file_position + len(line) + 1
+                self.next_file_position = next_file_position
+            
             try:
                 # logging.info("SD card line (%d): %s", self.file_position, repr(line))
                 if not line.startswith(';') and line.strip() != '':
@@ -864,7 +1033,10 @@ class VirtualSD:
                 logging.exception("virtual_sdcard dispatch")
                 break
             self.cmd_from_sd = False
-            self.file_position = self.next_file_position
+            
+            # Only update file_position for original lines
+            if not is_injected:
+                self.file_position = self.next_file_position
 
             # 500ms record powerloss file
             now = self.reactor.monotonic()
@@ -874,16 +1046,25 @@ class VirtualSD:
                 self.powerloss_progress.record(self.file_position, line, self.printed_pos_z)
                 self.powerloss_record_time = now
 
-            # Do we need to skip around?
-            if self.next_file_position != next_file_position:
+            # Do we need to skip around? (only check for non-injected lines)
+            if not is_injected and self.next_file_position != next_file_position:
+                # Position changed externally, need to restart prefetch
+                self._stop_prefetch_thread()
                 try:
-                    self.current_file.seek(self.file_position)
+                    with self.file_lock:
+                        self.current_file.seek(self.file_position)
                 except:
                     logging.exception("virtual_sdcard seek")
                     self.work_timer = None
                     return self.reactor.NEVER
-                lines = []
+                current_buffer = []
                 partial_input = ""
+                prefetch_started = False
+                end_of_file = False
+        
+        # Cleanup prefetch thread on exit
+        self._stop_prefetch_thread()
+        
         logging.info("Exiting SD card print (position %d)", self.file_position)
         self.work_timer = None
         self.cmd_from_sd = False
