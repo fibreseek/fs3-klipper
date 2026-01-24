@@ -787,7 +787,8 @@ class BedMeshCalibrate:
                [pt_max[0], pt_min[1]], # xmax, ymin
                [pt_max[0], pt_max[1]], # xmax, ymax
                [0.5*(pt_min[0]+pt_max[0]), 0.5*(pt_min[1]+pt_max[1])]]
-        pts = calc_open_tsp(pts) # 旅行商路线规划
+        # pts = calc_open_tsp(pts) # 旅行商路线规划
+        pts = pts[1:]
 
         # 3. 获取偏移（参考_move_next方法）
         pprobe = self.printer.lookup_object('probe', None) # 获取探针对象
@@ -803,7 +804,7 @@ class BedMeshCalibrate:
             pt[0] -= poffset[0] # 消除x轴探针偏移
             pt[1] -= poffset[1] # 消除y轴探针偏移
             # TODO: pt未包含z坐标，有待观察是否存在z运动干涉
-            toolhead.manual_move(pt, 30) # 移动到目标坐标
+            toolhead.manual_move(pt, 100) # 移动到目标坐标
             toolhead.wait_moves() # 等待移动完成
             trig_pt = probe.run_single_probe(pprobe, gcmd) # 触发探针测量
             trig_pts[i][1] = trig_pt[2] # 保存触发时刻的目标点z坐标
