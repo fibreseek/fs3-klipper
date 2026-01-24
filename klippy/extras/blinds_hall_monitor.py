@@ -321,7 +321,7 @@ class BlindsHallMonitor:
     def _wait_for_temperature(self, target_temp, timeout=300):
         try:
             # 获取加热器对象
-            heater_name = "inside_temperature"
+            heater_name = "chamber"
             heater = self.printer.lookup_object('heater').heaters.get(heater_name)
             if not heater:
                 try:
