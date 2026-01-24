@@ -14,6 +14,7 @@ class BlindsHallMonitor:
         self.state_change_timeout = config.getfloat('state_change_timeout', 60.0, above=0.0)
         self.recovery_timeout = config.getfloat('recovery_timeout', 60.0, above=0.0)
         self.check_interval = config.getfloat('check_interval', 0.5, above=0.0)
+        self.cooling_fan_delay = config.getfloat('cooling_fan_delay', 60.0, above=0.0)  # 风扇延迟关闭时间
         
         # 状态管理
         self.monitoring_active = False
@@ -26,6 +27,10 @@ class BlindsHallMonitor:
         # 当前状态缓存
         self.last_sensor1_state = None
         self.last_sensor2_state = None
+        
+        # 冷却风扇定时器
+        self.cooling_fan_timer = None
+        self.cooling_fan_start_time = None
         
         # 注册G代码命令
         self.gcode.register_command(
@@ -316,7 +321,7 @@ class BlindsHallMonitor:
     def _wait_for_temperature(self, target_temp, timeout=300):
         try:
             # 获取加热器对象
-            heater_name = "inside_temperature"
+            heater_name = "chamber"
             heater = self.printer.lookup_object('heater').heaters.get(heater_name)
             if not heater:
                 try:
@@ -351,6 +356,63 @@ class BlindsHallMonitor:
             logging.error("Temperature wait error: %s" % str(e))
             raise
     
+    def _start_cooling_fan_delay(self, gcmd):
+        """启动风扇延迟关闭定时器"""
+        # 停止现有的冷却定时器
+        if self.cooling_fan_timer is not None:
+            self.reactor.unregister_timer(self.cooling_fan_timer)
+            self.cooling_fan_timer = None
+        
+        # 设置风扇全速运行
+        fan_command = "SET_FAN_SPEED FAN=fan6 SPEED=1.0"
+        self.gcode.run_script_from_command(fan_command)
+        
+        gcmd.respond_info(f"M141/M191 S0: Fan will run for {self.cooling_fan_delay} seconds before stopping")
+        
+        # 记录开始时间
+        self.cooling_fan_start_time = self.reactor.monotonic()
+        
+        # 创建定时器回调函数
+        def cooling_fan_timer_callback(eventtime):
+            current_time = self.reactor.monotonic()
+            elapsed_time = current_time - self.cooling_fan_start_time
+            
+            if elapsed_time >= self.cooling_fan_delay:
+                # 时间到，关闭风扇
+                try:
+                    fan_stop_command = "SET_FAN_SPEED FAN=fan6 SPEED=0"
+                    self.gcode.run_script_from_command(fan_stop_command)
+                    gcmd.respond_info(f"M141/M191 S0: Fan stopped after {self.cooling_fan_delay} seconds")
+                    logging.info(f"Cooling fan stopped after {self.cooling_fan_delay} seconds delay")
+                except Exception as e:
+                    logging.error(f"Error turning off cooling fan: {str(e)}")
+                
+                # 清除定时器
+                self.cooling_fan_timer = None
+                self.cooling_fan_start_time = None
+                return self.reactor.NEVER
+            
+            # 计算剩余时间并更新响应
+            remaining_time = max(0, self.cooling_fan_delay - elapsed_time)
+            if remaining_time <= 10 and int(remaining_time) % 5 == 0:
+                gcmd.respond_info(f"M141/M191 S0: Fan stopping in {int(remaining_time)} seconds")
+            
+            return eventtime + 1.0  # 每秒检查一次
+        
+        # 启动定时器
+        self.cooling_fan_timer = self.reactor.register_timer(
+            cooling_fan_timer_callback, self.reactor.NOW)
+        
+        logging.info(f"Cooling fan timer started, will run for {self.cooling_fan_delay} seconds")
+    
+    def _stop_cooling_fan_delay(self):
+        """停止风扇延迟关闭定时器"""
+        if self.cooling_fan_timer is not None:
+            self.reactor.unregister_timer(self.cooling_fan_timer)
+            self.cooling_fan_timer = None
+            self.cooling_fan_start_time = None
+            logging.info("Cooling fan timer stopped")
+    
     cmd_M141_help = "Close blinds, fan full speed, set chamber temperature (no wait) or S0 to open blinds and cool down"
     def cmd_M141(self, gcmd):
         try:
@@ -370,8 +432,9 @@ class BlindsHallMonitor:
                 gcmd.respond_info("ERROR: Temperature out of range (0-300)")
                 return
             
-            # 停止现有监控
+            # 停止现有监控和冷却定时器
             self._stop_monitoring()
+            self._stop_cooling_fan_delay()
             
             # 第一步：关闭百叶窗和风扇全速,过滤风扇关闭
             # 1. 风扇全速
@@ -418,8 +481,9 @@ class BlindsHallMonitor:
                 gcmd.respond_info("ERROR: Temperature out of range (0-300)")
                 return
             
-            # 停止现有监控
+            # 停止现有监控和冷却定时器
             self._stop_monitoring()
+            self._stop_cooling_fan_delay()
             
             # 第一步：关闭百叶窗和风扇全速，过滤风扇关闭
             # 1. 风扇全速
@@ -457,10 +521,10 @@ class BlindsHallMonitor:
             # 停止现有监控
             self._stop_monitoring()
             
-            # 第一步：关闭风扇
-            fan_command = "SET_FAN_SPEED FAN=fan6 SPEED=0.0"
+            fan_command = "SET_FAN_SPEED FAN=fan6 SPEED=1.0"
             self.gcode.run_script_from_command(fan_command)
-
+            
+            # 第一步：立即关闭过滤风扇
             filtered_fan_command = "SET_FAN_SPEED FAN=fan5 SPEED=0"
             self.gcode.run_script_from_command(filtered_fan_command)
             
@@ -476,13 +540,19 @@ class BlindsHallMonitor:
             self.gcode.run_script_from_command(heater_command)
             
             if wait_for_temp:
-                # 等待温度降到安全温度
+                # M191 S0: 等待温度冷却，然后启动风扇延迟
                 gcmd.respond_info("M191 S0: Waiting for temperature to cool down to 30°C...")
                 self._wait_for_temperature(30.0, timeout=600)
                 gcmd.respond_info("M191 S0: Temperature cooled down to 30°C")
-                gcmd.respond_info("M191 S0 executed: Blinds opened, Fan off, Temperature cooled down")
+                
+                # 启动风扇延迟关闭
+                self._start_cooling_fan_delay(gcmd)
+                
+                gcmd.respond_info("M191 S0 executed: Blinds opened, Fan running for cooling")
             else:
-                gcmd.respond_info("M141 S0 executed: Blinds opened, Fan off, Temperature set to 0°C (no wait)")
+                # M141 S0: 直接启动风扇延迟关闭
+                self._start_cooling_fan_delay(gcmd)
+                gcmd.respond_info("M141 S0 executed: Blinds opened, Fan running for cooling")
                 
         except Exception as e:
             logging.error("Cooling procedure error: %s" % str(e))
@@ -526,7 +596,8 @@ class BlindsHallMonitor:
             'recovery_mode_active': self.recovery_mode_active,
             'current_state': current_state,
             'sensor1_state': sensor1_state,
-            'sensor2_state': sensor2_state
+            'sensor2_state': sensor2_state,
+            'cooling_fan_delay': self.cooling_fan_delay
         }
         
         if self.monitoring_active or self.recovery_mode_active:
@@ -534,6 +605,21 @@ class BlindsHallMonitor:
                 'initial_state': self.initial_state,
                 'expected_final_state': self.expected_final_state,
                 'time_remaining': max(0, self.expected_state_change_time - eventtime) if self.expected_state_change_time else 0
+            })
+        
+        if self.cooling_fan_timer is not None and self.cooling_fan_start_time is not None:
+            elapsed_time = eventtime - self.cooling_fan_start_time
+            remaining_time = max(0, self.cooling_fan_delay - elapsed_time)
+            status.update({
+                'cooling_fan_active': True,
+                'cooling_fan_remaining': remaining_time,
+                'cooling_fan_elapsed': elapsed_time
+            })
+        else:
+            status.update({
+                'cooling_fan_active': False,
+                'cooling_fan_remaining': 0,
+                'cooling_fan_elapsed': 0
             })
         
         return status
