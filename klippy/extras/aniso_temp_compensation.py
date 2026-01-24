@@ -46,6 +46,7 @@ class AnisoTempCompensation:
 
         self.built = False # 网格构建完成标志位
         self.fname = "~/printer_data/config/temp_comp.npz"
+        self.clean_callback = None
 
     def setup(self, val_t=None, limit_x=None, limit_y=None, limit_t=None):
         # TODO: 修改val_t和limit_t，可能存在干涉，需判断
@@ -65,10 +66,13 @@ class AnisoTempCompensation:
         self.built = False
         # logging.debug(f"cpst----\n{self.val_z}")
 
-    def fit(self, reactor):
+    def fit(self, reactor, callback=None):
         """
         拟合模型，基于预设的网格结构
         """
+        # 清理回调函数
+        self.clean_callback = callback
+
         # 评估XYT外推需求
         ext_head_x = self.limit_x[0] < self.val_x[0]
         ext_tail_x = self.limit_x[1] > self.val_x[-1]
@@ -226,6 +230,7 @@ class AnisoTempCompensation:
             return float(outputs[0])
         else:
             return outputs
+
     def save_model(self, filepath=None):
         """
         保存模型参数到npz文件
@@ -235,24 +240,28 @@ class AnisoTempCompensation:
         filepath = os.path.expanduser(filepath) # 将 ~ 映射为 /home/anisoprint/
 
         # 离线保存时，只保留6位小数
-        grid_x = np.round(self.grid_x, decimals=6)
-        grid_y = np.round(self.grid_y, decimals=6)
-        grid_t = np.round(self.grid_t, decimals=6)
-        grid_z = np.round(self.grid_z, decimals=6)
+        self.grid_x = np.round(self.grid_x, decimals=6)
+        self.grid_y = np.round(self.grid_y, decimals=6)
+        self.grid_t = np.round(self.grid_t, decimals=6)
+        self.grid_z = np.round(self.grid_z, decimals=6)
             
         try:
             # 只保存必需的网格数据
             np.savez_compressed(
                 filepath,
-                grid_x=grid_x,
-                grid_y=grid_y,
-                grid_t=grid_t,
-                grid_z=grid_z
+                grid_x=self.grid_x,
+                grid_y=self.grid_y,
+                grid_t=self.grid_t,
+                grid_z=self.grid_z
             )
             self.built = True
             logging.debug(f"[TempComp] model save success {filepath}")
         except Exception as e:
             logging.debug(f"[TempComp] model save fail {e}")
+
+        if self.clean_callback:
+            self.clean_callback()
+            self.clean_callback = None # 防止重复调用
 
     def load_model(self, filepath=None):
         """

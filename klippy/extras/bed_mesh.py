@@ -448,11 +448,7 @@ class BedMeshCalibrate:
             )
         except BedMeshError as e:
             raise config.error(str(e))
-        # 初始化热床的温度补偿器
-        self.temp_cpst = aniso_temp_compensation.AnisoTempCompensation(
-            self.mesh_min, self.mesh_max,
-            self.mesh_config['x_count'],
-            self.mesh_config['y_count'])
+        self.temp_cpst = None # 温度补偿器
         self._profile_name = "default"
         self.gcode = self.printer.lookup_object('gcode')
         self.gcode.register_command(
@@ -807,7 +803,7 @@ class BedMeshCalibrate:
             pt[0] -= poffset[0] # 消除x轴探针偏移
             pt[1] -= poffset[1] # 消除y轴探针偏移
             # TODO: pt未包含z坐标，有待观察是否存在z运动干涉
-            toolhead.manual_move(pt, 25) # 移动到目标坐标
+            toolhead.manual_move(pt, 30) # 移动到目标坐标
             toolhead.wait_moves() # 等待移动完成
             trig_pt = probe.run_single_probe(pprobe, gcmd) # 触发探针测量
             trig_pts[i][1] = trig_pt[2] # 保存触发时刻的目标点z坐标
@@ -824,21 +820,25 @@ class BedMeshCalibrate:
             raise gcmd.error(str(e))
 
         # 6. 计算偏差
-        # temp_default = profile['temperature'] # 探测default床网的热床温度
         temp_now = 70.0 # 当前热床温度（基准值为70℃）
         heater_bed = self.printer.lookup_object("heater_bed", None)
         if heater_bed is not None: # ["target"]期望温度, ["temperature"]实测温度
             temp_now = heater_bed.get_status(0)['temperature']
         
-        # cmd = "cpst----\n"
+        if self.temp_cpst is None: # 仅在有需要时再实例化
+            self.temp_cpst = aniso_temp_compensation.AnisoTempCompensation(
+                self.mesh_min, self.mesh_max,
+                self.mesh_config['x_count'],
+                self.mesh_config['y_count'])
+        
         z_delta_max, z_delta_min = float('-inf'), float('inf')
         for pt, z_trig in trig_pts:
+            x, y = float(pt[0]), float(pt[1])
             # 点xy在default温度的绝对z
-            z_default = z_mesh.calc_z(pt[0], pt[1])
+            z_default = z_mesh.calc_z(x, y)
             # 点xy从default温度到当前温度的相对补偿z
-            z_comp = self.temp_cpst.predict(pt[0], pt[1], temp_now)
+            z_comp = self.temp_cpst.predict(x, y, temp_now)
             # 点xy在当前温度的绝对z(预测估算的)
-            # cmd += f"[{pt[0]},{pt[1]}]:{z_default}, {z_comp}, {z_default+z_comp}, {z_trig}\n" 
             z_default += z_comp
             # 点xy的实测z值与预测z值的偏差
             z_delta = z_trig - z_default
@@ -847,16 +847,14 @@ class BedMeshCalibrate:
             if z_delta < z_delta_min:
                 z_delta_min = z_delta
         z_delta_range = z_delta_max - z_delta_min
-        # cmd += f"\n{z_delta_max}, {z_delta_min}, {z_delta_range}\n"
-        # logging.info(cmd)
+        self.temp_cspt = None # 使用完毕及时释放内存
 
         # 7. 分类处理
         Z_DELTA_THRESHOLD = 0.03 # 容许的z偏差阈值
         if Z_DELTA_THRESHOLD > z_delta_max: # 偏差不大，不必重新探点
         # if Z_DELTA_THRESHOLD > z_delta_range * 0.5: # 偏差不大，不必重新探点
             # z_offset = (z_delta_max + z_delta_min) * 0.5 # 临时更新z偏移
-            self.bedmesh.set_mesh(z_mesh) # 使用已有的mesh
-            logging.info("bed_fast: default")
+            self.bedmesh.set_mesh(z_mesh) # 使用default bed_mesh
         else: # 差值太大，重新探床 model_leveling
             self.gcode.run_script_from_command(
                 "BED_MESH_CLEAR\n"
@@ -866,18 +864,23 @@ class BedMeshCalibrate:
                 "G1 Z10 F600\n"# 下降Z轴到10mm, 移动到清洁位置
                 #MOVE_CLEAN_POSITION\n"
                 )
-            logging.info("bed_fast: model_leveling")
 
     def cmd_BED_MESH_TEMP(self, gcmd):
         flag = gcmd.get_int('P', 0)
-
         if flag == 1:
             z_mesh = self.bedmesh.get_mesh()
             probed_matrix = z_mesh.get_probed_matrix()
+            if self.temp_cpst is None: # 仅在有需要时再实例化
+                self.temp_cpst = aniso_temp_compensation.AnisoTempCompensation(
+                    self.mesh_min, self.mesh_max,
+                    self.mesh_config['x_count'],
+                    self.mesh_config['y_count'])
             self.temp_cpst.receive(probed_matrix)
         elif flag == 2:
+            def clean():
+                self.temp_cpst = None # 使用完毕，及时释放内存
             reactor = self.printer.get_reactor()
-            self.temp_cpst.fit(reactor)
+            self.temp_cpst.fit(reactor, clean)
 
     def probe_finalize(self, offsets, positions):
         z_offset = offsets[2]
