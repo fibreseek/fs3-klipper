@@ -29,7 +29,6 @@ struct aniso_adc_data_t
 extern int32_t get_step_count_z(void);
 
 // 函数声明
-void calc_sample_freq(uint32_t tick);
 void command_setup_aniso_bed_mesh(uint32_t *args);
 void command_config_aniso_bed_mesh(uint32_t *args);
 uint8_t aniso_adc_sample(enum aniso_state_machine_t smf);

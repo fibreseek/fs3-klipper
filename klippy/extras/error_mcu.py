@@ -5,12 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
 
-message_shutdown = """
-Once the underlying issue is corrected, use the
-"FIRMWARE_RESTART" command to reset the firmware, reload the
-config, and restart the host software.
-Printer is shutdown
-"""
+message_shutdown = ""
 
 message_protocol_error1 = """
 This is frequently caused by running an older version of the

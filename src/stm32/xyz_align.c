@@ -16,12 +16,14 @@
 #include "board/misc.h"
 #include "gpio.h"
 
+#define BUTTON_PIN_INDEX (10)  // PG10
+#define EXTICR_INDEX (2)   // EXTI11-15 对应 EXTICR[2]
 static int32_t offset_z[10] = {0};
 static int32_t offset_xy[10][5] = {0};
 static uint8_t offset_index = 0;
 extern int32_t get_step_count_x(void);
 extern int32_t get_step_count_z(void);
-#define PG10_VALUE (GPIOG->IDR & (1 << 10)) ? 1 : 0
+#define BUTTON_VALUE (GPIOG->IDR & (1 << BUTTON_PIN_INDEX)) ? 1 : 0
 #define ABS(x) ((x) < 0 ? -(x) : (x))
 volatile uint8_t debounce = 0; // Debounce counter for interrupt filtering
 #define DEBOUNCE_CYCLES 10  // Increase debounce time for better filtering
@@ -89,9 +91,9 @@ void command_align_start(uint32_t *args)
         break;
 
     case 2:
-        // printf_("trigger result value=%d x=%d y=%d z=%d\r\n", PG11_VALUE, step_x, step_y, step_z);
-        sendf("xyz_align_trigger oid=%c val=%c x0=%i y0=%i z0=%i", oid, PG10_VALUE, step_x, step_y, step_z);
-        // sendf("xyz_align_end oid=%c res=%c z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i", oid, 2, PG11_VALUE, step_z, step_x, step_y, 0, 0);
+        // printf_("trigger result value=%d x=%d y=%d z=%d\r\n", BUTTON_VALUE, step_x, step_y, step_z);
+        sendf("xyz_align_trigger oid=%c val=%c x0=%i y0=%i z0=%i", oid, BUTTON_VALUE, step_x, step_y, step_z);
+        // sendf("xyz_align_end oid=%c res=%c z0=%i z1=%i x0=%i y0=%i x1=%i y1=%i", oid, 2, BUTTON_VALUE, step_z, step_x, step_y, 0, 0);
     break;
 
     case 3:
@@ -118,9 +120,9 @@ void EXTI15_10_IRQHandler(void)
 {
     int32_t x,z;
     int32_t index;
-    if (EXTI->PR1 & (1UL << 10))  // 检查是否是 EXTI10 触发
+    if (EXTI->PR1 & (1UL << BUTTON_PIN_INDEX))  // 检查是否是 EXTI10 触发
     {
-        EXTI->PR1 = (1UL << 10);  // 清除挂起标志（写 1 清除）
+        EXTI->PR1 = (1UL << BUTTON_PIN_INDEX);  // 清除挂起标志（写 1 清除）
 
         if(debounce != 0)         // Check debounce counter
         {
@@ -134,52 +136,52 @@ void EXTI15_10_IRQHandler(void)
         step_y = x;
         step_z = z;
 
-        if(offset_index %5==0)
-        {
-            offset_z[offset_index/5] = z;
-        }
+        // if(offset_index %5==0)
+        // {
+        //     offset_z[offset_index/5] = z;
+        // }
         
-        if(offset_index < 25)
-        {
-            offset_xy[offset_index%5][offset_index/5] = x;
-        }
-        else if(offset_index < 50)
-        {
-            index = offset_index - 25;
-            offset_xy[(index%5) + 5][index/5] = x;
-        }
-        offset_index++;
+        // if(offset_index < 25)
+        // {
+        //     offset_xy[offset_index%5][offset_index/5] = x;
+        // }
+        // else if(offset_index < 50)
+        // {
+        //     index = offset_index - 25;
+        //     offset_xy[(index%5) + 5][index/5] = x;
+        // }
+        // offset_index++;
         // printf_("offset_index=%d\r\n", offset_index);
         // 处理逻辑
     }
 }
 
-void gpio_irq_init_pg10(void) // PG10
+void gpio_irq_init_button(void) 
 {
     // 1. 使能 GPIOG 时钟
     RCC->AHB4ENR |= RCC_AHB4ENR_GPIOGEN;
     
     // 2. 将 PG10 配置为输入模式 (修改 MODER10)
-    GPIOG->MODER &= ~(3UL << (10 * 2)); // 00: 输入模式
+    GPIOG->MODER &= ~(3UL << (BUTTON_PIN_INDEX * 2)); // 00: 输入模式
     
     // 3. 将 PG10 配置为上拉输入
-    GPIOG->PUPDR &= ~(3UL << (10 * 2)); // 清除 PUPDR10
-    GPIOG->PUPDR |= (1UL << (10 * 2));  // 01: 上拉模式
+    GPIOG->PUPDR &= ~(3UL << (BUTTON_PIN_INDEX * 2)); // 清除 PUPDR10
+    GPIOG->PUPDR |= (1UL << (BUTTON_PIN_INDEX * 2));  // 01: 上拉模式
     
     // 4. 使能 SYSCFG 时钟
     RCC->APB4ENR |= RCC_APB4ENR_SYSCFGEN;
     
     // 5. 选择 EXTI10 映射到 GPIOG
-    SYSCFG->EXTICR[2] &= ~(0xF << (2 * 4)); // 清除 EXTI10 选择
-    SYSCFG->EXTICR[2] |= (6 << (2 * 4));    // 选择 GPIOG (6: GPIOG)
+    SYSCFG->EXTICR[2] &= ~(0xF << (EXTICR_INDEX * 4)); // 清除 EXTI10 选择
+    SYSCFG->EXTICR[2] |= (6 << (EXTICR_INDEX * 4));    // 选择 GPIOG (6: GPIOG)
     
     // 6. 配置 EXTI10 中断触发条件为上升沿触发
-    EXTI->FTSR1 &= ~(1 << 10);  // 清除下降沿触发
-    EXTI->RTSR1 |= (1 << 10);   // 设置上升沿触发
+    EXTI->FTSR1 &= ~(1 << BUTTON_PIN_INDEX);  // 清除下降沿触发
+    EXTI->RTSR1 |= (1 << BUTTON_PIN_INDEX);   // 设置上升沿触发
     
     // 7. 使能 EXTI10 中断
-    EXTI->IMR1 |= (1 << 10);  // 使能中断
-    EXTI->EMR1 |= (1 << 10);  // 使能事件
+    EXTI->IMR1 |= (1 << BUTTON_PIN_INDEX);  // 使能中断
+    EXTI->EMR1 |= (1 << BUTTON_PIN_INDEX);  // 使能事件
     
     // 8. 配置 NVIC 中断优先级和使能中断
     uint32_t irq_number = 40; // EXTI15_10 对应 NVIC 中断号为 40
@@ -204,5 +206,5 @@ void xyz_task(void)
 DECL_COMMAND(command_align_start, "align_start oid=%c val=%c");
 //DECL_ARMCM_IRQ(EXTI0_IRQHandler, EXTI0_IRQn);
 DECL_ARMCM_IRQ(EXTI15_10_IRQHandler, EXTI15_10_IRQn);
-DECL_INIT(gpio_irq_init_pg10);
+DECL_INIT(gpio_irq_init_button);
 DECL_TASK(xyz_task);

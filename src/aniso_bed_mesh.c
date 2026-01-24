@@ -15,68 +15,43 @@
 // 2. 期望的预热阶段是刚好映射电机加速段
 //*************************************************************************
 
-#include <math.h>              // sqrtf
+#include <math.h>              // fmaxf fminf
 #include <string.h>            // memcpy memset
-#include "autoconf.h"          // CONFIG_CLOCK_FREQ
 #include "board/gpio.h"        // gpio_adc_read
 #include "board/misc.h"        // timer_read_time
 #include "command.h"           // DECL_CONSTANT_STR
 #include "aniso_ring_buffer.h" // aniso_ring_buffer_t
 #include "aniso_filter.h"      // aniso_kalman_filter_t
-#include "aniso_bed_mesh.h"
-#include "board/io.h"         // writel
-#include "board/usb_cdc.h"    // usb_notify_ep0
-#include "board/usb_cdc_ep.h" // USB_CDC_EP_BULK_IN
-#include "stm32/internal.h"   // GPIO
-#include "sched.h"            // DECL_INIT
-#include "stm32/gpio.h"
-#include "stm32/debug/debug.h"
-#include "stm32/debug/printf.h"
+#include "aniso_bed_mesh.h"    // aniso_adc_data_t
+#include "sched.h"             // DECL_INIT timer
+// #include "stm32/debug/debug.h" // printf_
 
 // 变量声明
-#define BUFFER_VALUE_CNT 120                          // 采样缓存的容量
-#define ALIGN_VALUE_CNT 60                            // 触发判断所需的最少缓存数量
-#define CRITICAL_VALUE_CNT 30                         // 回溯临界拐点的容量
-#define SAMPLE_INTERVAL_US 200                        // 采样间隔200微秒
-#define SAMPLE_FREQUENCY_HZ (1000000/SAMPLE_INTERVAL_US) // 采样频率5000Hz
-#define TRIGGER_COUNT_MAX 7                       // 触发计数最大值
+#define BUFFER_VALUE_CNT 120                               // 采样缓存的容量
+#define ALIGN_VALUE_CNT 60                                 // 触发判断所需的最少缓存数量
+#define CRITICAL_VALUE_CNT 30                              // 回溯临界拐点的容量
+#define SAMPLE_INTERVAL_US 200                             // 采样间隔200微秒
+#define SAMPLE_FREQUENCY_HZ (1000000 / SAMPLE_INTERVAL_US) // 采样频率5000Hz
+#define TRIGGER_COUNT_MAX 7                                // 触发计数最大值
 
-static uint8_t log_flag = 0;                              // 0 数据上报关闭；1 数据上报开启
-static int32_t sample_step_acc;                       // 加速段对应电机微步数
-static int32_t sample_step_start;                     // 起始电机微步数
-static uint32_t sample_cycle_now;                     // 当前采样周期次数
-static uint32_t critical_tick = 1;                    // 临界拐点的时间戳
-static enum aniso_state_machine_t state_machine_flag; // 状态机标志位
-static float sample_freq = 1.0f;                      // 采样频率
-static float sample_val_mean;                         // 采样均值
-static struct gpio_adc gPF;                           // adc引脚通道
-static struct gpio_out triggerPF;                     // 触发指示引脚
-static struct aniso_kalman_filter_t kmf;              // 卡尔曼滤波器
-static struct aniso_iir_filter_t bsf;                 // 陷波(带阻)滤波器
-// static struct aniso_iir_filter_t hpf;                             // 高通滤波器
-static struct aniso_iir_filter_t lpf;                 // 低通滤波器
+static uint32_t sample_step_acc;                                  // 加速段对应电机微步数
+static uint32_t sample_step_start;                                // 起始电机微步数
+static uint32_t critical_tick = 1;                                // 临界拐点的时间戳
+static enum aniso_state_machine_t state_machine_flag;             // 状态机标志位
+static float sample_freq = 1.0f;                                  // 采样频率
+static float sample_val_mean;                                     // 采样均值
+static struct gpio_adc gPF;                                       // adc引脚通道
+static struct gpio_out triggerPF;                                 // 触发指示引脚
+static struct aniso_kalman_filter_t kmf;                          // 卡尔曼滤波器
+static struct aniso_iir_filter_t bsf;                             // 陷波(带阻)滤波器
+static struct aniso_iir_filter_t lpf;                             // 低通滤波器
 static struct aniso_adc_data_t sample_datas_ar[BUFFER_VALUE_CNT]; // 采样缓存array
 static struct aniso_ring_buffer_t sample_datas_rb;                // 采样缓存ring_buffer
-static struct timer sample_timer;                     // 采样定时器
-volatile float adc_val_min = INFINITY; // adc触发的负向阈值
-volatile float adc_val_max = -INFINITY; // adc触发的正向阈值
+static struct timer sample_timer;                                 // 采样定时器
+volatile float adc_val_min = INFINITY;                            // adc触发的负向阈值
+volatile float adc_val_max = -INFINITY;                           // adc触发的正向阈值
 volatile uint16_t trigger1_count = 0;
 volatile int16_t printed_count = -1;
-
-// 采样频率计算
-void calc_sample_freq(uint32_t tick)
-{
-    // 参考自clocksync.py clock_to_print_time()
-    // sample_time = sample_tick/mcu_freq
-    // sample_freq = 1 / sample_time = mcu_freq / sample_tick
-    sample_freq = 1.0f;
-    if (tick != 0)
-    {
-        sample_freq = (float)CONFIG_CLOCK_FREQ / tick;
-        if (sample_freq <= 0.0f)
-            sample_freq = 1.0f;
-    }
-}
 
 // 触发判断 阈值法
 uint8_t get_trigger1(void)
@@ -90,8 +65,8 @@ uint8_t get_trigger1(void)
     }
     float max_factor = 0.1f;
     float min_factor = 0.1f;
-    float val_max = adc_val_max + adc_val_max*max_factor;
-    float val_min = adc_val_min - adc_val_min*min_factor;
+    float val_max = adc_val_max + adc_val_max * max_factor;
+    float val_min = adc_val_min - adc_val_min * min_factor;
 
     aniso_ring_buffer_pick(&sample_datas_rb, 0, &temp_data); // 本周期最新数据
     if (temp_data.flt_val > val_max ||
@@ -99,7 +74,7 @@ uint8_t get_trigger1(void)
     {
         return 1;
     }
-    return  0;
+    return 0;
 }
 
 // 临界回溯 线性拟合法
@@ -107,11 +82,11 @@ uint32_t get_critical3(void)
 {
     struct aniso_adc_data_t temp_data;
     aniso_ring_buffer_pick(&sample_datas_rb, CRITICAL_VALUE_CNT - 1, &temp_data); // 最旧缓存数据
-    float ye = temp_data.flt_val;                                               // y终止拟合值，对应x=end
-    aniso_ring_buffer_pick(&sample_datas_rb, 0, &temp_data);                    // 最新缓存数据
-    float ys = temp_data.flt_val;                                               // y起始拟合值，对应x=0
-    float k = (ye - ys) / (CRITICAL_VALUE_CNT - 1);                             // 斜率k=(yend-ystart)/(xend-xstart)
-    critical_tick = temp_data.tick;                                             // 默认返回最新时间戳
+    float ye = temp_data.flt_val;                                                 // y终止拟合值，对应x=end
+    aniso_ring_buffer_pick(&sample_datas_rb, 0, &temp_data);                      // 最新缓存数据
+    float ys = temp_data.flt_val;                                                 // y起始拟合值，对应x=0
+    float k = (ye - ys) / (CRITICAL_VALUE_CNT - 1);                               // 斜率k=(yend-ystart)/(xend-xstart)
+    critical_tick = temp_data.tick;                                               // 默认返回最新时间戳
 
     // 拐点检测 遍历找到纵向距离偏差最大点
     float err_max = 0.0f;
@@ -138,15 +113,14 @@ sample_adc_event(struct timer *timer)
     {
         aniso_adc_sample(ANISO_STATE_PLACEHOLD);
     }
-    
+
     // 重新调度定时器，固定间隔采样
     timer->waketime += timer_from_us(SAMPLE_INTERVAL_US);
     return SF_RESCHEDULE;
 }
 
 // shutdown清理函数
-void
-aniso_bed_mesh_shutdown(void)
+void aniso_bed_mesh_shutdown(void)
 {
     sched_del_timer(&sample_timer);
 }
@@ -166,9 +140,8 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
     case ANISO_STATE_INIT:
     {
         sample_val_mean = 0.0f;
-        sample_cycle_now = 0;
         // 过滤触发后，产生振荡的异常数据，以300ms振荡为例，0.5*(1000*1000/SAMPLE_INTERVAL_US)=2500个采样点
-        sample_step_acc = 0.5*SAMPLE_FREQUENCY_HZ;
+        sample_step_acc = SAMPLE_FREQUENCY_HZ / 2;
         sample_freq = SAMPLE_FREQUENCY_HZ;
         sample_step_start = 0;
         critical_tick = 1;
@@ -177,7 +150,6 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
         aniso_ring_buffer_init(&sample_datas_rb, sample_datas_ar, BUFFER_VALUE_CNT, sizeof(struct aniso_adc_data_t));
         aniso_kalman_filter_init(&kmf, 0.2f, 0.03f, 0.2f);
         aniso_iir_filter_init(&bsf, ANISO_FILTER_BAND_STOP, 50.0f, 10.0f, sample_freq);
-        // aniso_iir_filter_init(&hpf, ANISO_FILTER_HIGH_PASS, 5.0f, 0.707f, sample_freq);
         aniso_iir_filter_init(&lpf, ANISO_FILTER_LOW_PASS, 3000.0f, 0.707f, sample_freq);
         state_machine_flag = ANISO_STATE_PREHEAT;
         adc_val_min = INFINITY;
@@ -190,17 +162,16 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
     case ANISO_STATE_PREHEAT:
     {
         sample_step_start++;
-        sample_data.raw_val = (float)gpio_adc_read(gPF); // 读取上一周期adc转换数据
-        gpio_adc_sample(gPF);                            // 启动下一周期adc采样转换
-        sample_cycle_now++;
-        sample_val_mean += (sample_data.raw_val - sample_val_mean) / sample_cycle_now; // 在线计算历史均值
-        sample_data.raw_val -= sample_val_mean;                // 去除直流分量
+        sample_data.raw_val = (float)gpio_adc_read(gPF);                                // 读取上一周期adc转换数据
+        gpio_adc_sample(gPF);                                                           // 启动下一周期adc采样转换
+        sample_val_mean += (sample_data.raw_val - sample_val_mean) / sample_step_start; // 在线计算历史均值
+        sample_data.raw_val -= sample_val_mean;                                         // 去除直流分量
         if (sample_step_start >= sample_step_acc)
         {
-            sample_data.flt_val = sample_data.raw_val;                                     // 数据预填充，避免下阶段起始无数据判断
-            aniso_ring_buffer_push(&sample_datas_rb, &sample_data);  
+            sample_data.flt_val = sample_data.raw_val; // 数据预填充，避免下阶段起始无数据判断
+            aniso_ring_buffer_push(&sample_datas_rb, &sample_data);
             adc_val_max = fmaxf(adc_val_max, sample_data.flt_val);
-            adc_val_min = fminf(adc_val_min, sample_data.flt_val);                      // 压入缓存
+            adc_val_min = fminf(adc_val_min, sample_data.flt_val); // 压入缓存
             if (aniso_ring_buffer_size(&sample_datas_rb) >= BUFFER_VALUE_CNT)
             {
                 sample_step_acc = 0;
@@ -215,24 +186,26 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
     case ANISO_STATE_SAMPLE:
     {
         sample_data.raw_val = (float)gpio_adc_read(gPF) - sample_val_mean; // 读取上一周期adc转换数据（同时去除直流分量）
-        gpio_adc_sample(gPF);                                       // 启动下一周期adc采样转换
+        gpio_adc_sample(gPF);                                              // 启动下一周期adc采样转换
         // // sample_data.flt_val = aniso_iir_filter_process(&hpf, sample_data.raw_val);
         sample_data.flt_val = aniso_iir_filter_process(&lpf, sample_data.raw_val);
         sample_data.flt_val = aniso_iir_filter_process(&bsf, sample_data.flt_val);
         sample_data.flt_val = aniso_kalman_filter_process(&kmf, sample_data.flt_val);
         aniso_ring_buffer_push(&sample_datas_rb, &sample_data); // 更新采样缓存（必须先push，判断trigger需要读缓存）
 
-        sample_data.trigger = get_trigger1();                // 判断触发标志
+        sample_data.trigger = get_trigger1(); // 判断触发标志
         if (sample_data.trigger == 1)
         {
             aniso_ring_buffer_update(&sample_datas_rb, 0, &sample_data);
             trigger1_count++;
         }
-        else {
+        else
+        {
             trigger1_count = 0;
         }
 
-        if (trigger1_count > TRIGGER_COUNT_MAX) {
+        if (trigger1_count > TRIGGER_COUNT_MAX)
+        {
             trigger1_count = 0;
             gpio_out_write_now(triggerPF, 0);
             state_machine_flag = ANISO_STATE_STOP;
@@ -258,25 +231,29 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
     return sample_data.trigger;
 }
 
+/*
 void sample_task(void)
 {
     if (state_machine_flag == ANISO_STATE_STOP)
-    {        
-        if (printed_count >= 0 && printed_count < BUFFER_VALUE_CNT) {
+    {
+        if (printed_count >= 0 && printed_count < BUFFER_VALUE_CNT)
+        {
             struct aniso_adc_data_t temp_data;
             aniso_ring_buffer_pick(&sample_datas_rb, printed_count, &temp_data);
-            printf_("AEI_FLT=%d RAW_VAL=%d max=%d min=%d\r\n", (int32_t)(temp_data.flt_val * 1000), (int32_t)(temp_data.raw_val * 1000), (int32_t)(adc_val_max*1000), (int32_t)(adc_val_min*1000));
+            // printf_("AEI_FLT=%d RAW_VAL=%d max=%d min=%d\r\n", (int32_t)(temp_data.flt_val * 1000), (int32_t)(temp_data.raw_val * 1000), (int32_t)(adc_val_max*1000), (int32_t)(adc_val_min*1000));
             printed_count++;
         }
 
-        if (printed_count >= BUFFER_VALUE_CNT) {
+        if (printed_count >= BUFFER_VALUE_CNT)
+        {
             printed_count = -1; // 打印完成，重置为-1，避免重复打印
             memset(sample_datas_ar, 0, sizeof(sample_datas_ar));
             state_machine_flag = ANISO_STATE_IDLE;
         }
     }
 }
-// DECL_TASK(sample_task);
+DECL_TASK(sample_task);
+*/
 
 void command_config_aniso_bed_mesh(uint32_t *args)
 {
@@ -294,11 +271,11 @@ DECL_COMMAND(command_config_aniso_bed_mesh, "config_aniso_bed_mesh oid=%c adc_pi
 
 void command_setup_aniso_bed_mesh(uint32_t *args)
 {
-    uint8_t goid = (uint8_t)args[0];
     switch (args[1]) // 功能码
     {
     case 1: // 设置工作模式
-        printf_("setup_aniso_bed_mesh oid=%u\r\n", goid);
+        // uint8_t goid = (uint8_t)args[0];
+        // printf_("setup_aniso_bed_mesh oid=%u\r\n", goid);
         gpio_out_write_now(triggerPF, 1);
         state_machine_flag = ANISO_STATE_INIT;
         memset(sample_datas_ar, 0, sizeof(sample_datas_ar));
@@ -310,10 +287,6 @@ void command_setup_aniso_bed_mesh(uint32_t *args)
 
     case 2: // 获取寻位运动的加速段对应的电机微步数
         sample_step_acc = args[2];
-        break;
-
-    case 3: // 设置广播标志位
-        log_flag = (uint8_t)args[2];
         break;
     }
 }

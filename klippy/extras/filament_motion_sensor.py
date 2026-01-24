@@ -73,8 +73,10 @@ class EncoderSensor:
         return self.extruder_pos
     def _handle_move_extruder(self, move_extruder, move_pos, absolute_mode):
         if move_extruder == self.extruder_name:
-            if absolute_mode: self.extruder_pos = move_pos
-            else: self.extruder_pos += move_pos
+            if absolute_mode:
+                self.extruder_pos = move_pos
+            elif move_pos > 0:
+                self.extruder_pos += move_pos
             # logging.info("_handle_move_extruder: extruder_name=%s, extruder_pos=%.3f, "
             #         "filament_runout_pos=%.3f, absolute_mode=%d", self.extruder_name,
             #         self.extruder_pos, self.filament_runout_pos, absolute_mode)
