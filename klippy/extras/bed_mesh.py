@@ -784,8 +784,8 @@ class BedMeshCalibrate:
         pts = [[pt_now[0], pt_now[1]], # 当前位置
                [pt_min[0], pt_min[1]], # xmin, ymin
                [pt_min[0], pt_max[1]], # xmin, ymax
-               [pt_max[0], pt_min[1]], # xmax, ymin
                [pt_max[0], pt_max[1]], # xmax, ymax
+               [pt_max[0], pt_min[1]], # xmax, ymin
                [0.5*(pt_min[0]+pt_max[0]), 0.5*(pt_min[1]+pt_max[1])]]
         # pts = calc_open_tsp(pts) # 旅行商路线规划
         pts = pts[1:]
