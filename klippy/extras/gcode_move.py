@@ -157,7 +157,7 @@ class GCodeMove:
                         self.last_position[pos] = v + self.base_position[pos]
                     if axis == 'Z':
                         move_pos = self._get_gcode_position()
-                        gcmd.respond_raw("Z move to %.3f" % (move_pos[pos],))
+                        # gcmd.respond_raw("Z move to %.3f" % (move_pos[pos],))
                         self.printer.send_event("axisz:move",(move_pos[pos]))
             if 'E' in params:
                 v = float(params['E']) * self.extrude_factor

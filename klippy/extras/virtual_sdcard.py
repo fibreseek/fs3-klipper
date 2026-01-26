@@ -122,8 +122,9 @@ class VirtualSD:
     def get_zmove_value(self, z_move_val):
         if self.work_timer is not None and self.is_start_move:
             # self.gcode.respond_raw("get z move value %.3f"%(z_move_val))
-            self.printed_pos_z = z_move_val
-            self.powerloss_progress.record(self.file_position, "", self.printed_pos_z)
+            if self.printed_pos_z != z_move_val:
+                self.printed_pos_z = z_move_val
+                self.powerloss_progress.record(self.file_position, "", self.printed_pos_z)
     def stats(self, eventtime):
         if self.work_timer is None:
             return False, ""
