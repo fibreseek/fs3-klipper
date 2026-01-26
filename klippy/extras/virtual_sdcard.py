@@ -90,7 +90,7 @@ class VirtualSD:
         self.powerloss_position = None
         
         # Double buffer mechanism for prefetching
-        self.prefetch_queue = queue.Queue(maxsize=1)  # Queue for prefetched data
+        self.prefetch_queue = queue.Queue(maxsize=2)  # Queue for prefetched data
         self.prefetch_thread = None
         self.prefetch_stop_event = threading.Event()
         self.prefetch_partial_input = ""  # Shared partial input between buffers
