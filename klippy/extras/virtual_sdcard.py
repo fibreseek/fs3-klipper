@@ -544,6 +544,17 @@ class VirtualSD:
             if 'square_corner_velocity' in velocity_limit:
                 vl_cmd += " SQUARE_CORNER_VELOCITY=%.1f" % velocity_limit['square_corner_velocity']
             gcode_script.append(vl_cmd)
+        
+        # 设置层信息
+        total_layer = file_info.get('total_layer')
+        if total_layer is not None:
+            gcode_script.append("SET_PRINT_STATS_INFO TOTAL_LAYER=%d" % total_layer)
+            gcmd.respond_raw("Total layer: %d" % (total_layer))
+
+        current_layer = file_info.get('current_layer')
+        if current_layer is not None:
+            gcode_script.append("SET_PRINT_STATS_INFO CURRENT_LAYER=%d" % current_layer)
+            gcmd.respond_raw("Current layer: %d" % (current_layer))
 
         # 等待喷嘴加热到位
         gcode_script.append("M118 [POWERLOSS] Preparing to heat nozzle T%d to %.1f°C" % (current_tool, pre_nozzle_temp))

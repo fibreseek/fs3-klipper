@@ -214,6 +214,8 @@ class PowerlossProgress():
             'gcode_lines': 0,         # Total gcode lines processed
             'file_size': 0,           # Total file size in bytes
             'scanned_bytes': 0,       # Total bytes scanned (may be less than file_size if stop_byte is used)
+            'total_layer': None,
+            'current_layer': None,
         }
         
         try:
@@ -486,7 +488,15 @@ class PowerlossProgress():
                         info['velocity_limit']['square_corner_velocity'] = velocity
                     except ValueError:
                         pass
-    
+
+        # Parse SET_PRINT_STATS_INFO command
+        elif command == 'SET_PRINT_STATS_INFO':
+            if 'TOTAL_LAYER' in params:
+                info['total_layer'] = int(params['TOTAL_LAYER'])
+            
+            if 'CURRENT_LAYER' in params:
+                info['current_layer'] = int(params['CURRENT_LAYER'])
+
     def get_powerloss_point(self):
         """Scan powerloss files from self.prefix+".0" to self.prefix+".max_file_num-1"
         and return the SEEKPOSITION from the file with the latest MODIFYTIME.
