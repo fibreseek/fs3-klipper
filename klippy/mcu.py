@@ -223,7 +223,7 @@ class MCU_trsync:
             s.note_homing_end()
         return params['trigger_reason']
 
-TRSYNC_TIMEOUT = 0.025
+TRSYNC_TIMEOUT = 0.5
 TRSYNC_SINGLE_MCU_TIMEOUT = 0.250
 
 class TriggerDispatch:
@@ -258,7 +258,7 @@ class TriggerDispatch:
     def start(self, print_time):
         reactor = self._mcu.get_printer().get_reactor()
         self._trigger_completion = reactor.completion()
-        expire_timeout = TRSYNC_SINGLE_MCU_TIMEOUT
+        expire_timeout = TRSYNC_TIMEOUT
         # if len(self._trsyncs) == 1:
         #     expire_timeout = TRSYNC_SINGLE_MCU_TIMEOUT
         for i, trsync in enumerate(self._trsyncs):
