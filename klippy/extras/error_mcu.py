@@ -13,17 +13,9 @@ firmware on the MCU(s). Fix by recompiling and flashing the
 firmware.
 """
 
-message_protocol_error2 = """
-Once the underlying issue is corrected, use the "RESTART"
-command to reload the config and restart the host software.
-"""
+message_protocol_error2 = ""
 
-message_mcu_connect_error = """
-Once the underlying issue is corrected, use the
-"FIRMWARE_RESTART" command to reset the firmware, reload the
-config, and restart the host software.
-Error configuring printer
-"""
+message_mcu_connect_error = ""
 
 Common_MCU_errors = {
     ("Timer too close",): """
@@ -34,7 +26,7 @@ similar system problems on the host computer.""",
     ("Missed scheduling of next ",): """
 This is generally indicative of an intermittent
 communication failure between micro-controller and host.""",
-    ("ADC out of range",): """
+    ("Temperature out of range",): """
 This generally occurs when a heater temperature exceeds
 its configured min_temp or max_temp.""",
     ("Rescheduled timer in the past", "Stepper too far in past"): """

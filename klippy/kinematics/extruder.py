@@ -208,16 +208,14 @@ class PrinterExtruder:
     def check_move(self, move):
         axis_r = move.axes_r[3]
         if not self.heater.can_extrude:
+            min_extrude_temp = self.heater.get_min_extrude_temp()
             raise self.printer.command_error(
-                "Extrude below minimum temp\n"
-                "See the 'min_extrude_temp' config option for details")
+                "Please set the temperature to above %.1f℃ before extrusion." % (min_extrude_temp,))
         if (not move.axes_d[0] and not move.axes_d[1]) or axis_r < 0.:
             # Extrude only move (or retraction move) - limit accel and velocity
             if abs(move.axes_d[3]) > self.max_e_dist:
                 raise self.printer.command_error(
-                    "Extrude only move too long (%.3fmm vs %.3fmm)\n"
-                    "See the 'max_extrude_only_distance' config"
-                    " option for details" % (move.axes_d[3], self.max_e_dist))
+                    "The single extrusion length must be less than %.3fmm." % (self.max_e_dist,))
             inv_extrude_r = 1. / abs(axis_r)
             move.limit_speed(self.max_e_velocity * inv_extrude_r,
                              self.max_e_accel * inv_extrude_r)
@@ -229,9 +227,7 @@ class PrinterExtruder:
             logging.debug("Overextrude: %s vs %s (area=%.3f dist=%.3f)",
                           axis_r, self.max_extrude_ratio, area, move.move_d)
             raise self.printer.command_error(
-                "Move exceeds maximum extrusion (%.3fmm^2 vs %.3fmm^2)\n"
-                "See the 'max_extrude_cross_section' config option for details"
-                % (area, self.max_extrude_ratio * self.filament_area))
+                "Move exceeds maximum extrusion (%.3fmm^2 vs %.3fmm^2)" % (area, self.max_extrude_ratio * self.filament_area))
     def calc_junction(self, prev_move, move):
         diff_r = move.axes_r[3] - prev_move.axes_r[3]
         if diff_r:

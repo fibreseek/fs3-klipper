@@ -5,10 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
 
-HINT_THERMAL = """
-See the 'verify_heater' section in docs/Config_Reference.md
-for the parameters that control this check.
-"""
+HINT_THERMAL = ""
 
 class HeaterCheck:
     def __init__(self, config):

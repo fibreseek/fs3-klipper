@@ -182,7 +182,7 @@ class VirtualSD:
                 self.powerloss_record_time = self.reactor.monotonic()
     def do_resume(self):
         if self.work_timer is not None:
-            raise self.gcode.error("RESUME called when already printing")
+            raise self.gcode.error("RESUME Error: Printer is already printing")
         self.must_pause_work = False
         self.work_timer = self.reactor.register_timer(
             self.work_handler, self.reactor.NOW)
@@ -199,7 +199,7 @@ class VirtualSD:
         self.powerloss_progress.clear_record()
     # G-Code commands
     def cmd_error(self, gcmd):
-        raise gcmd.error("SD write not supported")
+        raise gcmd.error("Printer is not supported command: %s" % gcmd.command)
     def _reset_file(self):
         if self.current_file is not None:
             self.do_pause()
@@ -248,7 +248,7 @@ class VirtualSD:
     def cmd_M23(self, gcmd):
         # Select SD file
         if self.work_timer is not None:
-            raise gcmd.error("Printer is currently printing")
+            raise gcmd.error("Printer is already printing")
         self._reset_file()
         filename = gcmd.get_raw_command_parameters().strip()
         if filename.startswith('/'):
@@ -308,7 +308,7 @@ class VirtualSD:
             f.seek(0)
         except:
             logging.exception("virtual_sdcard file open")
-            raise gcmd.error("Unable to open file")
+            raise gcmd.error("Unable to open file %s" % filename)
         gcmd.respond_raw("File opened:%s Size:%d" % (filename, fsize))
         gcmd.respond_raw("File selected")
         self.current_file = f
@@ -324,7 +324,7 @@ class VirtualSD:
     def cmd_M26(self, gcmd):
         # Set SD position
         if self.work_timer is not None:
-            raise gcmd.error("Printer is currently printing")
+            raise gcmd.error("Printer is already printing")
         pos = gcmd.get_int('S', minval=0)
         self.file_position = pos
     def cmd_M27(self, gcmd):
@@ -353,7 +353,7 @@ class VirtualSD:
     """
     def cmd_M39(self, gcmd):
         if self.work_timer is not None:
-            raise gcmd.error("Printer is currently printing")
+            raise gcmd.error("Printer is already printing")
         try:
             orig = gcmd.get_commandline()
             command_line = orig[orig.find("M39") + 4:].strip()
@@ -403,7 +403,7 @@ class VirtualSD:
     
     def cmd_PREPARE_RECOVER_PRINT_FILE(self, gcmd):
         if self.work_timer is not None:
-            raise gcmd.error("PREPARE RECOVER PRINT Error: Printer is currently printing.")
+            raise gcmd.error("PREPARE RECOVER PRINT Error: Printer is already printing.")
         
         # Check if powerloss file exists
         if not self.powerloss_file_exist:
@@ -617,7 +617,7 @@ class VirtualSD:
     
     def cmd_RECOVER_PRINT_FILE(self, gcmd):
         if self.work_timer is not None:
-            raise gcmd.error("RECOVER PRINT Error: Printer is currently printing.")
+            raise gcmd.error("RECOVER PRINT Error: Printer is already printing.")
         
         if self.powerloss_info is None:
             gcmd.respond_raw("Error: No prepared powerloss info found. Please run PREPARE_RECOVER_PRINT_FILE first.")

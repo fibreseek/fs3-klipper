@@ -302,7 +302,7 @@ class PrinterHoming:
             raise
         if hmove.check_no_movement() is not None:
             raise self.printer.command_error(
-                "Probe triggered prior to movement")
+                "The homing sensor was triggered before the Z-axis moved.")
         return epos
     def cmd_G28(self, gcmd):
         # Move to origin

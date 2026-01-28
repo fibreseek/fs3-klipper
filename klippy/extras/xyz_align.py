@@ -127,9 +127,9 @@ class xyz_align:
         try:
             with open(self.ini_path, 'w') as configfile:
                 config.write(configfile)
-            self.gcode.respond_info("update xyz_offset.ini file success")
+            self.gcode.respond_info("Update xyz offset config file success")
         except Exception as e:
-            self.gcode.respond_info("update xyz_offset.ini file failed: %s" % str(e))
+            self.gcode.respond_info("Update xyz offset config file failed: %s" % str(e))
             logging.error("Failed to update xyz_offset.ini: %s" % str(e))
 
     def xyz_update_offset(self, x0, y0, x1, y1):

@@ -50,7 +50,7 @@ class HelperTemperatureDiagnostics:
         query_adc = self.printer.load_object(config, 'query_adc')
         query_adc.register_adc(self.name, self.mcu_adc)
         error_mcu = self.printer.load_object(config, 'error_mcu')
-        error_mcu.add_clarify("ADC out of range", self._clarify_adc_range)
+        error_mcu.add_clarify("Temperature out of range", self._clarify_adc_range)
     def setup_diag_minmax(self, min_temp, max_temp, min_adc, max_adc):
         self.min_temp, self.max_temp = min_temp, max_temp
         self.min_adc, self.max_adc = min_adc, max_adc

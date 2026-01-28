@@ -104,7 +104,7 @@ class HybridCoreXZKinematics:
                      or end_pos[i] > self.limits[i][1])):
                 if self.limits[i][0] > self.limits[i][1]:
                     raise move.move_error("Must home axis first")
-                raise move.move_error()
+                raise move.move_error("Move out of range", i)
     def check_move(self, move):
         limits = self.limits
         xpos, ypos = move.end_pos[:2]

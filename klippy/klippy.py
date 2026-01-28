@@ -16,11 +16,7 @@ The klippy host software is attempting to connect.  Please
 retry in a few moments.
 """
 
-message_restart = """
-Once the underlying issue is corrected, use the "RESTART"
-command to reload the config and restart the host software.
-Printer is halted
-"""
+message_restart = ""
 
 class Printer:
     config_error = configfile.error
