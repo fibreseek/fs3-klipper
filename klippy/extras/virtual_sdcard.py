@@ -24,6 +24,8 @@ class VirtualSD:
         self.printer = config.get_printer()
         self.printer.register_event_handler("klippy:shutdown",
                                             self.handle_shutdown)
+        self.stealthchop = 0
+        self.printer.register_event_handler("klippy:ready", self.handle_ready)
         self.printer.register_event_handler("axisz:move",self.get_zmove_value)
         # sdcard state
         sd = config.get('path')
@@ -52,7 +54,7 @@ class VirtualSD:
         self.v_pattern = re.compile(r'\bV[\d\.\-]+\b')
         # Register commands
         self.gcode = self.printer.lookup_object('gcode')
-        for cmd in ['M20', 'M21', 'M23', 'M24', 'M25', 'M26', 'M27']:
+        for cmd in ['M20', 'M21', 'M23', 'M24', 'M25', 'M26', 'M27', 'M39']:
             self.gcode.register_command(cmd, getattr(self, 'cmd_' + cmd))
         for cmd in ['M28', 'M29', 'M30']:
             self.gcode.register_command(cmd, self.cmd_error)
@@ -103,6 +105,12 @@ class VirtualSD:
 
     cmd_WAITTING_PAUSE_help = "WAITTING_PAUSE COMMAND  eg: WAITTING_PAUSE F=1 force puase"
 
+    def handle_ready(self):
+        stepper_x_stealthchop = self.get_tmc_stealthchop_threshold('stepper_x') or 0
+        stepper_y_stealthchop = self.get_tmc_stealthchop_threshold('stepper_y') or 0
+        self.stealthchop = max(stepper_x_stealthchop, stepper_y_stealthchop)
+        if self.stealthchop > 0:
+            logging.info("VirtualSD: stealthchop_threshold set to %d", self.stealthchop)
 
     def handle_shutdown(self):
         if self.work_timer is not None:
@@ -341,6 +349,26 @@ class VirtualSD:
     def is_cmd_from_sd(self):
         return self.cmd_from_sd
     
+    def get_tmc_stealthchop_threshold(self, driver_name="stepper_x"):
+        try:
+            # 尝试多种 TMC 驱动类型
+            tmc_obj = None
+            for tmc_type in ['tmc2240', 'tmc2209', 'tmc2130', 'tmc5160']:
+                tmc_obj = self.printer.lookup_object(f"{tmc_type} {driver_name}", None)
+                if tmc_obj is not None:
+                    break
+            
+            if tmc_obj is None:
+                return None
+            
+            config = tmc_obj.config
+            threshold = config.getfloat('stealthchop_threshold', 0, minval=0.)
+                
+            return threshold
+        except Exception as e:
+            logging.exception(f"Failed to get stealthchop threshold for {driver_name}")
+            return None
+
     """
     Handle M39 command for SD card recovery print functionality.
     
@@ -1030,6 +1058,13 @@ class VirtualSD:
             try:
                 # logging.info("SD card line (%d): %s", self.file_position, repr(line))
                 if not line.startswith(';') and line.strip() != '':
+                    # Adjust speed for stealthchop if applicable
+                    if self.stealthchop > 100:
+                        speed = "F%d" % (self.stealthchop*60)
+                        if speed in line:
+                            change_speed = "F%d" % ((self.stealthchop-20)*60)
+                            line = line.replace(speed, change_speed)
+                            # self.gcode.respond_raw("Adjust stealthchop speed: %s to %s"%(speed,change_speed))
                     self.gcode.run_script(line)
                 if not self.is_start_move and (line.startswith('G1') or line.startswith('G0')) :
                     self.gcode.respond_raw("Print move start: %s"%(line))
