@@ -4,6 +4,7 @@ import time
 import os
 import json
 from pathlib import Path
+import collections
 
 class MySerial:
     def __init__(self, config):
@@ -15,6 +16,21 @@ class MySerial:
         self.GAIN = 128  # Gain 128
         self.ADC_MAX = 2**23 - 1  # 24-bit ADC maximum value (8388607)
         
+        self.window_size = 10
+        self.std_threshold = 500
+        self.anomaly_confirm_count = 5
+        self.recovery_confirm_count = 40
+        self.value_history = collections.deque(maxlen = self.window_size)
+        self.anomaly_counter = 0
+        self.recovery_counter = 0
+        self.current_state = "NORMAL"
+
+        self.calibration_log = []
+        self.polling_log = []
+        
+        self.polling_enabled = False
+        self.polling_log_enabled = False
+
         # Load calibration data
         self.zero_calibration_value = 0  # Zero point calibration value (no material)
         self.weight_calibration_value = 0  # Weight calibration value (with material)
@@ -27,7 +43,7 @@ class MySerial:
         self.gcode.register_command(
             'TENSION_SENSOR_POLL',
             self.cmd_FORCE_SENSOR_POLL,
-            desc="Enable or disable force sensor polling: FORCE_SENSOR_POLL ENABLE=<0|1>"
+            desc="Enable or disable force sensor polling: FORCE_SENSOR_POLL ENABLE=<0|1> [LOGGING=<0|1>]"
         )
 
         self.gcode.register_command(
@@ -66,6 +82,20 @@ class MySerial:
             'GET_RAW_FORCE_DATA',
             self.cmd_GET_RAW_FORCE_DATA,
             desc="Get raw unprocessed force sensor data: GET_RAW_FORCE_DATA"
+        )
+        
+        # Add new command to clear polling log
+        self.gcode.register_command(
+            'CLEAR_POLLING_LOG',
+            self.cmd_CLEAR_POLLING_LOG,
+            desc="Clear polling log: CLEAR_POLLING_LOG"
+        )
+        
+        # Add new command to show polling log
+        self.gcode.register_command(
+            'SHOW_POLLING_LOG',
+            self.cmd_SHOW_POLLING_LOG,
+            desc="Show polling log: SHOW_POLLING_LOG [COUNT=<number>]"
         )
 
     def adc_to_voltage(self, adc_value):
@@ -114,7 +144,11 @@ class MySerial:
                     calibration_data = json.load(f)
                     self.zero_calibration_value = calibration_data.get('zero_calibration', 0)
                     self.weight_calibration_value = calibration_data.get('weight_calibration', 0)
-                logging.info(f"Calibration data loaded successfully: zero={self.zero_calibration_value}, weight={self.weight_calibration_value}")
+                    self.calibration_log = calibration_data.get('calibration_log', [])
+                    self.polling_log = calibration_data.get('polling_log', [])
+                logging.info(f"Calibration data loaded successfully")
+                logging.info(f"Calibration log entries: {len(self.calibration_log)}")
+                logging.info(f"Polling log entries: {len(self.polling_log)}")
             else:
                 logging.info("Calibration file not found, using default values")
         except Exception as e:
@@ -123,29 +157,75 @@ class MySerial:
     def _save_calibration(self):
         """Save calibration data to file"""
         try:
+            os.makedirs(os.path.dirname(self.calibration_file), exist_ok=True)
+
             calibration_data = {
                 'zero_calibration': self.zero_calibration_value,
-                'weight_calibration': self.weight_calibration_value
+                'weight_calibration': self.weight_calibration_value,
+                'calibration_log': self.calibration_log,
+                'polling_log': self.polling_log
             }
             with open(self.calibration_file, 'w') as f:
-                json.dump(calibration_data, f)
-            logging.info(f"Calibration data saved successfully: zero={self.zero_calibration_value}, weight={self.weight_calibration_value}")
+                json.dump(calibration_data, f, indent=4)
+            logging.info(f"Calibration data saved successfully")
+            logging.info(f"Calibration log entries: {len(self.calibration_log)}")
+            logging.info(f"Polling log entries: {len(self.polling_log)}")
         except Exception as e:
             logging.error(f"Failed to save calibration data: {e}")
 
+    def calculate_std(self, values):
+        """Calculate standard deviation of a list of values"""
+        if len(values) < 2:
+            return 0.0
+        mean = sum(values) / len(values)
+        variance = sum((x - mean) ** 2 for x in values) / len(values)
+        return variance ** 0.5
+    
+    def update_detection_state(self, current_value):
+        """Update detection state based on new value"""
+        self.value_history.append(current_value)
+        if len(self.value_history) < self.window_size:
+            return False, "INIT", f"Collecting data: {len(self.value_history)}/{self.window_size}"
+        
+        current_std = self.calculate_std(self.value_history)
+        window_range = max(self.value_history) - min(self.value_history)
+
+        is_anomaly = (current_std > self.std_threshold) and (window_range > 500)
+
+        state_changed = False
+        details = f"STD={current_std:.2f}, Threshold={self.std_threshold}, Range={window_range}"
+
+        if is_anomaly:
+            self.anomaly_counter += 1
+            self.recovery_counter = 0
+            if self.current_state == "NORMAL" and self.anomaly_counter >= self.anomaly_confirm_count:
+                self.current_state = "ANOMALY"
+                state_changed = True
+                details += f", ANOMALY CONFIRMED (count={self.anomaly_counter})"
+            else:
+                details += f", anomaly count={self.anomaly_counter}"
+        else:
+            self.recovery_counter += 1
+            self.anomaly_counter = 0
+            if self.current_state == "ANOMALY" and self.recovery_counter >= self.recovery_confirm_count:
+                self.current_state = "NORMAL"
+                state_changed = True
+                details += f", RECOVERY CONFIRMED (count={self.recovery_counter})"
+            else:
+                details += f", recovery count={self.recovery_counter}"
+            
+        return state_changed, self.current_state, details
+
     def cmd_GET_RAW_FORCE_DATA(self, gcmd):
         """Get raw unprocessed force sensor data - single reading"""
-        # Read raw bytes
         raw_bytes = self.read_raw_spi_bytes()
         if raw_bytes is None:
             gcmd.respond_info("ERROR: Unable to read from SPI device")
             return
             
-        # Convert to different formats
         hex_bytes = ' '.join([f'{b:02X}' for b in raw_bytes])
         dec_bytes = ' '.join([f'{b:3d}' for b in raw_bytes])
         
-        # Parse the value
         try:
             parsed_value = self.parse_spi_data(raw_bytes)
             voltage_value = self.adc_to_voltage(parsed_value)
@@ -153,7 +233,6 @@ class MySerial:
         except Exception as e:
             value_info = f"PARSE ERROR: {e}"
         
-        # Output the result
         gcmd.respond_info(f"Raw HEX: {hex_bytes}")
         gcmd.respond_info(f"Raw DEC: {dec_bytes}")
         gcmd.respond_info(f"Parsed value: {value_info}")
@@ -166,16 +245,13 @@ class MySerial:
             gcmd.respond_info("Unable to read force sensor value")
             return
         
-        # Convert to voltage value
         voltage_value = self.adc_to_voltage(current_value)
         
         gcmd.respond_info(f"Current force sensor value: {current_value}")
         gcmd.respond_info(f"Voltage: {voltage_value:.6f}V ({voltage_value*1000:.3f}mV)")
         
-        # Also show net weight if zero calibration is set
         if self.zero_calibration_value > 0:
             net_weight = current_value - self.zero_calibration_value
-            # Calculate voltage corresponding to net weight
             net_voltage = self.adc_to_voltage(net_weight)
             gcmd.respond_info(f"Net weight (current - zero): {net_weight}")
             gcmd.respond_info(f"Net voltage: {net_voltage:.6f}V ({net_voltage*1000:.3f}mV)")
@@ -192,7 +268,6 @@ class MySerial:
             weight_voltage = self.adc_to_voltage(self.weight_calibration_value)
             gcmd.respond_info(f"Weight calibration voltage: {weight_voltage:.6f}V ({weight_voltage*1000:.3f}mV)")
             
-            # Calculate net weight voltage (weight calibration value - zero calibration value)
             if self.zero_calibration_value > 0:
                 net_weight_value = self.weight_calibration_value - self.zero_calibration_value
                 net_weight_voltage = self.adc_to_voltage(net_weight_value)
@@ -202,10 +277,97 @@ class MySerial:
             threshold = self.weight_calibration_value * 0.2
             threshold_voltage = self.adc_to_voltage(threshold)
             gcmd.respond_info(f"Alert threshold: {threshold} (Voltage: {threshold_voltage:.6f}V)")
+        
+        gcmd.respond_info(f"Calibration log entries: {len(self.calibration_log)}")
+        gcmd.respond_info(f"Polling log entries: {len(self.polling_log)}")
+
+    def cmd_SET_THRESHOLD(self, gcmd):
+        """Set detection threshold parameters"""
+        value = gcmd.get_int('VALUE', None)
+        if value is None or value <= 0:
+            gcmd.respond_info("Invalid VALUE parameter")
+            return
+        
+        self.std_threshold = value
+        gcmd.respond_info(f"Detection standard deviation threshold set to: {self.std_threshold}")
+        gcmd.respond_info(f"Window size: {self.window_size}, Anomaly confirm count: {self.anomaly_confirm_count}, Recovery confirm count: {self.recovery_confirm_count}")
+
+    def cmd_DEBUG_STATS(self, gcmd):
+        """Get current detection statistics"""
+        gcmd.respond_info("=== Tension Sensor Detection Stats ===")
+        gcmd.respond_info(f"Current state: {self.current_state}")
+        gcmd.respond_info(f"Window: {len(self.value_history)}/{self.window_size}")
+        gcmd.respond_info(f"Threshold: {self.std_threshold}  (baseline 5*15200)")
+        gcmd.respond_info(f"Anomaly: {self.anomaly_counter}/{self.anomaly_confirm_count}")
+        gcmd.respond_info(f"Recovery: {self.recovery_counter}/{self.recovery_confirm_count}")
+        if len(self.value_history) == self.window_size:
+            std = self.calculate_std(self.value_history)
+            r = max(self.value_history) - min(self.value_history)
+            gcmd.respond_info(f"Real-time std={std:.0f}  range={r:.0f}")
+        
+        if len(self.value_history) > 0:
+            current_std = self.calculate_std(self.value_history)
+            mean_val = sum(self.value_history) / len(self.value_history)
+            min_val = min(self.value_history)
+            max_val = max(self.value_history)
+            gcmd.respond_info(f"Current window stats: mean={mean_val:.2f}, std={current_std:.2f}, range=[{min_val}, {max_val}]")
+    
+            recent = list(self.value_history)[-5:]
+            gcmd.respond_info(f"Recent 5 values: {recent}")
+
+    def cmd_CLEAR_POLLING_LOG(self, gcmd):
+        """Clear polling log"""
+        self.polling_log.clear()
+        self._save_calibration()
+        gcmd.respond_info("Polling log cleared successfully")
+
+    def cmd_SHOW_POLLING_LOG(self, gcmd):
+        """Show polling log"""
+        count = gcmd.get_int('COUNT', 20)
+        
+        if not self.polling_log:
+            gcmd.respond_info("Polling log is empty")
+            return
+        
+        gcmd.respond_info(f"=== Polling Log (showing last {min(count, len(self.polling_log))} entries) ===")
+        
+        start_idx = max(0, len(self.polling_log) - count)
+        for i, entry in enumerate(self.polling_log[start_idx:], start_idx + 1):
+            timestamp = entry.get('timestamp', 'N/A')
+            value = entry.get('value', 'N/A')
+            voltage = entry.get('voltage', 'N/A')
+            
+            gcmd.respond_info(f"{i:4d}. Time: {timestamp}, Value: {value}, Voltage: {voltage:.6f}V ({voltage*1000:.3f}mV)")
+        
+        gcmd.respond_info(f"Total entries: {len(self.polling_log)}")
+
+    def _take_readings(self, count, interval, gcmd):
+        """Take multiple readings with specified interval"""
+        readings = []
+        for i in range(count):
+            current_reading = self.read_spi_once()
+            if current_reading is None:
+                gcmd.respond_info(f"Failed to read SPI data at reading {i+1}, calibration aborted")
+                return None
+            
+            readings.append(current_reading)
+            gcmd.respond_info(f"Reading {i+1}: {current_reading}")
+            
+            if i < count - 1:
+                time.sleep(interval)
+        return readings
+    
+    def _process_readings(self, readings):
+        """Process readings by removing highest and lowest, then averaging"""
+        if len(readings) >= 3:
+            sorted_readings = sorted(readings)
+            trimmed_readings = sorted_readings[1:-1]
+            return sum(trimmed_readings) / len(trimmed_readings)
+        else:
+            return sum(readings) / len(readings)
 
     def cmd_WEIGHT_CALIBRATION(self, gcmd):
         """Weight calibration - record current value as weight with material"""
-
         readings = []
         for i in range(10):
             current_reading = self.read_spi_once()
@@ -227,6 +389,15 @@ class MySerial:
             current_value = sum(readings) / len(readings)
         
         self.weight_calibration_value = current_value
+        
+        calibration_entry = {
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'type': 'weight_calibration',
+            'value': current_value,
+            'voltage': self.adc_to_voltage(current_value)
+        }
+        self.calibration_log.append(calibration_entry)
+        
         self._save_calibration()
         
         voltage_value = self.adc_to_voltage(current_value)
@@ -236,10 +407,10 @@ class MySerial:
         if self.zero_calibration_value > 0:
             net_weight = current_value - self.zero_calibration_value
             net_voltage = self.adc_to_voltage(net_weight)
+            gcmd.respond_info(f"Net weight: {net_weight}, Net voltage: {net_voltage:.6f}V")
 
     def cmd_ZERO_CALIBRATION(self, gcmd):
         """Zero calibration - record current value as zero point"""
-
         readings = []
         for i in range(10):
             current_reading = self.read_spi_once()
@@ -261,6 +432,15 @@ class MySerial:
             current_value = sum(readings) / len(readings)
         
         self.zero_calibration_value = current_value
+        
+        calibration_entry = {
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'type': 'zero_calibration',
+            'value': current_value,
+            'voltage': self.adc_to_voltage(current_value)
+        }
+        self.calibration_log.append(calibration_entry)
+        
         self._save_calibration()
         
         voltage_value = self.adc_to_voltage(current_value)
@@ -281,151 +461,171 @@ class MySerial:
         gcmd.respond_info(f"Zero calibration: {self.zero_calibration_value}")
         gcmd.respond_info(f"Weight calibration: {self.weight_calibration_value}")
         
-        # Display material blockage detection related information
-        if hasattr(self, 'weight_before_drop') and self.weight_before_drop is not None:
-            gcmd.respond_info(f"Weight before drop: {self.weight_before_drop}")
-        if hasattr(self, 'block_count'):
-            gcmd.respond_info(f"Block count: {self.block_count}")
-        if hasattr(self, 'block_status'):
-            gcmd.respond_info(f"Block status: {'BLOCKED' if self.block_status else 'NORMAL'}")
+        gcmd.respond_info(f"Detection state: {self.current_state}")
+        gcmd.respond_info(f"Polling enabled: {self.polling_enabled}")
+        gcmd.respond_info(f"Polling log enabled: {self.polling_log_enabled}")
+        gcmd.respond_info(f"Anomaly counter: {self.anomaly_counter}/{self.anomaly_confirm_count}")
+        gcmd.respond_info(f"Recovery counter: {self.recovery_counter}/{self.recovery_confirm_count}")
+        
+        if len(self.value_history) == self.window_size:
+            current_std = self.calculate_std(self.value_history)
+            r = max(self.value_history) - min(self.value_history)
+            gcmd.respond_info(f"Current window stats: range={r:.0f}, std={current_std:.2f}, threshold: {self.std_threshold}")
+        
+        gcmd.respond_info(f"Polling log entries: {len(self.polling_log)}")
 
     def cmd_FORCE_SENSOR_POLL(self, gcmd):
         """Enable or disable polling detection"""
         enable = gcmd.get_int('ENABLE', None)
+        logging_enable = gcmd.get_int('LOGGING', 0)
+        
         if enable is None:
             gcmd.respond_info("Missing ENABLE parameter (0 or 1)")
             return
             
         if enable:
+            self.polling_log_enabled = (logging_enable == 1)
+            
+            if self.polling_log_enabled:
+                self.polling_log.clear()
+            
             self.start_polling()
-            gcmd.respond_info("Force sensor polling enabled")
+            
+            if self.polling_log_enabled:
+                gcmd.respond_info("Force sensor polling enabled WITH logging")
+                logging.info("Polling started with logging enabled")
+            else:
+                gcmd.respond_info("Force sensor polling enabled WITHOUT logging")
+                logging.info("Polling started without logging")
         else:
             self.stop_polling()
             gcmd.respond_info("Force sensor polling disabled")
 
-    def _send_block_warning(self, weight_before_drop, current_weight):
-        """Send block warning"""
+    def _send_anomaly_warning(self, details):
         try:
-            # Convert to voltage value for warning message
-            voltage_before = self.adc_to_voltage(weight_before_drop)
-            voltage_current = self.adc_to_voltage(current_weight)
-            
-            message = f"M118 DU TOU LA! Weight dropped from {weight_before_drop} ({voltage_before*1000:.2f}mV) to {current_weight} ({voltage_current*1000:.2f}mV)"
+            message = f"M118 TENSION ANOMALY DETECTED! {details}"
             self.gcode.run_script_from_command(message)
             self.gcode.run_script_from_command("FIBER_FILAMENT_TRIGGER")
-            logging.info(f"Block warning sent: {message}")
+            logging.info(f"Anomaly warning sent: {details}")
         except Exception as e:
-            logging.error(f"Failed to send block warning: {e}")
+            logging.error(f"Failed to send anomaly warning: {e}")
 
-    def _send_weight_drop_warning(self, weight_before_drop, current_weight):
-        """Send weight drop warning"""
+    def _send_recovery_notice(self, details):
         try:
-            # Convert to voltage value for warning message
-            voltage_before = self.adc_to_voltage(weight_before_drop)
-            voltage_current = self.adc_to_voltage(current_weight)
-            
-            message = f"M118 Weight drop detected! From {weight_before_drop} ({voltage_before*1000:.2f}mV) to {current_weight} ({voltage_current*1000:.2f}mV)"
+            message = f"M118 TENSION RECOVERED! {details}"
             self.gcode.run_script_from_command(message)
-            logging.info(f"Weight drop warning sent: {message}")
+            logging.info(f"Recovery notice sent: {details}")
         except Exception as e:
-            logging.error(f"Failed to send weight drop warning: {e}")
+            logging.error(f"Failed to send recovery notice: {e}")
 
     def start_polling(self):
         """Start polling detection"""
-        if hasattr(self, 'polling_enabled') and self.polling_enabled:
+        if self.polling_enabled:
+            logging.info("Polling already enabled")
             return
             
         self.polling_enabled = True
-        self.last_weight = None
-        self.weight_before_drop = None
-        self.block_count = 0
-        self.block_status = False
-        self.block_warning_sent = False
-        self.block_recover_count = 0
+        self.value_history.clear()
+        self.anomaly_counter = 0
+        self.recovery_counter = 0
+        self.current_state = "NORMAL"
         
         # Check calibration status
         if self.weight_calibration_value <= 0:
             logging.warning("Weight calibration value not set, polling may be inaccurate")
-            
+        
+        if hasattr(self, 'polling_thread') and self.polling_thread.is_alive():
+            self.polling_enabled = False
+            self.polling_thread.join(timeout=2)
+        
+        self.polling_enabled = True
         self.polling_thread = threading.Thread(target=self._polling_loop, daemon=True)
         self.polling_thread.start()
-        logging.info("Force sensor polling started with block detection")
+        
+        if self.polling_log_enabled:
+            logging.info(f"Force sensor polling started WITH logging")
+        else:
+            logging.info(f"Force sensor polling started WITHOUT logging")
+        
+        logging.info(f"Window size: {self.window_size}, Threshold: {self.std_threshold}")
 
     def stop_polling(self):
         """Stop polling detection"""
+        if not self.polling_enabled:
+            logging.info("Polling already disabled")
+            return
+            
+        logging.info("Stopping polling...")
         self.polling_enabled = False
-        logging.info("Force sensor polling stopped")
+        
+        if hasattr(self, 'polling_thread') and self.polling_thread.is_alive():
+            logging.info("Waiting for polling thread to finish...")
+            self.polling_thread.join(timeout=2)
+            if self.polling_thread.is_alive():
+                logging.warning("Polling thread did not stop properly")
+            else:
+                logging.info("Polling thread stopped successfully")
+        
+        if self.polling_log_enabled and self.polling_log:
+            self._save_calibration()
+            logging.info(f"Force sensor polling stopped and data saved (log entries: {len(self.polling_log)})")
+        else:
+            logging.info(f"Force sensor polling stopped (no logging or empty log)")
+        
+        self.polling_log_enabled = False
 
     def _polling_loop(self):
-        """Polling detection main loop with block detection based on weight drop"""
-        while getattr(self, 'polling_enabled', False):
-            current_value = self.read_spi_once()
-            logging.info(f"data detected: {current_value}")
-            
-            if current_value is not None:
-                if current_value < 1000 or current_value > 8380000:
-                    logging.warning(f"Invalid data detected: {current_value}, valid range: 1000 to 8380000")
+        """Polling detection main loop with logging"""
+        if self.polling_log_enabled:
+            logging.info("Polling loop started - logging enabled")
+        else:
+            logging.info("Polling loop started - logging disabled")
+        
+        try:
+            while self.polling_enabled:
+                current_value = self.read_spi_once()
+                
+                if current_value is None:
+                    logging.error("SPI read failed")
                     time.sleep(2)
                     continue
                 
-                if not hasattr(self, 'weight_before_drop'):
-                    self.weight_before_drop = None
+                if current_value < 1000 or current_value > 8380000:
+                    logging.warning(f"Invalid data detected: {current_value}")
+                    time.sleep(2)
+                    continue
+                
+                if self.polling_log_enabled:
+                    polling_entry = {
+                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                        'value': current_value,
+                        'voltage': self.adc_to_voltage(current_value)
+                    }
+                    self.polling_log.append(polling_entry)
                     
-                # Save previous weight value for comparison
-                previous_weight = self.last_weight
-                self.last_weight = current_value
+                    if len(self.polling_log) % 10 == 0:
+                        logging.info(f"Polling - Logged value {len(self.polling_log)}: {current_value} (Voltage: {self.adc_to_voltage(current_value):.6f}V)")
                 
-                if previous_weight is not None:
-                    diff = previous_weight - current_value
-                    
-                    # Detect weight drop
-                    if diff >= 4000:
-                        if self.weight_before_drop is None:
-                            self.weight_before_drop = previous_weight
-                            self.reactor.register_callback(
-                                lambda event: self._send_weight_drop_warning(
-                                    self.weight_before_drop, current_value))
-                        
-                    # If weight before drop has been recorded, check total drop amount
-                    if self.weight_before_drop is not None:
-                        drop_diff = self.weight_before_drop - current_value
-                        if drop_diff >= 4000:
-                            self.block_count += 1
-                            if self.block_count >= 10 and not self.block_status:
-                                self.block_status = True
-                                self.block_warning_sent = False
-                        else:
-                            self.weight_before_drop = None
-                            self.block_count = 0
-                            self.block_status = False
-                            self.block_warning_sent = False
+                state_changed, new_state, details = self.update_detection_state(current_value)
                 
-                # Blockage detected and warning not sent
-                if self.block_status and not self.block_warning_sent:
-                    self.reactor.register_callback(
-                        lambda event: self._send_block_warning(
-                            self.weight_before_drop, current_value))
-                    self.block_warning_sent = True 
-
-                # Blockage recovery detection
-                if self.block_status and previous_weight is not None:
-                    diff_recover = abs(previous_weight - current_value)
-                    if diff_recover < 500:
-                        self.block_recover_count += 1
-                        if self.block_recover_count >= 5:
-                            self.block_status = False
-                            self.block_count = 0
-                            self.weight_before_drop = None
-                            self.block_recover_count = 0
-                            self.block_warning_sent = False
-                            logging.info("Block status recovered")
-                    else:
-                        self.block_recover_count = 0
-                        
-            elif current_value is None:
-                logging.error("SPI read failed")
+                if self.polling_log_enabled and len(self.polling_log) % 30 == 0 and len(self.polling_log) > 0:
+                    self._save_calibration()
+                    logging.info(f"Auto-saved polling log to file (total entries: {len(self.polling_log)})")
                 
-            time.sleep(2)
+                if state_changed:
+                    logging.info(f"State changed to: {new_state}, {details}")
+                    if new_state == "ANOMALY":
+                        self.reactor.register_callback(
+                            lambda event: self._send_anomaly_warning(details))
+                    elif new_state == "NORMAL":
+                        self.reactor.register_callback(
+                            lambda event: self._send_recovery_notice(details))
+                
+                time.sleep(2)
+        except Exception as e:
+            logging.error(f"Error in polling loop: {e}")
+        finally:
+            logging.info("Polling loop ended")
 
 def load_config(config):
     return MySerial(config)
