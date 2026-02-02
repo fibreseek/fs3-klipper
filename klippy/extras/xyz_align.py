@@ -634,7 +634,15 @@ class xyz_align:
         self.offset_z = 8
 
         # 精准校准3遍，取中位数
-        results = [self.get_trigger_steps(self.t0_offset_x, self.t0_offset_y, self.offset_z_press) for _ in range(3)]
+        results = []
+        for _ in range(3):
+            result = self.get_trigger_steps(self.t0_offset_x, self.t0_offset_y, self.offset_z_press)
+            if result is None:
+                self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=0 T0 trigger failed, aborting.")
+                self.gcode.run_script_from_command("RESTORE_GCODE_STATE NAME=pre_offset_state\n")
+                return
+            results.append(result)
+        
         median_results = tuple(sorted(result) for result in zip(*results))
         trigger_step_z, init_step_x0, init_step_y0, trigger_step_x0, trigger_step_x1, trigger_step_y0, trigger_step_y1 = map(lambda x: x[len(x) // 2], median_results)
         self.gcode.respond_info("cmd_XYZ_ALIGN_NEW_3 T0: trigger_step_z = %d, init_step_x0 = %d, init_step_y0 = %d, trigger_step_x0 = %d, trigger_step_x1 = %d, trigger_step_y0 = %d, trigger_step_y1 = %d" % (trigger_step_z, init_step_x0, init_step_y0, trigger_step_x0, trigger_step_x1, trigger_step_y0, trigger_step_y1))  
@@ -665,7 +673,15 @@ class xyz_align:
         self.offset_z = 10
 
         # 精准校准3遍，取中位数
-        results = [self.get_trigger_steps(self.t1_offset_x, self.t1_offset_y, self.offset_z_press) for _ in range(3)]
+        results = []
+        for _ in range(3):
+            result = self.get_trigger_steps(self.t1_offset_x, self.t1_offset_y, self.offset_z_press)
+            if result is None:
+                self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=0 T1 trigger failed, aborting.")
+                self.gcode.run_script_from_command("RESTORE_GCODE_STATE NAME=pre_offset_state\n")
+                return
+            results.append(result)
+        
         median_results = tuple(sorted(result) for result in zip(*results))
         trigger_step_z, init_step_x0, init_step_y0, trigger_step_x0, trigger_step_x1, trigger_step_y0, trigger_step_y1 = map(lambda x: x[len(x) // 2], median_results)
         self.gcode.respond_info("cmd_XYZ_ALIGN_NEW_3 T1: trigger_step_z = %d, init_step_x0 = %d, init_step_y0 = %d, trigger_step_x0 = %d, trigger_step_x1 = %d, trigger_step_y0 = %d, trigger_step_y1 = %d" % (trigger_step_z, init_step_x0, init_step_y0, trigger_step_x0, trigger_step_x1, trigger_step_y0, trigger_step_y1))  
