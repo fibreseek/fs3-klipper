@@ -3,3 +3,4 @@ out
 *.pyc
 .config.old
 klippy/.version
+CLAUDE.md
