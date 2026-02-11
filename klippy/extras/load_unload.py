@@ -73,6 +73,7 @@ class State:
     RETRYING = 31          # 补料重试中
     # P1堵料检测阶段 (新增，使用2x编号)
     SLOW_EXTRUSION = 21    # 慢速逐毫米挤出中 (1mm-by-1mm with timeout)
+    SLOW_EXTRUSION_CHECK_CLOG = 22 # 慢速挤出后检测堵料中
     PREHEAT_LOW = 23       # 低温预热中 (50°C)
     CLOG_DETECTION = 24    # 堵料检测中 (快速进料1000mm @ 20mm/s)
     CLOG_RETRACTED = 25    # 堵料回退完成 (回退10mm)
@@ -231,6 +232,8 @@ class LoadUnloadHandler:
         self.gcode.register_command('FINISH_LOADUNLOAD', self.cmd_FINISH_LOADUNLOAD, desc=self.cmd_FINISH_LOADUNLOAD_help)
 
         # 注意：filament_motion_sensor:filament_clog 事件只在 P1 进料时动态注册
+        self.printer.register_event_handler('extruder_stall_detector:stall_detected', self._handle_filament_clog)
+
 
         self.count = 0
     # ============================================================
@@ -558,10 +561,6 @@ class LoadUnloadHandler:
         self.gcode.run_script_from_command("M106 P1 S0")
         self.gcode.run_script_from_command("M106 P2 S0")
 
-        # P1 通道：取消注册堵料检测事件
-        if index == Channel.P1:
-            self.printer.register_event_handler('filament_motion_sensor:filament_clog', None)
-
         gcmd.respond_info(f"[{channel_name} {action}] STATE:91 CANCELLED")
 
     cmd_PREPARE_LOAD_UNLOAD_NOZZLE_help = "准备进出料喷嘴"
@@ -765,8 +764,6 @@ class LoadUnloadHandler:
                     self.gcode.run_script_from_command("G1 Y100 F4000")
                     self.load_step = State.WAIT_INSERT
                     self.gcode.respond_info(f"[{channel_name} LOAD] STATE:11 WAIT_INSERT (L=0)")
-                    # P1 进料：注册堵料检测事件监听器
-                    self.printer.register_event_handler('filament_motion_sensor:filament_clog', self._handle_filament_clog)
             else:
                 # P2: 进入等待插入状态
                 self.load_step = State.WAIT_INSERT
@@ -827,7 +824,6 @@ class LoadUnloadHandler:
         self.gcode.run_script_from_command(f"M104 T{nozzle} S0")  # 关闭对应喷嘴温度
         self.gcode.run_script_from_command("M106 P1 S0")  # 关闭侧吹/喉管风扇
         self.gcode.run_script_from_command("M106 P2 S0")
-        self.printer.register_event_handler('filament_motion_sensor:filament_clog', None)  # 取消注册
 
         return self.reactor.NEVER
 
@@ -907,7 +903,7 @@ class LoadUnloadHandler:
             return
 
         # 只在慢速挤出阶段才检测堵料
-        if load_step != State.SLOW_EXTRUSION:
+        if load_step != State.SLOW_EXTRUSION_CHECK_CLOG:
             logger.debug(f"[_handle_filament_clog] Not in slow extrusion state, current state={load_step}")
             return
 
@@ -1161,10 +1157,6 @@ class LoadUnloadHandler:
                 # 立即标记已进入，防止后续逻辑再次执行
                 self.p1_slow_extrusion_entered = True
 
-                self.printer.send_event("filament_clog:check_start")
-                self.gcode.respond_info(f"filament_clog:check_start:{self.count}")
-                self.count += 1
-
                 self.load_step = State.SLOW_EXTRUSION
                 self.p1_slow_extrusion_distance = 0.0
                 self.p1_slow_extrusion_start_time = eventtime
@@ -1186,10 +1178,6 @@ class LoadUnloadHandler:
 
                     # 立即标记已进入，防止竞态条件
                     self.p1_slow_extrusion_entered = True
-
-                    self.printer.send_event("filament_clog:check_start")
-                    self.gcode.respond_info(f"filament_clog:check_start:{self.count}")
-                    self.count += 1
 
                     self.load_step = State.SLOW_EXTRUSION
                     self.p1_slow_extrusion_distance = 0.0
@@ -1229,15 +1217,50 @@ class LoadUnloadHandler:
             # 这里不需要再次等待，直接开始慢速挤出
 
             # 2mm逐毫米挤出
-            step_length = 2.0
+            step_length = 1.0
             self.gcode.run_script_from_command("M83")
-            self.gcode.run_script_from_command(f"G1 V{step_length} F{step_length * 60}")  # V轴进料
+            self.gcode.run_script_from_command(f"G1 V{step_length} F100")  # V轴进料
             self.p1_slow_extrusion_distance += step_length
+
+            toolhead = self.printer.lookup_object('toolhead')
+            toolhead.wait_moves()
 
             elapsed_time = eventtime - self.p1_slow_extrusion_start_time
             self.gcode.respond_info(f"[{channel_name} LOAD] SLOW_EXTRUSION {self.p1_slow_extrusion_distance:.0f}mm ({elapsed_time:.0f}s)")
 
-            return eventtime + 2.0
+            if self.p1_slow_extrusion_distance >= 5.0:
+                self.load_step = State.SLOW_EXTRUSION_CHECK_CLOG
+                self.printer.send_event("filament_clog:check_start")
+                self.gcode.respond_info(f"filament_clog:check_start:{self.count}")
+                self.count += 1
+                return eventtime + 5.0
+
+            return eventtime + 1.0
+        
+        elif load_step == State.SLOW_EXTRUSION_CHECK_CLOG:
+            # 检查是否已检测到堵料，如果是则跳过运动命令（防止电机继续转动）
+            if self.p1_clog_detected:
+                logger.debug("[SLOW_EXTRUSION_CHECK_CLOG] Clog detected, skipping motion commands")
+                return self.reactor.NEVER
+
+            self._send_state_code(22, 'SLOW_EXTRUSION_CHECK_CLOG', channel_name)
+
+            # 移除重复的 M400：在 CLOG_DETECTION 切换状态时已经等待过了
+            # 这里不需要再次等待，直接开始慢速挤出
+
+            # 2mm逐毫米挤出
+            step_length = 5.0
+            self.gcode.run_script_from_command("M83")
+            self.gcode.run_script_from_command(f"G1 V{step_length} F100")  # V轴进料
+            self.p1_slow_extrusion_distance += step_length
+
+            toolhead = self.printer.lookup_object('toolhead')
+            toolhead.wait_moves()
+
+            elapsed_time = eventtime - self.p1_slow_extrusion_start_time
+            self.gcode.respond_info(f"[{channel_name} LOAD] SLOW_EXTRUSION_CHECK_CLOG {self.p1_slow_extrusion_distance:.0f}mm ({elapsed_time:.0f}s)")
+
+            return eventtime + 3.0
 
         # ============================================================
         # 阶段3: 堵料回退完成 (内部STATE:25 CLOG_RETRACTED)
@@ -1275,7 +1298,6 @@ class LoadUnloadHandler:
             self.gcode.run_script_from_command(f"M104 T{nozzle} S0")  # 关闭对应喷嘴温度
             self.gcode.run_script_from_command("M106 P1 S0")  # 关闭侧吹/喉管风扇
             self.gcode.run_script_from_command("M106 P2 S0")
-            self.printer.register_event_handler('filament_motion_sensor:filament_clog', None)  # 取消注册
 
             return self.reactor.NEVER
 
