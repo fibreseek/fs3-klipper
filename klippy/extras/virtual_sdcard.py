@@ -1062,7 +1062,7 @@ class VirtualSD:
                     if self.stealthchop > 100:
                         speed = "F%d" % (self.stealthchop*60)
                         if speed in line:
-                            change_speed = "F%d" % ((self.stealthchop-20)*60)
+                            change_speed = "F%d" % ((self.stealthchop-30)*60)
                             line = line.replace(speed, change_speed)
                             # self.gcode.respond_raw("Adjust stealthchop speed: %s to %s"%(speed,change_speed))
                     self.gcode.run_script(line)
