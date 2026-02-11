@@ -227,7 +227,7 @@ class LoadUnloadHandler:
         self.gcode.register_command('CONTINUE_LOAD', self.cmd_CONTINUE_LOAD, desc=self.cmd_CONTINUE_LOAD_help)
         self.gcode.register_command('CONFIRM_CLEANED', self.cmd_CONFIRM_CLEANED, desc=self.cmd_CONFIRM_CLEANED_help)
         self.gcode.register_command('EXIT_LOADUNLOAD', self.cmd_EXIT_LOADUNLOAD, desc=self.cmd_EXIT_LOADUNLOAD_help)
-        self.gcode.register_command('PREPARE_LOAD_UNLOAD_NOZZLE', self.cmd_PREPARE_LOAD_UNLOAD_NOZZLE, desc=self.cmd_PREPARE_LOAD_UNLOAD_NOZZE_help)
+        self.gcode.register_command('PREPARE_LOAD_UNLOAD_NOZZLE', self.cmd_PREPARE_LOAD_UNLOAD_NOZZLE, desc=self.cmd_PREPARE_LOAD_UNLOAD_NOZZLE_help)
         self.gcode.register_command('FINISH_LOADUNLOAD', self.cmd_FINISH_LOADUNLOAD, desc=self.cmd_FINISH_LOADUNLOAD_help)
 
         # 注意：filament_motion_sensor:filament_clog 事件只在 P1 进料时动态注册
