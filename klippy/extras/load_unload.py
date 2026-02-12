@@ -31,6 +31,7 @@
 # 9x: 结束状态
 #   90 = FINISHED          完成
 #   91 = CANCELLED         已取消
+#   98 = TIMEOUT           超时
 #   99 = ERROR             错误
 # ================================================
 
@@ -87,6 +88,7 @@ class State:
     # 结束状态
     FINISHED = 90          # 完成
     CANCELLED = 91         # 已取消
+    TIMEOUT = 98            # 进退料超时（整体超时）
     ERROR = 99             # 错误
 
 class OperationMode:
@@ -213,11 +215,17 @@ class LoadUnloadHandler:
         self.p1_unload_preloading_filament_speed = config.getfloat('p1_unload_preloading_filament_speed', 100.0) # P1退料预加载挤出速度 (mm/min)
         self.p1_unload_clean_retract_speed = config.getfloat('p1_unload_clean_retract_speed', 600.0)  # P1退料回抽速度 (mm/min)
 
+        # 进退料超时参数
+        self.load_unload_timeout = config.getfloat('load_unload_timeout', 900., above=0.)  # 进退料整体超时时间（秒），默认900（15分钟）
+        self.load_unload_idle_timeout_extension = config.getfloat('load_unload_idle_timeout_extension', 3600., above=0.)  # idle_timeout扩展时间（秒），默认3600（1小时）
+
         # ========================================================
         # 定时器引用
         # ========================================================
         self.process_timer = None  # 核心处理定时器（处理进料/退料循环）
         self.temp_timer = None     # 温度等待定时器（处理温度达标检测）
+        self.load_unload_timer = None  # 进退料整体超时定时器
+        self.saved_idle_timeout = None   # 保存的原始 idle_timeout 值
 
         # ========================================================
         # 注册 G-code 命令
@@ -315,6 +323,9 @@ class LoadUnloadHandler:
         self.gcode.respond_info("filament_clog:check_stop")
 
         logger.debug(f"[LOAD_FILAMENT] Calling _prepare_load()")
+        # 扩展 idle_timeout 并启动超时定时器（在准备进料之前）
+        self._extend_idle_timeout()
+        self._start_load_unload_timer(self.load_unload_timeout)
         # 准备进料（移动到废料站、切换喷嘴等）
         self._prepare_load()
 
@@ -399,6 +410,9 @@ class LoadUnloadHandler:
         self._stop_process_timer()
         self._stop_timeout_timer()
 
+        # 扩展 idle_timeout 并启动超时定时器（在准备退料之前）
+        self._extend_idle_timeout()
+        self._start_load_unload_timer(self.load_unload_timeout)
         # 准备退料
         self._prepare_unload()
 
@@ -517,6 +531,49 @@ class LoadUnloadHandler:
         else:
             gcmd.respond_info(f"[{channel_name} LOAD] STATE:99 ERROR Invalid state")
 
+    def _exit_loadunload_on_timeout(self):
+        """
+        超时退出进出料流程（内部方法，不输出状态码）
+
+        功能：超时时退出当前进料/退料流程
+
+        执行操作:
+        1. 停止所有定时循环
+        2. 重置状态变量
+        3. 恢复最低挤出温度限制（F通道）
+        4. 关闭加热器
+        5. 关闭风扇
+        """
+        index = self.load_unload_index
+
+        # 停止所有定时循环
+        self._stop_process_timer()
+        self._stop_temp_timer()
+        self._stop_timeout_timer()
+        self._stop_load_unload_timer()
+        self._restore_idle_timeout()
+
+        # 停止P1堵料检测（如果已启动）
+        self.printer.send_event("filament_clog:check_stop")
+        self.gcode.respond_info("filament_clog:check_stop")
+
+        # 重置状态变量
+        self.operation_mode = OperationMode.IDLE
+        self.load_step = State.IDLE
+        self.user_confirmed = 0
+
+        # F通道需要恢复最低挤出温度限制
+        if index == Channel.F:
+            self.gcode.run_script_from_command("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=180")
+
+        # 关闭加热器
+        self.gcode.run_script_from_command("M104 T0 S0")
+        self.gcode.run_script_from_command("M104 T1 S0")
+
+        # 关闭风扇（所有通道）
+        self.gcode.run_script_from_command("M106 P1 S0")
+        self.gcode.run_script_from_command("M106 P2 S0")
+
     cmd_EXIT_LOADUNLOAD_help = "退出进出料流程"
     def cmd_EXIT_LOADUNLOAD(self, gcmd):
         """
@@ -539,6 +596,8 @@ class LoadUnloadHandler:
         self._stop_process_timer()
         self._stop_temp_timer()
         self._stop_timeout_timer()  # 停止超时定时器
+        self._stop_load_unload_timer()  # 停止进退料超时定时器
+        self._restore_idle_timeout()  # 恢复 idle_timeout
 
         # 停止P1堵料检测（如果已启动）
         self.printer.send_event("filament_clog:check_stop")
@@ -680,6 +739,71 @@ class LoadUnloadHandler:
         if self.p1_timeout_timer is not None:
             self.reactor.unregister_timer(self.p1_timeout_timer)
             self.p1_timeout_timer = None
+
+    def _start_load_unload_timer(self, delay):
+        """
+        启动进退料超时定时器
+
+        参数:
+            delay: 超时时间（秒）
+        """
+        self._stop_load_unload_timer()  # 先停止现有定时器
+        self.load_unload_timer = self.reactor.register_timer(
+            self._load_unload_timeout_handler, self.reactor.NOW
+        )
+        self.reactor.update_timer(self.load_unload_timer, self.reactor.monotonic() + delay)
+        logger.debug(f"[_start_load_unload_timer] Started {delay}s timeout")
+
+    def _stop_load_unload_timer(self):
+        """停止进退料超时定时器"""
+        if self.load_unload_timer is not None:
+            self.reactor.unregister_timer(self.load_unload_timer)
+            self.load_unload_timer = None
+            logger.debug("[_stop_load_unload_timer] Stopped")
+
+    def _extend_idle_timeout(self):
+        """
+        扩展 idle_timeout 超时时间，防止进退料期间触发空闲超时
+
+        功能：
+        1. 保存当前 idle_timeout 的超时时间
+        2. 设置新的超时时间为 load_unload_idle_timeout_extension
+        3. 如果处于 Ready 状态，更新定时器
+        """
+        try:
+            idle_timeout = self.printer.lookup_object('idle_timeout')
+            # 保存原始超时时间
+            if self.saved_idle_timeout is None:
+                self.saved_idle_timeout = idle_timeout.idle_timeout
+            # 设置扩展超时时间
+            idle_timeout.idle_timeout = self.load_unload_idle_timeout_extension
+            logger.info(f"[_extend_idle_timeout] Extended idle_timeout to {self.load_unload_idle_timeout_extension}s")
+            # 如果当前处于 Ready 状态，更新定时器以确保新超时时间生效
+            if hasattr(idle_timeout, 'state') and idle_timeout.state == "Ready":
+                checktime = self.reactor.monotonic() + self.load_unload_idle_timeout_extension
+                self.reactor.update_timer(idle_timeout.timeout_timer, checktime)
+                logger.debug(f"[_extend_idle_timeout] Updated idle_timeout timer")
+        except Exception as e:
+            logger.warning(f"[_extend_idle_timeout] Failed to extend idle_timeout: {e}")
+
+    def _restore_idle_timeout(self):
+        """
+        恢复 idle_timeout 原始超时时间
+
+        功能：
+        1. 检查是否保存了原始超时时间
+        2. 恢复原始超时时间
+        3. 清除保存的值
+        """
+        if self.saved_idle_timeout is not None:
+            try:
+                idle_timeout = self.printer.lookup_object('idle_timeout')
+                idle_timeout.idle_timeout = self.saved_idle_timeout
+                logger.info(f"[_restore_idle_timeout] Restored idle_timeout to {self.saved_idle_timeout}s")
+            except Exception as e:
+                logger.warning(f"[_restore_idle_timeout] Failed to restore idle_timeout: {e}")
+            finally:
+                self.saved_idle_timeout = None
 
     # ============================================================
     # 定时器处理函数
@@ -827,6 +951,41 @@ class LoadUnloadHandler:
 
         return self.reactor.NEVER
 
+    def _load_unload_timeout_handler(self, eventtime):
+        """
+        进退料超时处理函数
+
+        功能：
+        1. 发送超时状态码 98
+        2. 根据当前操作模式执行不同处理：
+           - P2 进料：先自动清理喷嘴，再调用退出流程
+           - F/P1 进料：直接调用退出流程
+           - 退料：直接调用退出流程
+        """
+        index = self.load_unload_index
+        channel_name = self._get_channel_name(index)
+        is_loading = self.operation_mode == OperationMode.LOADING
+
+        logger.warning(f"[_load_unload_timeout] Load/unload timeout for {channel_name}")
+
+        # 发送超时状态码
+        self.load_step = State.TIMEOUT
+        action = 'LOAD' if is_loading else 'UNLOAD'
+        self._send_state_code(98, 'TIMEOUT', channel_name, action)
+
+        if is_loading and index == Channel.P2:
+            # P2 进料超时：先执行自动清理喷嘴
+            self.gcode.respond_info(f"[{channel_name} LOAD] Timeout - Starting auto clean")
+            self._clean_nozzle()
+
+        # 调用超时退出流程（不输出状态码）
+        self._exit_loadunload_on_timeout()
+
+        # 恢复超时状态
+        self.load_step = State.TIMEOUT
+
+        return self.reactor.NEVER
+
     def _process_timer_handler(self, eventtime):
         """
         核心处理定时器
@@ -945,6 +1104,9 @@ class LoadUnloadHandler:
 
         功能：根据通道索引路由到对应的通道处理函数
         """
+        if self.operation_mode != OperationMode.LOADING:
+            return self.reactor.NEVER
+
         index = self.load_unload_index
 
         if index == Channel.P1:
@@ -1153,7 +1315,20 @@ class LoadUnloadHandler:
                     temp_ready_for_slow = (45.0 <= current_temp <= 55.0)
 
             # L=1: 跳过快挤出，直接进入慢速挤出（需温度达标）
-            if was_loaded == 1 and temp_ready_for_slow and not self.p1_slow_extrusion_entered:
+            if was_loaded == 1 and not self.p1_slow_extrusion_entered:
+                # 检查温度是否适合慢速挤出
+                if not temp_ready_for_slow:
+                    # 温度未达标，等待后继续检查（不设置 p1_slow_extrusion_entered）
+                    # 实时显示当前温度
+                    if current_temp > 55:
+                        self.gcode.respond_info(f"[{channel_name} LOAD] Cooling to 50°C... {current_temp:.0f}C (Fans ON)")
+                    elif current_temp < 45:
+                        self.gcode.respond_info(f"[{channel_name} LOAD] Heating to 50°C... {current_temp:.0f}C")
+                    else:
+                        self.gcode.respond_info(f"[{channel_name} LOAD] Waiting for 50°C... {current_temp:.0f}C")
+                    return eventtime + 1.0
+
+                # 温度达标，进入慢速挤出
                 # 立即标记已进入，防止后续逻辑再次执行
                 self.p1_slow_extrusion_entered = True
 
@@ -1171,6 +1346,13 @@ class LoadUnloadHandler:
                     # 当前距离已达标，检查温度是否适合慢速挤出
                     if not temp_ready_for_slow:
                         # 温度未达标，等待后继续检查（不设置 p1_slow_extrusion_entered）
+                        # 实时显示当前温度
+                        if current_temp > 55:
+                            self.gcode.respond_info(f"[{channel_name} LOAD] Cooling to 50°C... {current_temp:.0f}C (Fans ON)")
+                        elif current_temp < 45:
+                            self.gcode.respond_info(f"[{channel_name} LOAD] Heating to 50°C... {current_temp:.0f}C")
+                        else:
+                            self.gcode.respond_info(f"[{channel_name} LOAD] Waiting for 50°C... {current_temp:.0f}C")
                         return eventtime + 1.0
 
                     # 温度达标，进入慢速挤出（在真正转换时才设置标志）
@@ -1422,6 +1604,9 @@ class LoadUnloadHandler:
         - P1: V轴 (G1 V-xxx)
         - P2: E轴 (G1 E-xxx)
         """
+        if self.operation_mode != OperationMode.UNLOADING:
+            return self.reactor.NEVER
+
         index = self.load_unload_index
         channel_name = self._get_channel_name(index)
         load_step = self.load_step
@@ -1725,6 +1910,10 @@ class LoadUnloadHandler:
             self._stop_process_timer()
             self._stop_temp_timer()
             self._stop_timeout_timer()
+            self._stop_load_unload_timer()  # 停止进退料超时定时器
+            self._restore_idle_timeout()  # 恢复 idle_timeout
+            self._stop_temp_timer()
+            self._stop_timeout_timer()
             self.gcode.respond_info(f"[{channel_name} LOAD] STATE:41 AUTO_CLEANING")
 
             # 根据通道调用清理逻辑
@@ -1750,6 +1939,8 @@ class LoadUnloadHandler:
             self._stop_process_timer()
             self._stop_temp_timer()
             self._stop_timeout_timer()
+            self._stop_load_unload_timer()  # 停止进退料超时定时器
+            self._restore_idle_timeout()  # 恢复 idle_timeout
 
             # F通道退料完成，恢复最低挤出温度限制
             if index == Channel.F:
