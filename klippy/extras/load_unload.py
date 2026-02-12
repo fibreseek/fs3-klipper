@@ -1519,31 +1519,27 @@ class LoadUnloadHandler:
         eventtime = self.reactor.monotonic()
 
         logger.debug(f"[_prepare_load] print_stats.state={print_stats.state}")
-        # 只在standby模式下移动
-        if print_stats.state == "standby":
-            logger.debug("[_prepare_load] In standby mode, checking homed axes")
-            # 如果未归零，先归零
-            if "xyz" not in toolhead.get_status(eventtime)['homed_axes']:
-                logger.debug("[_prepare_load] Axes not homed, running G28")
-                self.gcode.run_script_from_command("G28")
+        logger.debug("[_prepare_load] In standby mode, checking homed axes")
+        # 如果未归零，先归零
+        if "xyz" not in toolhead.get_status(eventtime)['homed_axes']:
+            logger.debug("[_prepare_load] Axes not homed, running G28")
+            self.gcode.run_script_from_command("G28")
 
-            # 根据喷嘴选择移动到预装载位置
-            nozzle = self.load_unload_nozzle
-            logger.debug(f"[_prepare_load] nozzle={nozzle}, moving to preload position")
-            if nozzle == 0:
-                # T0左喷嘴
-                logger.debug("[_prepare_load] Running T0, MOVE_TO_WASTE_STATION, MOVE_LEFT_PRELOAD_POSITION")
-                self.gcode.run_script_from_command("T0")
-                self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
-                self.gcode.run_script_from_command("MOVE_LEFT_PRELOAD_POSITION")
-            else:
-                # T1右喷嘴
-                logger.debug("[_prepare_load] Running T1, MOVE_TO_WASTE_STATION, MOVE_RIGHT_PRELOAD_POSITION")
-                self.gcode.run_script_from_command("T1")
-                self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
-                self.gcode.run_script_from_command("MOVE_RIGHT_PRELOAD_POSITION")
+        # 根据喷嘴选择移动到预装载位置
+        nozzle = self.load_unload_nozzle
+        logger.debug(f"[_prepare_load] nozzle={nozzle}, moving to preload position")
+        if nozzle == 0:
+            # T0左喷嘴
+            logger.debug("[_prepare_load] Running T0, MOVE_TO_WASTE_STATION, MOVE_LEFT_PRELOAD_POSITION")
+            self.gcode.run_script_from_command("T0")
+            self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
+            self.gcode.run_script_from_command("MOVE_LEFT_PRELOAD_POSITION")
         else:
-            logger.debug(f"[_prepare_load] Not in standby mode (state={print_stats.state}), skipping movement")
+            # T1右喷嘴
+            logger.debug("[_prepare_load] Running T1, MOVE_TO_WASTE_STATION, MOVE_RIGHT_PRELOAD_POSITION")
+            self.gcode.run_script_from_command("T1")
+            self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
+            self.gcode.run_script_from_command("MOVE_RIGHT_PRELOAD_POSITION")
 
         # 激活对应的挤出机
         logger.debug("[_prepare_load] Calling PREPARE_LOAD_UNLOAD_NOZZLE")

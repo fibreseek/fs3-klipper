@@ -572,17 +572,6 @@ class VirtualSD:
             if 'square_corner_velocity' in velocity_limit:
                 vl_cmd += " SQUARE_CORNER_VELOCITY=%.1f" % velocity_limit['square_corner_velocity']
             gcode_script.append(vl_cmd)
-        
-        # 设置层信息
-        total_layer = file_info.get('total_layer')
-        if total_layer is not None:
-            gcode_script.append("SET_PRINT_STATS_INFO TOTAL_LAYER=%d" % total_layer)
-            gcmd.respond_raw("Total layer: %d" % (total_layer))
-
-        current_layer = file_info.get('current_layer')
-        if current_layer is not None:
-            gcode_script.append("SET_PRINT_STATS_INFO CURRENT_LAYER=%d" % current_layer)
-            gcmd.respond_raw("Current layer: %d" % (current_layer))
 
         # 等待喷嘴加热到位
         gcode_script.append("M118 [POWERLOSS] Preparing to heat nozzle T%d to %.1f°C" % (current_tool, pre_nozzle_temp))
@@ -702,6 +691,17 @@ class VirtualSD:
             gcode_script.append("M140 S%.1f" % bed_temp)
 
         current_tool = file_info.get('current_tool', 0)
+
+        # 设置层信息
+        total_layer = file_info.get('total_layer')
+        if total_layer is not None:
+            gcode_script.append("SET_PRINT_STATS_INFO TOTAL_LAYER=%d" % total_layer)
+            gcmd.respond_raw("Total layer: %d" % (total_layer))
+
+        current_layer = file_info.get('current_layer')
+        if current_layer is not None:
+            gcode_script.append("SET_PRINT_STATS_INFO CURRENT_LAYER=%d" % current_layer)
+            gcmd.respond_raw("Current layer: %d" % (current_layer))
         
         # Apply nozzle temperature
         pre_nozzle_temp = 180  # Default safe temp
@@ -1066,6 +1066,9 @@ class VirtualSD:
                             line = line.replace(speed, change_speed)
                             # self.gcode.respond_raw("Adjust stealthchop speed: %s to %s"%(speed,change_speed))
                     self.gcode.run_script(line)
+                    # Add a minimal delay after executing G-code to prevent "Timer too close" errors
+                    # Reduced from 1ms to 0.1ms to avoid stuttering during printing
+                    self.reactor.pause(self.reactor.monotonic() + 0.0001)  # 0.1ms delay
                 if not self.is_start_move and (line.startswith('G1') or line.startswith('G0')) :
                     self.gcode.respond_raw("Print move start: %s"%(line))
                     self.is_start_move = True
