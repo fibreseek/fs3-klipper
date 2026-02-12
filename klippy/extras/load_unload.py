@@ -1153,7 +1153,20 @@ class LoadUnloadHandler:
                     temp_ready_for_slow = (45.0 <= current_temp <= 55.0)
 
             # L=1: 跳过快挤出，直接进入慢速挤出（需温度达标）
-            if was_loaded == 1 and temp_ready_for_slow and not self.p1_slow_extrusion_entered:
+            if was_loaded == 1 and not self.p1_slow_extrusion_entered:
+                # 检查温度是否适合慢速挤出
+                if not temp_ready_for_slow:
+                    # 温度未达标，等待后继续检查（不设置 p1_slow_extrusion_entered）
+                    # 实时显示当前温度
+                    if current_temp > 55:
+                        self.gcode.respond_info(f"[{channel_name} LOAD] Cooling to 50°C... {current_temp:.0f}C (Fans ON)")
+                    elif current_temp < 45:
+                        self.gcode.respond_info(f"[{channel_name} LOAD] Heating to 50°C... {current_temp:.0f}C")
+                    else:
+                        self.gcode.respond_info(f"[{channel_name} LOAD] Waiting for 50°C... {current_temp:.0f}C")
+                    return eventtime + 1.0
+
+                # 温度达标，进入慢速挤出
                 # 立即标记已进入，防止后续逻辑再次执行
                 self.p1_slow_extrusion_entered = True
 
@@ -1171,6 +1184,13 @@ class LoadUnloadHandler:
                     # 当前距离已达标，检查温度是否适合慢速挤出
                     if not temp_ready_for_slow:
                         # 温度未达标，等待后继续检查（不设置 p1_slow_extrusion_entered）
+                        # 实时显示当前温度
+                        if current_temp > 55:
+                            self.gcode.respond_info(f"[{channel_name} LOAD] Cooling to 50°C... {current_temp:.0f}C (Fans ON)")
+                        elif current_temp < 45:
+                            self.gcode.respond_info(f"[{channel_name} LOAD] Heating to 50°C... {current_temp:.0f}C")
+                        else:
+                            self.gcode.respond_info(f"[{channel_name} LOAD] Waiting for 50°C... {current_temp:.0f}C")
                         return eventtime + 1.0
 
                     # 温度达标，进入慢速挤出（在真正转换时才设置标志）
