@@ -776,8 +776,8 @@ class VirtualSD:
         if z_height is not None:
             gcode_script.append("G1 Z%.3f F600" % z_height)
         
-        if current_tool == 1:
-            gcode_script.append("G1 E6 F600")  # 恢复挤出6mm以补偿预拉伸
+        # if current_tool == 1:
+        #     gcode_script.append("G1 E3 F600")  # 恢复挤出3mm以补偿预拉伸
 
         # Apply feedrate (print speed)
         feedrate = file_info.get('feedrate')
