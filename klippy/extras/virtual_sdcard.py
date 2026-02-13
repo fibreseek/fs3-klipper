@@ -52,6 +52,7 @@ class VirtualSD:
         self.p_pattern = re.compile(r'P([\d\.]+)')
         self.u_pattern = re.compile(r'\bU[\d\.\-]+\b')
         self.v_pattern = re.compile(r'\bV[\d\.\-]+\b')
+        self.f_pattern = re.compile(r'\bF([\d\.]+)\b')
         # Register commands
         self.gcode = self.printer.lookup_object('gcode')
         for cmd in ['M20', 'M21', 'M23', 'M24', 'M25', 'M26', 'M27', 'M39']:
@@ -932,6 +933,25 @@ class VirtualSD:
                     # Only V present
                     processed_lines.append(("SET_EXTRUDER_MODE S=2", True))  # Injected
             
+            # Adjust speed for stealthchop if applicable
+            if self.stealthchop > 100:
+                f_match = self.f_pattern.search(line)
+                if f_match:
+                    f_value = float(f_match.group(1))
+                    stealthchop_speed = self.stealthchop * 60
+                    
+                    # 条件1: F值等于stealthchop*60
+                    if f_value == stealthchop_speed:
+                        new_speed = (self.stealthchop - 20) * 60
+                        line = self.f_pattern.sub(f"F{int(new_speed)}", line)
+                        # self.gcode.respond_raw(f"Adjust stealthchop speed: F{int(f_value)} to F{int(new_speed)}")
+                    
+                    # 条件2: F值大于stealthchop*60且小于(stealthchop+20)*60
+                    elif stealthchop_speed < f_value < (self.stealthchop + 20) * 60:
+                        new_speed = (self.stealthchop + 20) * 60
+                        line = self.f_pattern.sub(f"F{int(new_speed)}", line)
+                        # self.gcode.respond_raw(f"Adjust speed in range: F{int(f_value)} to F{int(new_speed)}")
+
             processed_lines.append((line, False))  # Original line
         
         return processed_lines
@@ -1058,13 +1078,6 @@ class VirtualSD:
             try:
                 # logging.info("SD card line (%d): %s", self.file_position, repr(line))
                 if not line.startswith(';') and line.strip() != '':
-                    # Adjust speed for stealthchop if applicable
-                    if self.stealthchop > 100:
-                        speed = "F%d" % (self.stealthchop*60)
-                        if speed in line:
-                            change_speed = "F%d" % ((self.stealthchop-30)*60)
-                            line = line.replace(speed, change_speed)
-                            # self.gcode.respond_raw("Adjust stealthchop speed: %s to %s"%(speed,change_speed))
                     self.gcode.run_script(line)
                     # Add a minimal delay after executing G-code to prevent "Timer too close" errors
                     # Reduced from 1ms to 0.1ms to avoid stuttering during printing

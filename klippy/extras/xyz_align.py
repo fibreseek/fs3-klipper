@@ -268,7 +268,7 @@ class xyz_align:
         trigger_pos = toolhead.get_position()
         move_distance = 0
         move_step = -0.05 # mm
-        self.gcode.run_script_from_command("G1 Z%f F180\n" % (5+3*t))
+        self.gcode.run_script_from_command("G1 Z%f F180\n" % (5+5*t))
         self.gcode.run_script_from_command("M400\n")
         self.gcode.run_script_from_command("G91\n")
         for i in range(r):
@@ -395,28 +395,28 @@ class xyz_align:
             self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] T0 Z trigger failed, aborting.")
             return -1, -1, -1
         
-        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        self.gcode.run_script_from_command("G1 Z13 F600\n")
          # 测试t0 x y 光电触发位置
         trigger_t0_x0 = self.get_x_press_val_new(-1, range)
         if self.trigger_value != 1:
             self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] T0 X- trigger failed, aborting.")
             return -1, -1, -1
 
-        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        self.gcode.run_script_from_command("G1 Z12 F600\n")
         self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t0_offset_x, self.t0_offset_y))
         trigger_t0_x1 = self.get_x_press_val_new(1, range)
         if self.trigger_value != 1:
             self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] T0 X+ trigger failed, aborting.")
             return -1, -1, -1
 
-        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        self.gcode.run_script_from_command("G1 Z12 F600\n")
         self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t0_offset_x, self.t0_offset_y))
         trigger_t0_y0 = self.get_y_press_val_new(-1, range)
         if self.trigger_value != 1:
             self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] T0 Y- trigger failed, aborting.")
             return -1, -1, -1
 
-        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        self.gcode.run_script_from_command("G1 Z12 F600\n")
         self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t0_offset_x, self.t0_offset_y))
         trigger_t0_y1 = self.get_y_press_val_new(1, range)
         if self.trigger_value != 1:
@@ -435,27 +435,27 @@ class xyz_align:
             self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] T1 Z trigger failed, aborting.")
             return -1, -1, -1
 
-        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        self.gcode.run_script_from_command("G1 Z12 F600\n")
         trigger_t1_x0 = self.get_x_press_val_new(-1, range)
         if self.trigger_value != 1:
             self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] T1 X- trigger failed, aborting.")
             return -1, -1, -1
 
-        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        self.gcode.run_script_from_command("G1 Z12 F600\n")
         self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t1_offset_x, self.t1_offset_y))
         trigger_t1_x1 = self.get_x_press_val_new(1, range)
         if self.trigger_value != 1:
             self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] T1 X+ trigger failed, aborting.")
             return -1, -1, -1
 
-        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        self.gcode.run_script_from_command("G1 Z12 F600\n")
         self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t1_offset_x, self.t1_offset_y))
         trigger_t1_y0 = self.get_y_press_val_new(-1, range)
         if self.trigger_value != 1:
             self.gcode.respond_info("[NOZZLE_OFFSET_CALIBRATION] T1 Y- trigger failed, aborting.")
             return -1, -1, -1
 
-        self.gcode.run_script_from_command("G1 Z10 F600\n")
+        self.gcode.run_script_from_command("G1 Z12 F600\n")
         self.gcode.run_script_from_command("G1 X%.3f Y%.3f F3000\n" % (self.t1_offset_x, self.t1_offset_y))
         trigger_t1_y1 = self.get_y_press_val_new(1, range)
         if self.trigger_value != 1:
@@ -631,7 +631,7 @@ class xyz_align:
             return
         self.t0_offset_x = center_x0
         self.t0_offset_y = center_y0
-        self.offset_z = 8
+        self.offset_z = 10
 
         # 精准校准3遍，取中位数
         results = []
@@ -670,7 +670,7 @@ class xyz_align:
             return
         self.t1_offset_x = center_x1
         self.t1_offset_y = center_y1
-        self.offset_z = 10
+        self.offset_z = 12
 
         # 精准校准3遍，取中位数
         results = []

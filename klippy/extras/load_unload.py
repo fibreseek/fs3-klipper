@@ -166,10 +166,10 @@ class LoadUnloadHandler:
         # ========================================================
         # P1 通道参数 (中距离快速进料 + 熔融挤出)
         # ========================================================
-        self.p1_long_distance = config.getfloat('p1_long_distance', 1030.0)      # P1 快速进料距离 (mm)
+        self.p1_long_distance = config.getfloat('p1_long_distance', 1010.0)      # P1 快速进料距离 (mm)
         self.p1_melt_distance = config.getfloat('p1_melt_distance', 150.0)      # P1 熔融挤出距离 (mm)
         self.p1_step_length = config.getfloat('p1_step_length', 20.0)           # P1 快速进料步长 (mm) - 20mm @ 20mm/s = 1秒/步
-        self.p1_melt_step_length = config.getfloat('p1_melt_step_length', 5.0)   # P1 熔融挤出步长 (mm) - 5mm @ 5mm/s = 1秒/步
+        self.p1_melt_step_length = config.getfloat('p1_melt_step_length', 2.0)   # P1 熔融挤出步长 (mm) - 5mm @ 5mm/s = 1秒/步
 
         # ========================================================
         # P2 通道参数 (直接熔融挤出，无快速进料阶段)
@@ -213,7 +213,7 @@ class LoadUnloadHandler:
         # P1通道退料专用参数 (预加载挤出长度较小)
         self.p1_unload_preloading_filament_e = config.getfloat('p1_unload_preloading_filament_e', 2.0)  # P1退料预加载挤出长度 (mm)
         self.p1_unload_preloading_filament_speed = config.getfloat('p1_unload_preloading_filament_speed', 100.0) # P1退料预加载挤出速度 (mm/min)
-        self.p1_unload_clean_retract_speed = config.getfloat('p1_unload_clean_retract_speed', 600.0)  # P1退料回抽速度 (mm/min)
+        self.p1_unload_clean_retract_speed = config.getfloat('p1_unload_clean_retract_speed', 300.0)  # P1退料回抽速度 (mm/min)
 
         # 进退料超时参数
         self.load_unload_timeout = config.getfloat('load_unload_timeout', 900., above=0.)  # 进退料整体超时时间（秒），默认900（15分钟）
@@ -1431,7 +1431,7 @@ class LoadUnloadHandler:
             # 这里不需要再次等待，直接开始慢速挤出
 
             # 2mm逐毫米挤出
-            step_length = 5.0
+            step_length = self.p1_melt_step_length
             self.gcode.run_script_from_command("M83")
             self.gcode.run_script_from_command(f"G1 V{step_length} F100")  # V轴进料
             self.p1_slow_extrusion_distance += step_length
@@ -1757,9 +1757,11 @@ class LoadUnloadHandler:
             nozzle = self.load_unload_nozzle
             if nozzle == 0:
                 # T0左喷嘴
+                self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
                 self.gcode.run_script_from_command("MOVE_LEFT_PRELOAD_POSITION")
             else:
                 # T1右喷嘴
+                self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
                 self.gcode.run_script_from_command("MOVE_RIGHT_PRELOAD_POSITION")
 
         # 激活对应的挤出机
@@ -1805,8 +1807,8 @@ class LoadUnloadHandler:
             retract_e = self.unload_clean_retract_e
 
         # 预挤出耗材
-        self.gcode.run_script_from_command("G92 E0")
-        self.gcode.run_script_from_command(f"G1 E{preloading_filament_e} F{preloading_filament_speed}")
+        # self.gcode.run_script_from_command("G92 E0")
+        # self.gcode.run_script_from_command(f"G1 E{preloading_filament_e} F{preloading_filament_speed}")
         # 回抽耗材
         self.gcode.run_script_from_command("G92 E0")
         self.gcode.run_script_from_command(f"G1 E{retract_e} F{retract_speed}")
