@@ -166,7 +166,7 @@ class LoadUnloadHandler:
         # ========================================================
         # P1 通道参数 (中距离快速进料 + 熔融挤出)
         # ========================================================
-        self.p1_long_distance = config.getfloat('p1_long_distance', 1010.0)      # P1 快速进料距离 (mm)
+        self.p1_long_distance = config.getfloat('p1_long_distance', 1020.0)      # P1 快速进料距离 (mm)
         self.p1_melt_distance = config.getfloat('p1_melt_distance', 150.0)      # P1 熔融挤出距离 (mm)
         self.p1_step_length = config.getfloat('p1_step_length', 20.0)           # P1 快速进料步长 (mm) - 20mm @ 20mm/s = 1秒/步
         self.p1_melt_step_length = config.getfloat('p1_melt_step_length', 2.0)   # P1 熔融挤出步长 (mm) - 5mm @ 5mm/s = 1秒/步
@@ -1442,7 +1442,7 @@ class LoadUnloadHandler:
             elapsed_time = eventtime - self.p1_slow_extrusion_start_time
             self.gcode.respond_info(f"[{channel_name} LOAD] SLOW_EXTRUSION_CHECK_CLOG {self.p1_slow_extrusion_distance:.0f}mm ({elapsed_time:.0f}s)")
 
-            return eventtime + 3.0
+            return eventtime + 2.0
 
         # ============================================================
         # 阶段3: 堵料回退完成 (内部STATE:25 CLOG_RETRACTED)
@@ -1480,6 +1480,8 @@ class LoadUnloadHandler:
             self.gcode.run_script_from_command(f"M104 T{nozzle} S0")  # 关闭对应喷嘴温度
             self.gcode.run_script_from_command("M106 P1 S0")  # 关闭侧吹/喉管风扇
             self.gcode.run_script_from_command("M106 P2 S0")
+            self._stop_load_unload_timer()
+            self._restore_idle_timeout()
 
             return self.reactor.NEVER
 
