@@ -127,7 +127,6 @@ class VirtualSD:
             logging.info("Virtual sdcard (%d): %s\nUpcoming (%d): %s",
                          readpos, repr(data[:readcount]),
                          self.file_position, repr(data[readcount:]))
-    
     def get_zmove_value(self, z_move_val):
         if self.work_timer is not None and self.is_start_move:
             # self.gcode.respond_raw("get z move value %.3f"%(z_move_val))
@@ -422,6 +421,32 @@ class VirtualSD:
         # Check if powerloss file exists
         if self.powerloss_file_exist:
             gcmd.respond_raw("[POWERLOSS] Powerloss file exists. [FILE: %s]" % self.powerloss_progress.current_print_file)
+
+            powerloss_init_info = self.powerloss_progress.scan_init_paramaters_for_startup()
+            gcode_script = []
+            if powerloss_init_info:
+                # Apply bed temperature
+                bed_temp = powerloss_init_info.get('bed_temp')
+                if bed_temp is not None:
+                    gcode_script.append("M140 S%.1f" % bed_temp)
+                
+                # Apply chamber temperature
+                chamber_temp = powerloss_init_info.get('chamber_temp')
+                if chamber_temp is not None:
+                    gcode_script.append("M141 S%.1f" % chamber_temp)
+
+            # Execute all gcode commands
+            if gcode_script:
+                logging.info("VirtualSD: Applying recovery parameters for bed and chamber: %s", gcode_script)
+                for cmd in gcode_script:
+                    try:
+                        cmd = cmd + '\n'
+                        self.gcode.run_script_from_command(cmd)
+                    except Exception as e:
+                        logging.warning("Failed to execute recovery command %s: %s" % (cmd, str(e)))
+                        self.gcode.respond_raw("Warning: Failed to execute %s" % cmd)
+            else:
+                self.gcode.respond_raw("No recovery parameters to apply.")
         else:
             gcmd.respond_raw("[POWERLOSS] No powerloss file found.")
 

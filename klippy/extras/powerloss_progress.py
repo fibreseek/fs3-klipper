@@ -26,6 +26,29 @@ class PowerlossProgress():
         self.scan_callbacks = {}
         self.scan_counter = 0
         self.scan_lock = threading.Lock()
+        self.powerloss_info = {
+            'left_nozzle_temp': None,       # Nozzle temperatures by extruder index {0: temp_left, 1: temp_right}
+            'right_nozzle_temp': None,      # Nozzle temperatures by extruder index {0: temp_left, 1: temp_right
+            'bed_temp': None,         # Latest bed temperature
+            'chamber_temp': None,     # Latest chamber temperature
+            'acceleration': None,     # Latest acceleration value
+            'fan_speeds': {},         # Latest fan speeds by fan index
+            'z_height': None,         # Latest Z height
+            'current_tool': None,     # Current nozzle/tool (T0, T1, etc.)
+            'feedrate': None,         # Current print speed (F parameter)
+            'x_position': None,       # Current X position
+            'y_position': None,       # Current Y position
+            'extrusion': None,        # Current extrusion value (E parameter)
+            'extrusion_mode': None,   # Extrusion mode: 'absolute' (M82) or 'relative' (M83)
+            'movement_mode': None,    # Movement mode: 'absolute' (G90) or 'relative' (G91)
+            'pressure_advance': {},   # Pressure advance settings
+            'velocity_limit': {},     # Velocity limit settings
+            'gcode_lines': 0,         # Total gcode lines processed
+            'file_size': 0,           # Total file size in bytes
+            'scanned_bytes': 0,       # Total bytes scanned (may be less than file_size if stop_byte is used)
+            'total_layer': None,
+            'current_layer': None,
+        }
 
     def exit(self):
         self.bg_queue.put_nowait(None)
@@ -194,30 +217,8 @@ class PowerlossProgress():
         
         # Initialize data structures to store extracted information
         # We store only the latest values for each parameter
-        info = {
-            'left_nozzle_temp': None,       # Nozzle temperatures by extruder index {0: temp_left, 1: temp_right}
-            'right_nozzle_temp': None,      # Nozzle temperatures by extruder index {0: temp_left, 1: temp_right
-            'bed_temp': None,         # Latest bed temperature
-            'chamber_temp': None,     # Latest chamber temperature
-            'acceleration': None,     # Latest acceleration value
-            'fan_speeds': {},         # Latest fan speeds by fan index
-            'z_height': None,         # Latest Z height
-            'current_tool': None,     # Current nozzle/tool (T0, T1, etc.)
-            'feedrate': None,         # Current print speed (F parameter)
-            'x_position': None,       # Current X position
-            'y_position': None,       # Current Y position
-            'extrusion': None,        # Current extrusion value (E parameter)
-            'extrusion_mode': None,   # Extrusion mode: 'absolute' (M82) or 'relative' (M83)
-            'movement_mode': None,    # Movement mode: 'absolute' (G90) or 'relative' (G91)
-            'pressure_advance': {},   # Pressure advance settings
-            'velocity_limit': {},     # Velocity limit settings
-            'gcode_lines': 0,         # Total gcode lines processed
-            'file_size': 0,           # Total file size in bytes
-            'scanned_bytes': 0,       # Total bytes scanned (may be less than file_size if stop_byte is used)
-            'total_layer': None,
-            'current_layer': None,
-        }
-        
+
+        info = self.powerloss_info.copy()  # Start with existing info to preserve any previously extracted data
         try:
             file_size = os.path.getsize(self.current_print_file)
             info['file_size'] = file_size
@@ -543,6 +544,40 @@ class PowerlossProgress():
         except Exception:
             logging.exception("Failed to remove powerloss init file: %s" % self.powerloss_init_file)
         self.current_print_file = None
+
+    def scan_init_paramaters_for_startup(self, stop_byte=2000):
+        """Scan the print file for the latest bed and chamber temperature settings."""
+        info = self.powerloss_info.copy()  # Start with existing info to preserve any previously extracted data
+        try:
+            file_size = os.path.getsize(self.current_print_file)
+            if stop_byte > file_size:
+                stop_byte = file_size
+            with open(self.current_print_file, 'r') as f:
+                buffer = ''
+                chunk_size = 8192
+                total_bytes_read = 0
+                
+                while total_bytes_read < stop_byte:
+                    bytes_to_read = min(chunk_size, stop_byte - total_bytes_read)
+                    chunk = f.read(bytes_to_read)
+                    if not chunk:
+                        break
+                    
+                    total_bytes_read += len(chunk)
+                    buffer += chunk
+                    
+                    while '\n' in buffer:
+                        line, buffer = buffer.split('\n', 1)
+                        line = line.strip()
+                        
+                        if not line or line.startswith(';'):
+                            continue
+                        
+                        self._parse_gcode_line(line, info)
+        except Exception:
+            logging.exception("Failed to get print file size for bed/chamber temp scan")
+
+        return info
 
 MainPowerlossProgress = None
 
