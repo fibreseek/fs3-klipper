@@ -78,6 +78,7 @@ class State:
     PREHEAT_LOW = 23       # 低温预热中 (50°C)
     CLOG_DETECTION = 24    # 堵料检测中 (快速进料1000mm @ 20mm/s)
     CLOG_RETRACTED = 25    # 堵料回退完成 (回退10mm)
+    WAIT_MOMENT_FOR_FAST_MOVE = 26 # 等待时机进行快速移动（P1专用，进行快速移动）
     # 清理阶段
     WAIT_USER_CLEAN = 40   # 等待用户清理 (F/P1)
     AUTO_CLEANING = 41     # 自动擦嘴中
@@ -166,11 +167,13 @@ class LoadUnloadHandler:
         # ========================================================
         # P1 通道参数 (中距离快速进料 + 熔融挤出)
         # ========================================================
-        self.p1_long_distance = config.getfloat('p1_long_distance', 1020.0)      # P1 快速进料距离 (mm)
+        self.p1_long_distance = config.getfloat('p1_long_distance', 1035.0)      # P1 快速进料距离 (mm)
         self.p1_melt_distance = config.getfloat('p1_melt_distance', 150.0)      # P1 熔融挤出距离 (mm)
         self.p1_step_length = config.getfloat('p1_step_length', 20.0)           # P1 快速进料步长 (mm) - 20mm @ 20mm/s = 1秒/步
         self.p1_melt_step_length = config.getfloat('p1_melt_step_length', 2.0)   # P1 熔融挤出步长 (mm) - 5mm @ 5mm/s = 1秒/步
-
+        self.p1_fast_move_speed = config.getfloat('p1_fast_move_speed', 1200.0)  # P1 快速移动速度 (mm/min) - F1200 = 20mm/s
+        self.p1_slow_move_speed = config.getfloat('p1_slow_move_speed', 100.0)   # P1 慢速移动速度 (mm/min) - F100 = 2mm/s
+        self.p1_clog_detection_min_length = config.getfloat('p1_clog_detection_min_length', 16.0)  # P1 堵料检测最小挤出长度 (mm)，如果挤出距离超过这个值还未检测到堵料，则认为检测失败
         # ========================================================
         # P2 通道参数 (直接熔融挤出，无快速进料阶段)
         # ========================================================
@@ -703,9 +706,10 @@ class LoadUnloadHandler:
 
     def _start_process_timer(self, duration):
         """启动处理定时器（用于进料/退料核心循环）"""
-        self.process_timer = self.reactor.register_timer(
-            self._process_timer_handler, self.reactor.NOW
-        )
+        if self.process_timer is None:
+            self.process_timer = self.reactor.register_timer(
+                self._process_timer_handler, self.reactor.NOW
+            )
         self.reactor.update_timer(self.process_timer, self.reactor.monotonic() + duration)
 
     def _stop_process_timer(self):
@@ -1065,6 +1069,11 @@ class LoadUnloadHandler:
         if load_step != State.SLOW_EXTRUSION_CHECK_CLOG:
             logger.debug(f"[_handle_filament_clog] Not in slow extrusion state, current state={load_step}")
             return
+        
+        # 做一个最小长度限制
+        if self.p1_slow_extrusion_distance < self.p1_clog_detection_min_length:
+            logger.debug(f"[_handle_filament_clog] Extruded distance {self.p1_slow_extrusion_distance:.1f}mm is less than minimum threshold, ignoring clog event")
+            return
 
         # 新增：检查是否已经超时或完成，避免在超时后继续执行
         if self.operation_mode == OperationMode.IDLE or self.load_step in [State.FINISHED, State.ERROR, State.CLOG_RETRACTED]:
@@ -1261,15 +1270,21 @@ class LoadUnloadHandler:
             filament_sensor = self.printer.lookup_object('filament_switch_sensor filament_sensor_1', None)
             sensor_status = filament_sensor.get_status(eventtime) if filament_sensor else {}
             if filament_sensor and sensor_status.get('filament_detected', False):
-                # 检测到耗材，进入阶段2：进料中
-                self._send_state_code(12, 'DETECTED', channel_name)
-                self.load_step = State.CLOG_DETECTION
-                self.load_distance = 0.0
+                # 检测到耗材，等待2s再进料
+                self.load_step = State.WAIT_MOMENT_FOR_FAST_MOVE
                 # 启动核心处理定时器开始进料
-                self._start_process_timer(0.1)
+                self._start_process_timer(3.0)
+                return eventtime + 3.0
             # 未检测到耗材，继续等待
             return eventtime + 0.1
-
+        elif load_step == State.WAIT_MOMENT_FOR_FAST_MOVE:
+            # 检测到耗材，进入阶段2：进料中
+            self._send_state_code(12, 'DETECTED', channel_name)
+            self.load_step = State.CLOG_DETECTION
+            self.load_distance = 0.0
+            # 启动核心处理定时器开始进料
+            self._start_process_timer(0.1)
+            return eventtime + 0.1
         # ============================================================
         # 阶段2: 进料中 (内部STATE:24 CLOG_DETECTION, 21 SLOW_EXTRUSION)
         # 后台: 50°C预热 + 堵料检测下的快速进料p1_long_distance (L=0) 或 跳过进入慢速挤出 (L=1)
@@ -1373,7 +1388,7 @@ class LoadUnloadHandler:
                 step_length = min(20.0, remaining_distance)  # 取20mm和剩余距离的较小值
 
                 self.gcode.run_script_from_command("M83")
-                self.gcode.run_script_from_command(f"G1 V{step_length} F{step_length * 60}")  # V轴进料
+                self.gcode.run_script_from_command(f"G1 V{step_length} F{self.p1_fast_move_speed}")  # V轴进料
                 self.load_distance += step_length
                 current_distance = self.load_distance
 
@@ -1401,7 +1416,7 @@ class LoadUnloadHandler:
             # 2mm逐毫米挤出
             step_length = 1.0
             self.gcode.run_script_from_command("M83")
-            self.gcode.run_script_from_command(f"G1 V{step_length} F100")  # V轴进料
+            self.gcode.run_script_from_command(f"G1 V{step_length} F{self.p1_slow_move_speed}")  # V轴进料
             self.p1_slow_extrusion_distance += step_length
 
             toolhead = self.printer.lookup_object('toolhead')
@@ -1433,7 +1448,7 @@ class LoadUnloadHandler:
             # 2mm逐毫米挤出
             step_length = self.p1_melt_step_length
             self.gcode.run_script_from_command("M83")
-            self.gcode.run_script_from_command(f"G1 V{step_length} F100")  # V轴进料
+            self.gcode.run_script_from_command(f"G1 V{step_length} F{self.p1_slow_move_speed}")  # V轴进料
             self.p1_slow_extrusion_distance += step_length
 
             toolhead = self.printer.lookup_object('toolhead')
