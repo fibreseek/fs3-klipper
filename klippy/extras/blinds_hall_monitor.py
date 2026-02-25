@@ -322,12 +322,12 @@ class BlindsHallMonitor:
         try:
             # 获取加热器对象
             heater_name = "chamber"
-            heater = self.printer.lookup_object('heater').heaters.get(heater_name)
-            if not heater:
-                try:
-                    heater = self.printer.lookup_object('heater extruder')
-                except:
-                    raise Exception("Heater 'extruder' not found")
+            full_heater_name = 'heater_generic ' + heater_name
+
+            try:
+                heater = self.printer.lookup_object(full_heater_name)
+            except:
+                raise Exception("Heater 'extruder' not found")
             
             # 设置等待超时
             start_time = self.reactor.monotonic()
@@ -338,13 +338,9 @@ class BlindsHallMonitor:
                 if elapsed_time > timeout:
                     raise Exception("Heater timeout: Failed to reach target temperature in %d seconds" % timeout)
                 
-                # 获取当前温度
-                if hasattr(heater, 'get_temp'):
-                    temp, target = heater.get_temp(current_time)
-                else:
-                    status = heater.get_status(current_time)
-                    temp = status.get('temperature', 0)
-                    target = status.get('target', 0)
+                status = heater.get_status(current_time)
+                temp = status.get('temperature', 0)
+                target = status.get('target', 0)
                 
                 if abs(temp - target_temp) <= 2:
                     break
