@@ -15,6 +15,7 @@ class BlindsHallMonitor:
         self.recovery_timeout = config.getfloat('recovery_timeout', 60.0, above=0.0)
         self.check_interval = config.getfloat('check_interval', 0.5, above=0.0)
         self.cooling_fan_delay = config.getfloat('cooling_fan_delay', 60.0, above=0.0)  # 风扇延迟关闭时间
+        self.temperature_tolerance = config.getfloat('temperature_tolerance', 15.0, above=0.0)  # 温度等待容忍度，默认15度
         
         # 状态管理
         self.monitoring_active = False
@@ -342,7 +343,8 @@ class BlindsHallMonitor:
                 temp = status.get('temperature', 0)
                 target = status.get('target', 0)
                 
-                if abs(temp - target_temp) <= 2:
+                # 使用配置的温度容忍度
+                if abs(temp - target_temp) <= self.temperature_tolerance:
                     break
                 
                 # 等待一小段时间再检查
@@ -502,7 +504,8 @@ class BlindsHallMonitor:
             self.gcode.run_script_from_command(heater_command)
             
             # 等待加热完成
-            gcmd.respond_info("M191: Waiting for temperature to reach %.1f°C..." % temperature)
+            gcmd.respond_info("M191: Waiting for temperature to reach %.1f°C (tolerance: ±%.1f°C)..." % 
+                            (temperature, self.temperature_tolerance))
             self._wait_for_temperature(temperature)
             gcmd.respond_info("M191: Temperature reached %.1f°C" % temperature)
             
@@ -537,7 +540,8 @@ class BlindsHallMonitor:
             
             if wait_for_temp:
                 # M191 S0: 等待温度冷却，然后启动风扇延迟
-                gcmd.respond_info("M191 S0: Waiting for temperature to cool down to 30°C...")
+                gcmd.respond_info("M191 S0: Waiting for temperature to cool down to 30°C (tolerance: ±%.1f°C)..." % 
+                                self.temperature_tolerance)
                 self._wait_for_temperature(30.0, timeout=600)
                 gcmd.respond_info("M191 S0: Temperature cooled down to 30°C")
                 
@@ -593,7 +597,8 @@ class BlindsHallMonitor:
             'current_state': current_state,
             'sensor1_state': sensor1_state,
             'sensor2_state': sensor2_state,
-            'cooling_fan_delay': self.cooling_fan_delay
+            'cooling_fan_delay': self.cooling_fan_delay,
+            'temperature_tolerance': self.temperature_tolerance  # 添加温度容忍度到状态信息
         }
         
         if self.monitoring_active or self.recovery_mode_active:
