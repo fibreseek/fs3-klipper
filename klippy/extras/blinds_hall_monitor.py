@@ -262,11 +262,23 @@ class BlindsHallMonitor:
         if not self._validate_state_change(current_state, target_state):
             return
         
-        # 如果已经是目标状态且不是异常状态，直接返回，不启动监控
         if current_state == target_state:
-            logging.info(f"BlindsHallMonitor: Already in target state {target_state}, no monitoring needed")
+            logging.info(f"BlindsHallMonitor: Already shows {target_state}, but will execute action to verify")
+            
+            # 保存初始状态
+            self.initial_state = current_state
+            self.expected_final_state = target_state
+            self.expected_state_change_time = self.reactor.monotonic() + self.state_change_timeout
+            self.last_sensor1_state = sensor1_state
+            self.last_sensor2_state = sensor2_state
+            self.monitoring_active = True
+            self.recovery_mode_active = False
+            
+            # 启动监控循环
+            self._start_monitoring_loop()
             return
         
+        # 正常监控逻辑：不在目标状态
         self.initial_state = current_state
         self.expected_final_state = target_state
         self.expected_state_change_time = self.reactor.monotonic() + self.state_change_timeout
