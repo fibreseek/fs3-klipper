@@ -60,7 +60,12 @@ class AnisoTempCompensation:
         if limit_t is not None:
             self.limit_t = limit_t
 
-    def receive(self, matrix_p):
+    def receive(self, matrix_p, temp_now):
+        # 更新为实测热床温度
+        if temp_now is not None:
+            idx = len(self.val_z)
+            self.val_t[idx] = temp_now
+
         # 注意 matrix_p 是 (ny,nx) 形状的二维数组
         self.val_z.append(matrix_p)
         self.built = False

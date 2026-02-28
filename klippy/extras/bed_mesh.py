@@ -947,6 +947,11 @@ class BedMeshCalibrate:
     def cmd_BED_MESH_TEMP(self, gcmd):
         flag = gcmd.get_int('P', 0)
         if flag == 1:
+            temp_now = None
+            heater_bed = self.printer.lookup_object("heater_bed", None)
+            if heater_bed is not None: # ["target"]期望温度, ["temperature"]实测温度
+                temp_now = heater_bed.get_status(0)["temperature"]
+
             z_mesh = self.bedmesh.get_mesh()
             probed_matrix = z_mesh.get_probed_matrix()
             if self.temp_cpst is None: # 仅在有需要时再实例化
@@ -954,7 +959,7 @@ class BedMeshCalibrate:
                     self.mesh_min, self.mesh_max,
                     self.mesh_config['x_count'],
                     self.mesh_config['y_count'])
-            self.temp_cpst.receive(probed_matrix)
+            self.temp_cpst.receive(probed_matrix, temp_now)
         elif flag == 2:
             def clean():
                 self.temp_cpst = None # 使用完毕，及时释放内存
