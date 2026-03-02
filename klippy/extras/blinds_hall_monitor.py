@@ -1,4 +1,5 @@
 import logging
+import traceback
 
 class BlindsHallMonitor:
     def __init__(self, config):
@@ -9,13 +10,15 @@ class BlindsHallMonitor:
         # 获取霍尔传感器对象名称
         self.sensor1_name = "filament_switch_sensor blinds_hall_sensor1"
         self.sensor2_name = "filament_switch_sensor blinds_hall_sensor2"
+        self.door_sensor_name = "filament_switch_sensor door_hall_sensor"
         
         # 配置参数
         self.state_change_timeout = config.getfloat('state_change_timeout', 60.0, above=0.0)
         self.recovery_timeout = config.getfloat('recovery_timeout', 60.0, above=0.0)
         self.check_interval = config.getfloat('check_interval', 0.5, above=0.0)
-        self.cooling_fan_delay = config.getfloat('cooling_fan_delay', 60.0, above=0.0)  # 风扇延迟关闭时间
-        self.temperature_tolerance = config.getfloat('temperature_tolerance', 15.0, above=0.0)  # 温度等待容忍度，默认15度
+        self.cooling_fan_delay = config.getfloat('cooling_fan_delay', 60.0, above=0.0)
+        self.temperature_tolerance = config.getfloat('temperature_tolerance', 15.0, above=0.0)
+        self.door_check_interval = config.getfloat('door_check_interval', 5.0, above=0.0)
         
         # 状态管理
         self.monitoring_active = False
@@ -25,9 +28,19 @@ class BlindsHallMonitor:
         self.initial_state = None
         self.monitoring_timer = None
         
+        # 门检测相关
+        self.door_monitoring_active = False
+        self.last_door_check_time = None
+        self.door_alert_sent = False
+        
+        # 加热相关 - 只要温度>0就为True
+        self.heating_active = False
+        self.current_target_temp = 0.0  # 当前目标温度
+        
         # 当前状态缓存
         self.last_sensor1_state = None
         self.last_sensor2_state = None
+        self.last_door_sensor_state = None
         
         # 冷却风扇定时器
         self.cooling_fan_timer = None
@@ -43,6 +56,11 @@ class BlindsHallMonitor:
             'STOP_BLINDS_MONITOR', 
             self.cmd_STOP_BLINDS_MONITOR,
             desc=self.cmd_STOP_BLINDS_MONITOR_help
+        )
+        self.gcode.register_command(
+            'STOP_DOOR_MONITOR', 
+            self.cmd_STOP_DOOR_MONITOR,
+            desc=self.cmd_STOP_DOOR_MONITOR_help
         )
 
         self.gcode.register_command(
@@ -63,6 +81,7 @@ class BlindsHallMonitor:
         try:
             sensor1 = self.printer.lookup_object(self.sensor1_name)
             sensor2 = self.printer.lookup_object(self.sensor2_name)
+            door_sensor = self.printer.lookup_object(self.door_sensor_name)
             logging.info("BlindsHallMonitor: Sensors initialized successfully")
         except Exception as e:
             logging.error("BlindsHallMonitor: Failed to find sensors: %s" % str(e))
@@ -71,55 +90,155 @@ class BlindsHallMonitor:
         try:
             sensor1 = self.printer.lookup_object(self.sensor1_name)
             sensor2 = self.printer.lookup_object(self.sensor2_name)
+            door_sensor = self.printer.lookup_object(self.door_sensor_name)
             
-            # 获取传感器状态
             eventtime = self.reactor.monotonic()
             status1 = sensor1.get_status(eventtime)
             status2 = sensor2.get_status(eventtime)
+            status_door = door_sensor.get_status(eventtime)
             
             return (
                 bool(status1.get('filament_detected', False)),
-                bool(status2.get('filament_detected', False))
+                bool(status2.get('filament_detected', False)),
+                bool(status_door.get('filament_detected', False))
             )
         except Exception as e:
             logging.error("BlindsHallMonitor: Failed to get sensor states: %s" % str(e))
-            return None, None
+            return None, None, None
     
     def _get_blinds_state(self, sensor1_state, sensor2_state):
         if sensor1_state is None or sensor2_state is None:
             return "UNKNOWN"
         
         if sensor1_state and not sensor2_state:
-            return "OPEN"  # 开门状态
+            return "OPEN"
         elif not sensor1_state and sensor2_state:
-            return "CLOSED"  # 关门状态
+            return "CLOSED"
         elif sensor1_state and sensor2_state:
-            return "BOTH_HIGH"  # 异常状态
+            return "BOTH_HIGH"
         else:
-            return "BOTH_LOW"  # 异常状态
+            return "BOTH_LOW"
+    
+    def _check_door_sensor_during_heating(self):
+        """
+        加热过程中的门传感器检查 - 每5秒检查一次
+        """
+        if not self.door_monitoring_active or not self.heating_active:
+            return
+        
+        current_time = self.reactor.monotonic()
+        
+        # 检查是否需要执行门检测
+        if (self.last_door_check_time is not None and 
+            current_time - self.last_door_check_time < self.door_check_interval):
+            return
+        
+        # 更新上次检测时间
+        self.last_door_check_time = current_time
+        
+        # 获取门传感器状态
+        sensor1_state, sensor2_state, door_state = self._get_sensor_states()
+        
+        if door_state is None:
+            logging.error("BlindsHallMonitor: Failed to get door sensor state during heating")
+            return
+        
+        # 记录门状态变化
+        if self.last_door_sensor_state != door_state:
+            logging.info(f"BlindsHallMonitor: Door state changed from {self.last_door_sensor_state} to {door_state}")
+        
+        self.last_door_sensor_state = door_state
+        
+        if not door_state:  # 低电平 - 门打开
+            if not self.door_alert_sent:
+                warning_msg = f"Door opened during heating! Sensor is LOW - Sending alert"
+                logging.warning("BlindsHallMonitor: " + warning_msg)
+                self.gcode.respond_info("WARNING: " + warning_msg)
+                
+                try:
+                    self.gcode.run_script_from_command("PRINTED_DOOR_DETECTION")
+                    logging.info("BlindsHallMonitor: Sent PRINTED_DOOR_DETECTION macro (door opened during heating)")
+                    self.door_alert_sent = True
+                except Exception as e:
+                    logging.error(f"BlindsHallMonitor: Failed to send PRINTED_DOOR_DETECTION macro: {str(e)}")
+            else:
+                logging.debug("BlindsHallMonitor: Door still open during heating (alert already sent)")
+        else:  # 高电平 - 门关闭
+            if self.door_alert_sent:
+                info_msg = "Door closed during heating - Resetting alert flag"
+                logging.info("BlindsHallMonitor: " + info_msg)
+                self.gcode.respond_info("INFO: " + info_msg)
+                self.door_alert_sent = False
+            else:
+                logging.debug("BlindsHallMonitor: Door remains closed during heating")
+    
+    def _start_door_monitoring(self):
+        """启动门检测（立即执行第一次检查）"""
+        self.door_monitoring_active = True
+        self.heating_active = True
+        self.last_door_check_time = self.reactor.monotonic()
+        self.door_alert_sent = False
+        
+        # 立即执行第一次检查
+        self._check_door_sensor_during_heating()
+        
+        logging.info("BlindsHallMonitor: Door monitoring started (check interval: %.1fs)" % self.door_check_interval)
+        # 确保监控循环在运行
+        self._start_monitoring_loop()
+    
+    def _stop_door_monitoring(self):
+        """停止门检测"""
+        if self.door_monitoring_active or self.heating_active:
+            logging.info("BlindsHallMonitor: Door monitoring stopped - Call stack:\n" + 
+                        ''.join(traceback.format_stack()))
+        self.door_monitoring_active = False
+        self.heating_active = False
+        self.last_door_check_time = None
+        self.door_alert_sent = False
+    
+    def _check_heater_status(self):
+        """检查加热器状态，如果目标温度为0则停止加热标志"""
+        try:
+            heater_name = "chamber"
+            full_heater_name = 'heater_generic ' + heater_name
+            heater = self.printer.lookup_object(full_heater_name)
+            
+            eventtime = self.reactor.monotonic()
+            status = heater.get_status(eventtime)
+            target = status.get('target', 0)
+
+            logging.info(f"BlindsHallMonitor: Heater check - target={target}, heating_active={self.heating_active}")
+            
+            # 如果目标温度为0，且加热标志为True，则停止加热标志
+            if target <= 0 and self.heating_active:
+                logging.info("BlindsHallMonitor: Heater target is 0, stopping heating flag")
+                self.heating_active = False
+                
+            # 更新当前目标温度
+            self.current_target_temp = target
+            
+        except Exception as e:
+            logging.error(f"BlindsHallMonitor: Failed to check heater status: {str(e)}")
     
     def _start_recovery_mode(self, initial_state):
         self.gcode.respond_info("BlindsHallMonitor: Starting recovery mode for initial state: %s" % initial_state)
         
-        # 关闭传感器电机
         self.gcode.run_script_from_command("SET_PIN PIN=SENSOR_MOTOR VALUE=0.00")
         self.gcode.respond_info("BlindsHallMonitor: Turned off sensor motor")
         
-        # 设置恢复模式参数
         self.recovery_mode_active = True
         self.expected_final_state = "CLOSED"
         self.expected_state_change_time = self.reactor.monotonic() + self.recovery_timeout
         self.initial_state = initial_state
         
-        # 获取当前状态
-        sensor1_state, sensor2_state = self._get_sensor_states()
+        sensor1_state, sensor2_state, door_state = self._get_sensor_states()
         self.last_sensor1_state = sensor1_state
         self.last_sensor2_state = sensor2_state
+        self.last_door_sensor_state = door_state
         
         logging.info("BlindsHallMonitor: Recovery mode started, waiting %.1f seconds for CLOSED state" % 
                     self.recovery_timeout)
         
-        # 启动监控循环
         self._start_monitoring_loop()
     
     def _check_recovery_state(self):
@@ -127,32 +246,28 @@ class BlindsHallMonitor:
             return
         
         current_time = self.reactor.monotonic()
-        sensor1_state, sensor2_state = self._get_sensor_states()
+        sensor1_state, sensor2_state, door_state = self._get_sensor_states()
         
         if sensor1_state is None or sensor2_state is None:
             return
         
-        # 获取当前百叶窗状态
         current_blinds_state = self._get_blinds_state(sensor1_state, sensor2_state)
         
-        # 更新状态缓存
         state_changed = (sensor1_state != self.last_sensor1_state or 
                         sensor2_state != self.last_sensor2_state)
         
         if state_changed:
             logging.info("BlindsHallMonitor: State changed to %s during recovery" % current_blinds_state)
             
-            # 更新最后状态
             self.last_sensor1_state = sensor1_state
             self.last_sensor2_state = sensor2_state
+            self.last_door_sensor_state = door_state
             
-            # 检查是否达到预期状态
             if current_blinds_state == self.expected_final_state:
                 logging.info("BlindsHallMonitor: Recovery successful, reached CLOSED state")
                 self._stop_monitoring()
                 return
         
-        # 检查恢复超时
         if current_time > self.expected_state_change_time:
             error_msg = "Louver closing failure. Please inspect the drive unit."
             logging.error(error_msg)
@@ -167,9 +282,7 @@ class BlindsHallMonitor:
         return True
     
     def _validate_state_change(self, initial_state, target_state):
-        # 如果初始状态已经是目标状态
         if initial_state == target_state:
-            # 如果初始状态是异常状态，则报错
             if initial_state in ["BOTH_HIGH", "BOTH_LOW", "UNKNOWN"]:
                 error_msg = "Louver state exception. Please inspect the drive unit."
                 logging.error(error_msg)
@@ -177,7 +290,6 @@ class BlindsHallMonitor:
                 self.printer.invoke_shutdown(error_msg)
                 return False
             else:
-                # 如果是正常的OPEN或CLOSED状态，返回True表示验证通过，但监控会提前结束
                 return True
         return True
     
@@ -189,44 +301,35 @@ class BlindsHallMonitor:
             self._check_recovery_state()
             return
         
-        # 正常状态变化检查逻辑
         current_time = self.reactor.monotonic()
-        sensor1_state, sensor2_state = self._get_sensor_states()
+        sensor1_state, sensor2_state, door_state = self._get_sensor_states()
         
         if sensor1_state is None or sensor2_state is None:
             return
         
-        # 获取当前百叶窗状态
         current_blinds_state = self._get_blinds_state(sensor1_state, sensor2_state)
         
-        # 检查是否处于异常状态
-        # if current_blinds_state in ["BOTH_HIGH", "BOTH_LOW"]:
-        #     error_msg = "Louver state exception. Please inspect the drive unit."
-        #     logging.error(error_msg)
-        #     self.gcode.respond_info("ERROR: " + error_msg)
-        #     self.printer.invoke_shutdown(error_msg)
-        #     self._stop_monitoring()
-        #     return
-        
-        # 更新状态缓存
         state_changed = (sensor1_state != self.last_sensor1_state or 
                         sensor2_state != self.last_sensor2_state)
         
         if state_changed:
             logging.info("BlindsHallMonitor: State changed to %s" % current_blinds_state)
             
-            # 更新最后状态
             self.last_sensor1_state = sensor1_state
             self.last_sensor2_state = sensor2_state
+            self.last_door_sensor_state = door_state
             
-            # 检查是否达到预期状态
             if (self.expected_final_state is not None and 
                 current_blinds_state == self.expected_final_state):
                 logging.info("BlindsHallMonitor: Expected state reached successfully")
-                self._stop_monitoring()
+                # 只停止百叶窗监控，不停止门检测
+                self.monitoring_active = False
+                self.recovery_mode_active = False
+                self.expected_state_change_time = None
+                self.expected_final_state = None
+                self.initial_state = None
                 return
         
-        # 检查超时
         if (self.expected_state_change_time is not None and 
             current_time > self.expected_state_change_time):
             if self.expected_final_state == "CLOSED":
@@ -253,7 +356,7 @@ class BlindsHallMonitor:
             logging.info("BlindsHallMonitor: Monitoring loop stopped")
     
     def _start_state_change_monitoring(self, target_state):
-        sensor1_state, sensor2_state = self._get_sensor_states()
+        sensor1_state, sensor2_state, door_state = self._get_sensor_states()
         current_state = self._get_blinds_state(sensor1_state, sensor2_state)
         
         if not self._validate_initial_state(current_state):
@@ -265,49 +368,68 @@ class BlindsHallMonitor:
         if current_state == target_state:
             logging.info(f"BlindsHallMonitor: Already shows {target_state}, but will execute action to verify")
             
-            # 保存初始状态
             self.initial_state = current_state
             self.expected_final_state = target_state
             self.expected_state_change_time = self.reactor.monotonic() + self.state_change_timeout
             self.last_sensor1_state = sensor1_state
             self.last_sensor2_state = sensor2_state
+            self.last_door_sensor_state = door_state
             self.monitoring_active = True
             self.recovery_mode_active = False
             
-            # 启动监控循环
             self._start_monitoring_loop()
             return
         
-        # 正常监控逻辑：不在目标状态
         self.initial_state = current_state
         self.expected_final_state = target_state
         self.expected_state_change_time = self.reactor.monotonic() + self.state_change_timeout
         self.last_sensor1_state = sensor1_state
         self.last_sensor2_state = sensor2_state
+        self.last_door_sensor_state = door_state
         self.monitoring_active = True
         self.recovery_mode_active = False
         
         logging.info("BlindsHallMonitor: Monitoring state change from %s to %s, timeout: %.1fs" % 
                     (current_state, target_state, self.state_change_timeout))
         
-        # 启动监控循环
         self._start_monitoring_loop()
     
     def _stop_monitoring(self):
+        """完全停止所有监控（包括门检测）- 用于紧急情况"""
+        logging.info("BlindsHallMonitor: _stop_monitoring called - Call stack:\n" + 
+                    ''.join(traceback.format_stack()))
         self.monitoring_active = False
         self.recovery_mode_active = False
         self.expected_state_change_time = None
         self.expected_final_state = None
         self.initial_state = None
         self._stop_monitoring_loop()
-        logging.info("BlindsHallMonitor: Monitoring stopped")
+        self._stop_door_monitoring()
     
     def _monitoring_loop(self, eventtime):
-        if self.monitoring_active or self.recovery_mode_active:
-            self._check_state_change()
+        # 定期检查加热器状态
+        self._check_heater_status()
+        
+        logging.debug(f"BlindsHallMonitor: Loop - monitoring_active={self.monitoring_active}, "
+                     f"recovery_mode_active={self.recovery_mode_active}, "
+                     f"heating_active={self.heating_active}, "
+                     f"door_monitoring_active={self.door_monitoring_active}, "
+                     f"target_temp={self.current_target_temp}")
+        
+        if self.monitoring_active or self.recovery_mode_active or self.heating_active:
+            # 检查百叶窗状态变化（如果激活）
+            if self.monitoring_active or self.recovery_mode_active:
+                self._check_state_change()
+            
+            # 如果门检测激活且正在加热，检查门状态
+            if self.door_monitoring_active and self.heating_active:
+                self._check_door_sensor_during_heating()
+            
             return eventtime + self.check_interval
         else:
-            self._stop_monitoring_loop()
+            if self.monitoring_timer is not None:
+                logging.info("BlindsHallMonitor: No active monitoring, stopping loop")
+                self._stop_monitoring_loop()
             return self.reactor.NEVER
     
     def start_open_to_close_monitoring(self):
@@ -331,64 +453,24 @@ class BlindsHallMonitor:
         
         return params
     
-    def _wait_for_temperature(self, target_temp, timeout=300):
-        try:
-            # 获取加热器对象
-            heater_name = "chamber"
-            full_heater_name = 'heater_generic ' + heater_name
-
-            try:
-                heater = self.printer.lookup_object(full_heater_name)
-            except:
-                raise Exception("Heater 'extruder' not found")
-            
-            # 设置等待超时
-            start_time = self.reactor.monotonic()
-            while True:
-                current_time = self.reactor.monotonic()
-                elapsed_time = current_time - start_time
-                
-                if elapsed_time > timeout:
-                    raise Exception("Heater timeout: Failed to reach target temperature in %d seconds" % timeout)
-                
-                status = heater.get_status(current_time)
-                temp = status.get('temperature', 0)
-                target = status.get('target', 0)
-                
-                # 使用配置的温度容忍度
-                if abs(temp - target_temp) <= self.temperature_tolerance:
-                    break
-                
-                # 等待一小段时间再检查
-                self.reactor.pause(current_time + 1.0)
-                
-        except Exception as e:
-            logging.error("Temperature wait error: %s" % str(e))
-            raise
-    
     def _start_cooling_fan_delay(self, gcmd):
         """启动风扇延迟关闭定时器"""
-        # 停止现有的冷却定时器
         if self.cooling_fan_timer is not None:
             self.reactor.unregister_timer(self.cooling_fan_timer)
             self.cooling_fan_timer = None
         
-        # 设置风扇全速运行
         fan_command = "SET_FAN_SPEED FAN=fan6 SPEED=1.0"
         self.gcode.run_script_from_command(fan_command)
         
         gcmd.respond_info(f"M141/M191 S0: Fan will run for {self.cooling_fan_delay} seconds before stopping")
         
-        # 记录开始时间
         self.cooling_fan_start_time = self.reactor.monotonic()
         
-        # 创建定时器回调函数
         def cooling_fan_timer_callback(eventtime):
             current_time = self.reactor.monotonic()
             elapsed_time = current_time - self.cooling_fan_start_time
             
             if elapsed_time >= self.cooling_fan_delay:
-                # 时间到，关闭风扇
                 try:
                     fan_stop_command = "SET_FAN_SPEED FAN=fan6 SPEED=0"
                     self.gcode.run_script_from_command(fan_stop_command)
@@ -397,19 +479,16 @@ class BlindsHallMonitor:
                 except Exception as e:
                     logging.error(f"Error turning off cooling fan: {str(e)}")
                 
-                # 清除定时器
                 self.cooling_fan_timer = None
                 self.cooling_fan_start_time = None
                 return self.reactor.NEVER
             
-            # 计算剩余时间并更新响应
             remaining_time = max(0, self.cooling_fan_delay - elapsed_time)
             if remaining_time <= 10 and int(remaining_time) % 5 == 0:
                 gcmd.respond_info(f"M141/M191 S0: Fan stopping in {int(remaining_time)} seconds")
             
-            return eventtime + 1.0  # 每秒检查一次
+            return eventtime + 1.0
         
-        # 启动定时器
         self.cooling_fan_timer = self.reactor.register_timer(
             cooling_fan_timer_callback, self.reactor.NOW)
         
@@ -428,45 +507,44 @@ class BlindsHallMonitor:
         try:
             params = self._parse_gcode_parameters(gcmd)
             
-            # 检查是否为冷却模式 (S0)
             if 'S' in params and params['S'] == '0':
                 self._execute_cooling_procedure(gcmd, wait_for_temp=False)
                 return
             
-            # 正常加热模式
-            # 获取温度参数
             temperature = float(params.get('S', 70.0))
             
-            # 验证参数范围
             if temperature < 0 or temperature > 300:
                 gcmd.respond_info("ERROR: Temperature out of range (0-300)")
                 return
             
-            # 停止现有监控和冷却定时器
+            # 停止现有监控
             self._stop_monitoring()
             self._stop_cooling_fan_delay()
             
-            # 第一步：关闭百叶窗和风扇全速,排风风扇关闭
-            # 1. 风扇全速
+            # 关闭百叶窗和风扇
             fan_command = "SET_FAN_SPEED FAN=fan6 SPEED=1.0"
             self.gcode.run_script_from_command(fan_command)
 
-            # 设置排风风扇速度为0（关闭）
             exhaust_fan_command = "SET_FAN_SPEED FAN=fan7 SPEED=0"
             self.gcode.run_script_from_command(exhaust_fan_command)
             
-            # 2. 百叶窗关闭
             blinds_command = "SET_PIN PIN=SENSOR_MOTOR VALUE=1.00"
             self.gcode.run_script_from_command(blinds_command)
             
-            # 启动监控，确保百叶窗正确关闭
+            # 启动百叶窗监控
             self.start_open_to_close_monitoring()
             
-            # 第二步：设置加热器温度（不等待）
+            # 设置加热器温度
             heater_command = "SET_HEATER_TEMPERATURE HEATER=chamber TARGET=%.1f" % temperature
             self.gcode.run_script_from_command(heater_command)
             
-            gcmd.respond_info("M141 executed: Blinds closed, Fan full speed, Temperature=%.1f°C (no wait)" % temperature)
+            # 只要温度>0，就启动门检测
+            if temperature > 0:
+                self._start_door_monitoring()
+                gcmd.respond_info("M141 executed: Blinds closed, Fan full speed, Temperature=%.1f°C (no wait) - Door monitoring active while temperature > 0 (every %.1fs)" % 
+                                (temperature, self.door_check_interval))
+            else:
+                gcmd.respond_info("M141 executed: Blinds closed, Fan full speed, Temperature=%.1f°C (no wait)" % temperature)
             
         except Exception as e:
             logging.error("M141 command error: %s" % str(e))
@@ -477,92 +555,119 @@ class BlindsHallMonitor:
         try:
             params = self._parse_gcode_parameters(gcmd)
             
-            # 检查是否为冷却模式 (S0)
             if 'S' in params and params['S'] == '0':
                 self._execute_cooling_procedure(gcmd, wait_for_temp=True)
                 return
             
-            # 正常加热模式
-            # 获取温度参数
             temperature = float(params.get('S', 70.0)) 
             
-            # 验证参数范围
             if temperature < 0 or temperature > 300:
                 gcmd.respond_info("ERROR: Temperature out of range (0-300)")
                 return
             
-            # 停止现有监控和冷却定时器
+            # 停止现有监控
             self._stop_monitoring()
             self._stop_cooling_fan_delay()
             
-            # 第一步：关闭百叶窗和风扇全速，过滤风扇关闭
-            # 1. 风扇全速
+            # 关闭百叶窗和风扇
             fan_command = "SET_FAN_SPEED FAN=fan6 SPEED=1.0"
             self.gcode.run_script_from_command(fan_command)
 
-            # 设置排风风扇速度为0（关闭）
             exhaust_fan_command = "SET_FAN_SPEED FAN=fan7 SPEED=0"
             self.gcode.run_script_from_command(exhaust_fan_command)
             
-            # 2. 百叶窗关闭
             blinds_command = "SET_PIN PIN=SENSOR_MOTOR VALUE=1.00"
             self.gcode.run_script_from_command(blinds_command)
             
-            # 启动监控，确保百叶窗正确关闭
+            # 启动百叶窗监控
             self.start_open_to_close_monitoring()
             
-            # 第二步：设置加热器温度并等待
+            # 设置加热器温度
             heater_command = "SET_HEATER_TEMPERATURE HEATER=chamber TARGET=%.1f" % temperature
             self.gcode.run_script_from_command(heater_command)
             
-            # 等待加热完成
-            gcmd.respond_info("M191: Waiting for temperature to reach %.1f°C (tolerance: ±%.1f°C)..." % 
-                            (temperature, self.temperature_tolerance))
-            self._wait_for_temperature(temperature)
-            gcmd.respond_info("M191: Temperature reached %.1f°C" % temperature)
-            
-            gcmd.respond_info("M191 executed: Blinds closed, Fan full speed, Temperature=%.1f°C (waited)" % temperature)
+            # 只要温度>0，就启动门检测
+            if temperature > 0:
+                self._start_door_monitoring()
+                gcmd.respond_info("M191: Waiting for temperature to reach %.1f°C (tolerance: ±%.1f°C) - Door monitoring active while temperature > 0 (every %.1fs)..." % 
+                                (temperature, self.temperature_tolerance, self.door_check_interval))
+                
+                # 等待加热完成
+                self._wait_for_temperature(temperature)
+                
+                gcmd.respond_info("M191: Temperature reached %.1f°C" % temperature)
+                gcmd.respond_info("M191 executed: Blinds closed, Fan full speed, Temperature=%.1f°C (waited)" % temperature)
+            else:
+                gcmd.respond_info("M191 executed: Blinds closed, Fan full speed, Temperature=%.1f°C (waited)" % temperature)
             
         except Exception as e:
             logging.error("M191 command error: %s" % str(e))
             gcmd.respond_info("ERROR: M191 command failed - %s" % str(e))
+            self._stop_door_monitoring()
+    
+    def _wait_for_temperature(self, target_temp, timeout=300):
+        try:
+            heater_name = "chamber"
+            full_heater_name = 'heater_generic ' + heater_name
+
+            try:
+                heater = self.printer.lookup_object(full_heater_name)
+            except:
+                raise Exception("Heater 'chamber' not found")
+            
+            start_time = self.reactor.monotonic()
+            while True:
+                current_time = self.reactor.monotonic()
+                elapsed_time = current_time - start_time
+                
+                if elapsed_time > timeout:
+                    raise Exception("Heater timeout: Failed to reach target temperature in %d seconds" % timeout)
+                
+                status = heater.get_status(current_time)
+                temp = status.get('temperature', 0)
+                target = status.get('target', 0)
+                
+                if abs(temp - target_temp) <= self.temperature_tolerance:
+                    break
+                
+                self.reactor.pause(current_time + 1.0)
+                
+        except Exception as e:
+            logging.error("Temperature wait error: %s" % str(e))
+            raise
+        finally:
+            # 温度达到后，不自动停止门检测，让 _check_heater_status 根据目标温度决定
+            pass
     
     def _execute_cooling_procedure(self, gcmd, wait_for_temp=False):
         try:
-            # 停止现有监控
+            # 冷却模式 - 不检查门传感器
             self._stop_monitoring()
             
             fan_command = "SET_FAN_SPEED FAN=fan6 SPEED=1.0"
             self.gcode.run_script_from_command(fan_command)
             
-            # 第一步：设置排风风扇速度为0（关闭）
             exhaust_fan_command = "SET_FAN_SPEED FAN=fan7 SPEED=0"
             self.gcode.run_script_from_command(exhaust_fan_command)
             
-            # 第二步：打开百叶窗
             blinds_command = "SET_PIN PIN=SENSOR_MOTOR VALUE=0.00"
             self.gcode.run_script_from_command(blinds_command)
             
-            # 启动监控，确保百叶窗正确打开
             self.start_close_to_open_monitoring()
             
-            # 第三步：设置加热器温度为0
             heater_command = "SET_HEATER_TEMPERATURE HEATER=chamber TARGET=0.0"
             self.gcode.run_script_from_command(heater_command)
             
             if wait_for_temp:
-                # M191 S0: 等待温度冷却，然后启动风扇延迟
                 gcmd.respond_info("M191 S0: Waiting for temperature to cool down to 30°C (tolerance: ±%.1f°C)..." % 
                                 self.temperature_tolerance)
                 self._wait_for_temperature(30.0, timeout=600)
                 gcmd.respond_info("M191 S0: Temperature cooled down to 30°C")
                 
-                # 启动风扇延迟关闭
                 self._start_cooling_fan_delay(gcmd)
                 
                 gcmd.respond_info("M191 S0 executed: Blinds opened, Fan running for cooling")
             else:
-                # M141 S0: 直接启动风扇延迟关闭
                 self._start_cooling_fan_delay(gcmd)
                 gcmd.respond_info("M141 S0 executed: Blinds opened, Fan running for cooling")
                 
@@ -572,7 +677,6 @@ class BlindsHallMonitor:
     
     cmd_START_BLINDS_MONITOR_help = "Start blinds state change monitoring"
     def cmd_START_BLINDS_MONITOR(self, gcmd):
-        # 获取参数，确定监控方向
         direction = gcmd.get("DIRECTION", "OPEN2CLOSE")
         
         if direction.upper() in ["OPEN2CLOSE", "OPEN_TO_CLOSE"]:
@@ -599,8 +703,13 @@ class BlindsHallMonitor:
         self._stop_monitoring()
         gcmd.respond_info("Blinds monitoring stopped")
     
+    cmd_STOP_DOOR_MONITOR_help = "Stop door monitoring manually"
+    def cmd_STOP_DOOR_MONITOR(self, gcmd):
+        self._stop_door_monitoring()
+        gcmd.respond_info("Door monitoring stopped manually")
+    
     def get_status(self, eventtime):
-        sensor1_state, sensor2_state = self._get_sensor_states()
+        sensor1_state, sensor2_state, door_state = self._get_sensor_states()
         current_state = self._get_blinds_state(sensor1_state, sensor2_state)
         
         status = {
@@ -609,8 +718,14 @@ class BlindsHallMonitor:
             'current_state': current_state,
             'sensor1_state': sensor1_state,
             'sensor2_state': sensor2_state,
+            'door_sensor_state': door_state,
+            'door_monitoring_active': self.door_monitoring_active,
+            'heating_active': self.heating_active,
+            'current_target_temp': self.current_target_temp,
+            'door_alert_sent': self.door_alert_sent,
             'cooling_fan_delay': self.cooling_fan_delay,
-            'temperature_tolerance': self.temperature_tolerance  # 添加温度容忍度到状态信息
+            'temperature_tolerance': self.temperature_tolerance,
+            'door_check_interval': self.door_check_interval
         }
         
         if self.monitoring_active or self.recovery_mode_active:
