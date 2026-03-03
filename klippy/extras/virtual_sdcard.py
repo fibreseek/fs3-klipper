@@ -53,6 +53,8 @@ class VirtualSD:
         self.u_pattern = re.compile(r'\bU[\d\.\-]+\b')
         self.v_pattern = re.compile(r'\bV[\d\.\-]+\b')
         self.f_pattern = re.compile(r'\bF([\d\.]+)\b')
+        self.uv_mode = 0 # 0: none, 1: UV, 2: U, 3: V
+        self.uv_p_value = 0.0 # UV p value
         # Register commands
         self.gcode = self.printer.lookup_object('gcode')
         for cmd in ['M20', 'M21', 'M23', 'M24', 'M25', 'M26', 'M27', 'M39']:
@@ -81,6 +83,10 @@ class VirtualSD:
         self.gcode.register_command(
             "RECOVER_PRINT_FILE", self.cmd_RECOVER_PRINT_FILE,
             desc=self.cmd_RECOVER_PRINT_FILE_help)
+        
+        self.gcode.register_command(
+            "CLEAR_POWERLOSS_FILE", self.cmd_CLEAR_POWERLOSS_FILE,
+            desc="Clear powerloss file")
 
         self.print_progress = 0
         self.printed_pos_z = 0
@@ -214,6 +220,8 @@ class VirtualSD:
             self.current_file.close()
             self.current_file = None
         self.file_position = self.file_size = 0
+        self.uv_mode = 0
+        self.uv_p_value = 0.0
         self.extruder_switch_detected = False
         self.powerloss_file_exist = False
         self.powerloss_progress.clear_record()
@@ -416,6 +424,11 @@ class VirtualSD:
         self.do_resume()
         self.is_recover_print = True
         gcmd.respond_raw("get recover print %s %d" % (filename, self.file_position))
+
+    def cmd_CLEAR_POWERLOSS_FILE(self, gcmd):
+        # Clear powerloss file
+        self.powerloss_progress.clear_record()
+        gcmd.respond_raw("Powerloss file cleared")
 
     def cmd_CHECK_POWERLOSS_FILE(self, gcmd):
         # Check if powerloss file exists
@@ -950,13 +963,24 @@ class VirtualSD:
                     # Both U and V present
                     p_match = p_pattern.search(line)
                     p_value = float(p_match.group(1)) if p_match else 0
-                    processed_lines.append((f"SET_EXTRUDER_MODE S=1 P={p_value}", True))  # Injected
+                    if self.uv_mode != 1:
+                        self.uv_mode = 1
+                        self.uv_p_value = p_value
+                        processed_lines.append((f"SET_EXTRUDER_MODE S=1 P={p_value}", True))  # Injected
+                    else:
+                        if p_value != self.uv_p_value:
+                            self.uv_p_value = p_value
+                            processed_lines.append((f"SET_EXTRUDER_MODE S=1 P={p_value}", True))  # Injected
                 elif has_u:
                     # Only U present
-                    processed_lines.append(("SET_EXTRUDER_MODE S=0", True))  # Injected
+                    if self.uv_mode != 2:
+                        self.uv_mode = 2
+                        processed_lines.append(("SET_EXTRUDER_MODE S=0", True))  # Injected
                 elif has_v:
                     # Only V present
-                    processed_lines.append(("SET_EXTRUDER_MODE S=2", True))  # Injected
+                    if self.uv_mode != 3:
+                        self.uv_mode = 3
+                        processed_lines.append(("SET_EXTRUDER_MODE S=2", True))  # Injected
             
             # Adjust speed for stealthchop if applicable
             if self.stealthchop > 100:
