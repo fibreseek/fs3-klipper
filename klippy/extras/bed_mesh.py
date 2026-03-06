@@ -930,7 +930,7 @@ class BedMeshCalibrate:
         self.temp_cpst = None # 使用完毕及时释放内存
 
         # 7. 分类处理
-        Z_DELTA_THRESHOLD = 0.03 # 容许的z偏差阈值
+        Z_DELTA_THRESHOLD = 0.02 # 容许的z偏差阈值
         if Z_DELTA_THRESHOLD > z_delta_max: # 偏差不大，不必重新探点
         # if Z_DELTA_THRESHOLD > z_delta_range * 0.5: # 偏差不大，不必重新探点
             # z_offset = (z_delta_max + z_delta_min) * 0.5 # 临时更新z偏移
