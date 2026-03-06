@@ -29,7 +29,27 @@ class PrintStats:
         # Register event handler for extruder activation
         printer.register_event_handler("extruder:activate_extruder",
                                       self._handle_activate_extruder)
+        printer.register_event_handler("gcode:move_extruder",
+                self._handle_move_extruder)
     
+    def _handle_move_extruder(self, move_extruder, move_pos, absolute_mode):
+        self.current_extruder = move_extruder
+        if self.current_extruder == 'extruder':
+            if absolute_mode:
+                self.u_filament_used = move_pos
+            else:
+                self.u_filament_used += move_pos
+        elif self.current_extruder == 'extruder1':
+            if absolute_mode:
+                self.e_filament_used = move_pos
+            else:
+                self.e_filament_used += move_pos
+        elif self.current_extruder == 'extruder2':
+            if absolute_mode:
+                self.v_filament_used = move_pos
+            else:
+                self.v_filament_used += move_pos
+
     def _handle_activate_extruder(self):
         # Get the current extruder name
         if self._toolhead is None:
@@ -96,7 +116,7 @@ class PrintStats:
             curtime = self.reactor.monotonic()
             self.last_pause_time = curtime
             # update filament usage
-            self._update_filament_usage(curtime)
+            # self._update_filament_usage(curtime)
         if self.state != "error":
             self.state = "paused"
     def note_complete(self):
@@ -153,9 +173,9 @@ class PrintStats:
             if self.last_pause_time is not None:
                 # Calculate the total time spent paused during the print
                 time_paused += eventtime - self.last_pause_time
-            else:
-                # Accumulate filament if not paused
-                self._update_filament_usage(eventtime)
+            # else:
+            #     # Accumulate filament if not paused
+            #     self._update_filament_usage(eventtime)
             self.total_duration = eventtime - self.print_start_time
             if self.filament_used < 0.0000001:
                 # Track duration prior to extrusion

@@ -133,7 +133,8 @@ class GCodeMove:
         elif 'U' in params:
             if self.absolute_extrude:
                 raise gcmd.error("M83 MODE ONLY!")
-
+                
+            self.printer.send_event("gcode:move_extruder", 'extruder', float(params['U']), self.absolute_extrude)
             if 'V' in params:
                 self.printer.send_event("gcode:move_extruder", 'extruder2', float(params['V']), self.absolute_extrude)         
         elif 'V' in params: 
