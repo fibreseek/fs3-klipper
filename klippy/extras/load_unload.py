@@ -1330,24 +1330,16 @@ class LoadUnloadHandler:
                     current_temp = extruder.heater.get_temp(eventtime)[0]
                     temp_ready_for_slow = (45.0 <= current_temp <= 55.0)
 
-            # L=1: 跳过快挤出，直接进入慢速挤出（需温度达标）
+            # L=1: 跳过快挤出，直接进入慢速挤出
+            # 温度未达标时，先进入 PREHEAT_LOW 等待 50°C
             if was_loaded == 1 and not self.p1_slow_extrusion_entered:
-                # 检查温度是否适合慢速挤出
                 if not temp_ready_for_slow:
-                    # 温度未达标，等待后继续检查（不设置 p1_slow_extrusion_entered）
-                    # 实时显示当前温度
-                    if current_temp > 55:
-                        self.gcode.respond_info(f"[{channel_name} LOAD] Cooling to 50°C... {current_temp:.0f}C (Fans ON)")
-                    elif current_temp < 45:
-                        self.gcode.respond_info(f"[{channel_name} LOAD] Heating to 50°C... {current_temp:.0f}C")
-                    else:
-                        self.gcode.respond_info(f"[{channel_name} LOAD] Waiting for 50°C... {current_temp:.0f}C")
+                    # 切换到 PREHEAT_LOW 状态，由专门分支只做温度等待和状态上报
+                    self.load_step = State.PREHEAT_LOW
                     return eventtime + 1.0
 
-                # 温度达标，进入慢速挤出
-                # 立即标记已进入，防止后续逻辑再次执行
+                # 温度已达标，直接进入慢速挤出
                 self.p1_slow_extrusion_entered = True
-
                 self.load_step = State.SLOW_EXTRUSION
                 self.p1_slow_extrusion_distance = 0.0
                 self.p1_slow_extrusion_start_time = eventtime
@@ -1359,24 +1351,15 @@ class LoadUnloadHandler:
             if was_loaded == 0 and self.p1_clog_detection_initialized and not self.p1_slow_extrusion_entered:
                 # 先检查当前距离，如果已达到目标则等待温度后进入慢速挤出
                 if self.load_distance >= self.p1_long_distance:
-                    # 当前距离已达标，检查温度是否适合慢速挤出
+                    # 当前距离已达标，但温度未必达标
                     if not temp_ready_for_slow:
-                        # 温度未达标，等待后继续检查（不设置 p1_slow_extrusion_entered）
-                        # 实时显示当前温度
-                        if current_temp > 55:
-                            self.gcode.respond_info(f"[{channel_name} LOAD] Cooling to 50°C... {current_temp:.0f}C (Fans ON)")
-                        elif current_temp < 45:
-                            self.gcode.respond_info(f"[{channel_name} LOAD] Heating to 50°C... {current_temp:.0f}C")
-                        else:
-                            self.gcode.respond_info(f"[{channel_name} LOAD] Waiting for 50°C... {current_temp:.0f}C")
+                        # 切换到 PREHEAT_LOW 状态，在该状态中等待 50°C
+                        self.load_step = State.PREHEAT_LOW
                         return eventtime + 1.0
 
-                    # 温度达标，进入慢速挤出（在真正转换时才设置标志）
+                    # 温度已达标，进入慢速挤出（在真正转换时才设置标志）
                     self.gcode.run_script_from_command("M400")
-
-                    # 立即标记已进入，防止竞态条件
                     self.p1_slow_extrusion_entered = True
-
                     self.load_step = State.SLOW_EXTRUSION
                     self.p1_slow_extrusion_distance = 0.0
                     self.p1_slow_extrusion_start_time = eventtime
@@ -1408,6 +1391,41 @@ class LoadUnloadHandler:
                 move_duration = step_length / speed_mm_s if speed_mm_s > 0 else 1.0
                 # 继续进料循环
                 return eventtime + move_duration
+
+        # ============================================================
+        # 阶段2.5: 低温预热等待 50°C (STATE:23 PREHEAT_LOW)
+        # 仅等待温度达标，不执行任何挤出动作
+        # ============================================================
+        elif load_step == State.PREHEAT_LOW:
+            self._send_state_code(23, 'PREHEAT_LOW', channel_name)
+
+            nozzle = self.load_unload_nozzle
+            extruder_name = 'extruder' if nozzle == 0 else 'extruder1'
+            extruder = self.printer.lookup_object(extruder_name, None)
+            if extruder is None:
+                self.gcode.respond_info(f"[{channel_name} LOAD] ERROR: Extruder '{extruder_name}' not found in PREHEAT_LOW")
+                self.load_step = State.ERROR
+                return self.reactor.NEVER
+
+            current_temp = extruder.heater.get_temp(eventtime)[0]
+
+            # 温度反馈信息
+            if current_temp < 45.0:
+                self.gcode.respond_info(f"[{channel_name} LOAD] HEATING {current_temp:.0f}/50C")
+                return eventtime + 1.0
+            if current_temp > 55.0:
+                self.gcode.respond_info(f"[{channel_name} LOAD] COOLING {current_temp:.0f}/50C")
+                return eventtime + 1.0
+
+            # 温度进入 45~55°C 区间，认为已达标，进入慢速挤出阶段
+            self.gcode.respond_info(f"[{channel_name} LOAD] REACHED_50C {current_temp:.0f}/50C")
+            if not self.p1_slow_extrusion_entered:
+                self.p1_slow_extrusion_entered = True
+                self.load_step = State.SLOW_EXTRUSION
+                self.p1_slow_extrusion_distance = 0.0
+                self.p1_slow_extrusion_start_time = eventtime
+                self._start_timeout_timer(self.p1_slow_extrusion_timeout)
+            return eventtime + 0.1
 
         # ============================================================
         # 阶段2续: 慢速逐2毫米挤出 (内部STATE:21 SLOW_EXTRUSION)
