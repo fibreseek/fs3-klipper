@@ -88,9 +88,8 @@ def calc_open_tsp(pts):
     """
     轻量级tsp求解器
     - 点数不超过10组
-    - 起点固定为首组点（当前点）
+    - 输入输出的首组点均固定为起点（当前点）
     - 各组点仅访问一次的最短开放路径
-    - 输出中不再包含首组点（已到达）
     
     参数:
         pts: List[List[float]]，如 [[x0,y0], [x1,y1], ...]
@@ -100,7 +99,7 @@ def calc_open_tsp(pts):
     """
     n = len(pts)
     if n < 2:
-        return pts[1:]
+        return pts
     
     # 转换为numpy数组
     pts = np.array(pts)
@@ -171,7 +170,7 @@ def calc_open_tsp(pts):
 
     # 安全回退：理论上不应发生
     if best_end == -1:
-        return pts[1:]
+        return pts.tolist()
 
     # 6. 回溯路径
     path_idx = []
@@ -186,8 +185,8 @@ def calc_open_tsp(pts):
     del dp, parent # 及时释放不再需要的变量
     path_idx.reverse() # 反转路径，因为是回溯得到的
     
-    # 按索引顺序返回原始点坐标（不含当前起点）
-    return [pts[i] for i in path_idx if i != HEAD_IDX]
+    # 按索引顺序返回原始点坐标
+    return [pts[i].tolist() for i in path_idx]
 
 class BedMesh:
     FADE_DISABLE = 0x7FFFFFFF
@@ -861,13 +860,13 @@ class BedMeshCalibrate:
         edge = gcmd.get("PRINT_MAX", "160.0,160.0")
         pt_max = [float(x.strip()) for x in edge.split(',')]
         pts = [[pt_now[0], pt_now[1]], # 当前位置
+               [0.5*(pt_min[0]+pt_max[0]), 0.5*(pt_min[1]+pt_max[1])], # 中心点
                [pt_min[0], pt_min[1]], # xmin, ymin
                [pt_min[0], pt_max[1]], # xmin, ymax
                [pt_max[0], pt_max[1]], # xmax, ymax
-               [pt_max[0], pt_min[1]], # xmax, ymin
-               [0.5*(pt_min[0]+pt_max[0]), 0.5*(pt_min[1]+pt_max[1])]]
-        # pts = calc_open_tsp(pts) # 旅行商路线规划
-        pts = pts[1:]
+               [pt_max[0], pt_min[1]]] # xmax, ymin
+        pts = calc_open_tsp(pts) # 旅行商路线规划
+        pts = pts[1:] # 去除当前点
 
         # 3. 获取偏移（参考_move_next方法）
         pprobe = self.printer.lookup_object('probe', None) # 获取探针对象
