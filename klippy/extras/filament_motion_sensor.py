@@ -105,10 +105,10 @@ class EncoderSensor:
             # Check for filament insertion
             # Filament is always assumed to be present on an encoder event
             self.runout_helper.note_filament_present(eventtime, True)
-            logging.info("Encoder event detected: extruder_name=%s, extruder_pos=%.3f, "
-                    "filament_runout_pos=%.3f", self.extruder_name,
-                    self._get_extruder_pos(eventtime),
-                    self.filament_runout_pos)
+            # logging.info("Encoder event detected: extruder_name=%s, extruder_pos=%.3f, "
+            #         "filament_runout_pos=%.3f", self.extruder_name,
+            #         self._get_extruder_pos(eventtime),
+            #         self.filament_runout_pos)
 
 def load_config_prefix(config):
     return EncoderSensor(config)
