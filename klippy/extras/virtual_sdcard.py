@@ -278,8 +278,19 @@ class VirtualSD:
         try:
             if fname not in flist:
                 fname = files_by_lower[fname.lower()]
+        except KeyError:
+            logging.warning("virtual_sdcard file not found: '%s', "
+                            "available files: %s", filename,
+                            [f[0] for f in files])
+            raise gcmd.error("File not found '%s'" % filename)
+        try:
             fname = os.path.join(self.sdcard_dirname, fname)
-            f = io.open(fname, 'r', newline='')
+            f = io.open(fname, 'r', newline='', encoding='utf-8',
+                        errors='replace')
+        except Exception as e:
+            logging.exception("virtual_sdcard file open")
+            raise gcmd.error("Unable to open file '%s': %s" % (fname, e))
+        try:
             f.seek(0, os.SEEK_END)
             fsize = f.tell()
 
@@ -290,41 +301,39 @@ class VirtualSD:
             file_pos = fsize
             buffer = ""
             
-            while file_pos > 0:
-                # 读取一块数据，从末尾向前
+            stop_scan = False
+            while file_pos > 0 and not stop_scan:
                 read_size = min(buffer_size, file_pos)
                 file_pos -= read_size
                 f.seek(file_pos)
                 chunk = f.read(read_size)
                 buffer = chunk + buffer
                 
-                # 按行处理缓冲区
                 lines = buffer.split('\n')
-                buffer = lines[0]  # 保留未完成的行
+                buffer = lines[0]
                 
-                # 从末尾向前处理完整的行
                 for i in range(len(lines) - 1, 0, -1):
                     line = lines[i]
-                    scanned_bytes += len(line.encode()) + 1  # +1 for newline
+                    scanned_bytes += len(line.encode()) + 1
                     
                     if "; SESSION:" in line:
                         found_session = True
                         break
                     
-                    # 如果没有找到 SESSION，扫描到不出现";"时停止
-                    if ';' not in line and ';' not in line:
+                    if ';' not in line:
+                        stop_scan = True
                         break
                 
                 if found_session:
                     break
             
-            # 如果找到了 SESSION，减去扫描的字节数
             if found_session:
                 fsize = fsize - scanned_bytes
             f.seek(0)
-        except:
-            logging.exception("virtual_sdcard file open")
-            raise gcmd.error("Unable to open file %s" % filename)
+        except Exception as e:
+            f.close()
+            logging.exception("virtual_sdcard file read")
+            raise gcmd.error("Error reading file '%s': %s" % (fname, e))
         gcmd.respond_raw("File opened:%s Size:%d" % (filename, fsize))
         gcmd.respond_raw("File selected")
         self.current_file = f
