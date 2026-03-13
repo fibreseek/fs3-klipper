@@ -18,17 +18,11 @@ message_protocol_error2 = ""
 message_mcu_connect_error = ""
 
 Common_MCU_errors = {
-    ("Timer too close",): """
-This often indicates the host computer is overloaded. Check
-for other processes consuming excessive CPU time, high swap
-usage, disk errors, overheating, unstable voltage, or
-similar system problems on the host computer.""",
+    ("Timer too close",): "",
     ("Missed scheduling of next ",): """
 This is generally indicative of an intermittent
 communication failure between micro-controller and host.""",
-    ("Temperature out of range",): """
-This generally occurs when a heater temperature exceeds
-its configured min_temp or max_temp.""",
+    ("Temperature out of range", "ADC out of range"): "",
     ("Rescheduled timer in the past", "Stepper too far in past"): """
 This generally occurs when the micro-controller has been
 requested to step at a rate higher than it is capable of
@@ -68,12 +62,11 @@ class PrinterMCUError:
         clarify = [cb(msg, details)
                    for cb in self.clarify_callbacks.get(mcu_msg, [])]
         clarify = [cm for cm in clarify if cm is not None]
-        clarify_msg = ""
-        if clarify:
-            clarify_msg = "\n".join(["", ""] + clarify + [""])
         # Update error message
-        newmsg = "%s%s%s%s%s" % (prefix, mcu_msg, clarify_msg,
-                                 hint, message_shutdown)
+        if clarify:
+            newmsg = "%s%s%s" % ("\n".join(clarify), hint, message_shutdown)
+        else:
+            newmsg = "%s%s%s%s" % (prefix, mcu_msg, hint, message_shutdown)
         self.printer.update_error_msg(msg, newmsg)
     def _handle_notify_mcu_shutdown(self, msg, details):
         if msg == "MCU shutdown":

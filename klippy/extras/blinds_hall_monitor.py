@@ -525,8 +525,8 @@ class BlindsHallMonitor:
             fan_command = "SET_FAN_SPEED FAN=fan6 SPEED=1.0"
             self.gcode.run_script_from_command(fan_command)
 
-            exhaust_fan_command = "SET_FAN_SPEED FAN=fan7 SPEED=0"
-            self.gcode.run_script_from_command(exhaust_fan_command)
+            # 设置排风风扇速度为0（关闭）
+            self.gcode.run_script_from_command("EXHAUST_FAN S=0")
             
             blinds_command = "SET_PIN PIN=SENSOR_MOTOR VALUE=1.00"
             self.gcode.run_script_from_command(blinds_command)
@@ -573,8 +573,8 @@ class BlindsHallMonitor:
             fan_command = "SET_FAN_SPEED FAN=fan6 SPEED=1.0"
             self.gcode.run_script_from_command(fan_command)
 
-            exhaust_fan_command = "SET_FAN_SPEED FAN=fan7 SPEED=0"
-            self.gcode.run_script_from_command(exhaust_fan_command)
+            # 关闭排风风扇  
+            self.gcode.run_script_from_command("EXHAUST_FAN S=0")
             
             blinds_command = "SET_PIN PIN=SENSOR_MOTOR VALUE=1.00"
             self.gcode.run_script_from_command(blinds_command)
@@ -647,8 +647,8 @@ class BlindsHallMonitor:
             fan_command = "SET_FAN_SPEED FAN=fan6 SPEED=1.0"
             self.gcode.run_script_from_command(fan_command)
             
-            exhaust_fan_command = "SET_FAN_SPEED FAN=fan7 SPEED=0"
-            self.gcode.run_script_from_command(exhaust_fan_command)
+            # 第一步：设置排风风扇速度为0（关闭）
+            self.gcode.run_script_from_command("EXHAUST_FAN S=0")
             
             blinds_command = "SET_PIN PIN=SENSOR_MOTOR VALUE=0.00"
             self.gcode.run_script_from_command(blinds_command)

@@ -20,16 +20,47 @@ class PrintStats:
         self.reset()
         # Register commands
         self.gcode = printer.lookup_object('gcode')
+        # 打印统计相关指令
         self.gcode.register_command(
             "SET_PRINT_STATS_INFO", self.cmd_SET_PRINT_STATS_INFO,
             desc=self.cmd_SET_PRINT_STATS_INFO_help)
-            
+        # 预检查阶段状态设置指令（供 Moonraker 调用）
+        self.gcode.register_command(
+            "SET_PRINT_PRECHECK_STATE", self.cmd_SET_PRINT_PRECHECK_STATE,
+            desc=self.cmd_SET_PRINT_PRECHECK_STATE_help)
+        # 预备动作阶段状态（加热、归位、清理、调平等），供上位机订阅 print_stats 获取
+        self.gcode.register_command(
+            "SET_PRINT_PREPRINTING_STATE", self.cmd_SET_PRINT_PREPRINTING_STATE,
+            desc=self.cmd_SET_PRINT_PREPRINTING_STATE_help)
+        self.gcode.register_command(
+            "SET_PRINT_PREP_STAGE", self.cmd_SET_PRINT_PREP_STAGE,
+            desc=self.cmd_SET_PRINT_PREP_STAGE_help)
         # Delay toolhead lookup until it's actually needed
         self._toolhead = None
         # Register event handler for extruder activation
         printer.register_event_handler("extruder:activate_extruder",
                                       self._handle_activate_extruder)
+        printer.register_event_handler("gcode:move_extruder",
+                self._handle_move_extruder)
     
+    def _handle_move_extruder(self, move_extruder, move_pos, absolute_mode):
+        self.current_extruder = move_extruder
+        if self.current_extruder == 'extruder':
+            if absolute_mode:
+                self.u_filament_used = move_pos
+            else:
+                self.u_filament_used += move_pos
+        elif self.current_extruder == 'extruder1':
+            if absolute_mode:
+                self.e_filament_used = move_pos
+            else:
+                self.e_filament_used += move_pos
+        elif self.current_extruder == 'extruder2':
+            if absolute_mode:
+                self.v_filament_used = move_pos
+            else:
+                self.v_filament_used += move_pos
+
     def _handle_activate_extruder(self):
         # Get the current extruder name
         if self._toolhead is None:
@@ -75,8 +106,52 @@ class PrintStats:
             self.last_v_pos = cur_epos
         
     def set_current_file(self, filename):
+        # 若当前为 preprinting（宏预备后调用 BASE），只更新 filename，保留 state/prep_stage
+        if self.state == "preprinting":
+            self.filename = filename
+            return
         self.reset()
         self.filename = filename
+
+    def note_precheck(self):
+        # 进入打印前预检查阶段
+        self.state = "precheck"
+        self.error_message = ""
+
+    def note_preprinting(self):
+        # 进入预备动作阶段（加热、归位、清理、调平等）
+        self.state = "preprinting"
+        self.error_message = ""
+    
+    def note_pausing(self):
+        self.state = "pausing"
+        self.error_message = ""
+
+    def note_set_prep_stage(self, stage):
+        self.prep_stage = stage
+        if self.state not in ("preprinting", "precheck"):
+            self.state = "preprinting"
+
+    cmd_SET_PRINT_PRECHECK_STATE_help = (
+        "Set print_stats state to 'precheck' before starting the actual print"
+    )
+    def cmd_SET_PRINT_PRECHECK_STATE(self, gcmd):
+        # 该指令通常由 Moonraker 在预检查流程开始时调用
+        self.note_precheck()
+
+    cmd_SET_PRINT_PREPRINTING_STATE_help = (
+        "Set print_stats state to 'preprinting' (physical prep: heating, homing, etc.)"
+    )
+    def cmd_SET_PRINT_PREPRINTING_STATE(self, gcmd):
+        self.note_preprinting()
+
+    cmd_SET_PRINT_PREP_STAGE_help = (
+        "Set prep_stage for preprinting. STAGE=heating_bed|heating_nozzle|homing|cleaning|leveling|ready"
+    )
+    def cmd_SET_PRINT_PREP_STAGE(self, gcmd):
+        stage = gcmd.get("STAGE", "ready")
+        self.note_set_prep_stage(stage)
+
     def note_start(self):
         curtime = self.reactor.monotonic()
         if self.print_start_time is None:
@@ -89,14 +164,16 @@ class PrintStats:
         # Reset last e-position
         gc_status = self.gcode_move.get_status(curtime)
         self.last_epos = gc_status['position'].e
+        # 实际开始执行 G-code 时进入 printing（包括从 precheck/preprinting 过渡）
         self.state = "printing"
+        self.prep_stage = None
         self.error_message = ""
     def note_pause(self):
         if self.last_pause_time is None:
             curtime = self.reactor.monotonic()
             self.last_pause_time = curtime
             # update filament usage
-            self._update_filament_usage(curtime)
+            # self._update_filament_usage(curtime)
         if self.state != "error":
             self.state = "paused"
     def note_complete(self):
@@ -117,8 +194,10 @@ class PrintStats:
             self.init_duration = self.total_duration - \
                 self.prev_pause_duration
         self.print_start_time = None
-    cmd_SET_PRINT_STATS_INFO_help = "Pass slicer info like layer act and " \
-                                    "total to klipper"
+    cmd_SET_PRINT_STATS_INFO_help = (
+        "Pass slicer info like layer act and total to klipper. "
+        "Optional STATE=standby to set print state to standby."
+    )
     def cmd_SET_PRINT_STATS_INFO(self, gcmd):
         total_layer = gcmd.get_int("TOTAL_LAYER", self.info_total_layer, \
                                    minval=0)
@@ -135,9 +214,19 @@ class PrintStats:
                 current_layer is not None and \
                 current_layer != self.info_current_layer:
             self.info_current_layer = min(current_layer, self.info_total_layer)
+
+        # 可选的 STATE 参数，用于设置打印状态
+        state = gcmd.get("STATE", None)
+        if state is not None:
+            # 只更新状态及相关信息，避免影响计时和耗材统计
+            self.state = state
+            self.error_message = ""
+            self.prep_stage = None
+            
     def reset(self):
         self.filename = self.error_message = ""
         self.state = "standby"
+        self.prep_stage = None
         self.prev_pause_duration = self.last_epos = 0.
         self.filament_used = self.total_duration = 0.
         self.e_filament_used = self.u_filament_used = self.v_filament_used = 0.
@@ -153,9 +242,9 @@ class PrintStats:
             if self.last_pause_time is not None:
                 # Calculate the total time spent paused during the print
                 time_paused += eventtime - self.last_pause_time
-            else:
-                # Accumulate filament if not paused
-                self._update_filament_usage(eventtime)
+            # else:
+            #     # Accumulate filament if not paused
+            #     self._update_filament_usage(eventtime)
             self.total_duration = eventtime - self.print_start_time
             if self.filament_used < 0.0000001:
                 # Track duration prior to extrusion
@@ -172,7 +261,8 @@ class PrintStats:
             'state': self.state,
             'message': self.error_message,
             'info': {'total_layer': self.info_total_layer,
-                     'current_layer': self.info_current_layer}
+                     'current_layer': self.info_current_layer,
+                     'prep_stage': self.prep_stage}
         }
 
 def load_config(config):

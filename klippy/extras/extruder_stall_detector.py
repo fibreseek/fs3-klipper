@@ -20,7 +20,7 @@ class ExtruderStallDetector:
         self.sg_threshold = config.getint('sg_threshold', 20, minval=0, maxval=1023)
         self.sg_drop_rate = config.getfloat('sg_drop_rate', 0.3, minval=0.0, maxval=1.0)
         self.filter_window = config.getint('filter_window', 5, minval=1)
-        self.enable_stallguard = config.getboolean('enable_stallguard', True)
+        self.enable_stallguard = config.getboolean('enable_stallguard', False)
         self.enable_sg_monitor = config.getboolean('enable_sg_monitor', True)
         
         # Internal state
@@ -151,10 +151,14 @@ class ExtruderStallDetector:
         stall_detected = self._check_stall(sg_result, stallguard, eventtime)
         
         if stall_detected and not self.stall_detected:
+            # 本轮检测触发一次事件后，立刻清空状态，进入下一轮检测
             self.stall_detected = True
             self.stall_count += 1
             self.consecutive_stalls += 1
             self._send_stall_event(eventtime, sg_result, stallguard)
+            # 重置为“未触发”状态，下一轮从头开始判定
+            self.stall_detected = False
+            self.consecutive_stalls = 0
         elif not stall_detected and self.stall_detected:
             self.stall_detected = False
             self.consecutive_stalls = 0
@@ -189,16 +193,16 @@ class ExtruderStallDetector:
                                 self.name, drop_rate)
                     stall_detected = True
         
-        # 4. Check for pattern: decrease then increase (user's original idea)
-        if self.enable_sg_monitor and len(self.sg_history) >= 3:
-            values = list(self.sg_history)
-            if values[-3] > values[-2] and values[-2] < values[-1]:
-                # Found a valley pattern
-                valley_depth = min(values[-3] - values[-2], values[-1] - values[-2])
-                if valley_depth > 5:  # Significant valley
-                    logging.info("ExtruderStallDetector %s: Valley pattern detected (depth=%d)",
-                                self.name, valley_depth)
-                    stall_detected = True
+        # # 4. Check for pattern: decrease then increase (user's original idea)
+        # if self.enable_sg_monitor and len(self.sg_history) >= 3:
+        #     values = list(self.sg_history)
+        #     if values[-3] > values[-2] and values[-2] < values[-1]:
+        #         # Found a valley pattern
+        #         valley_depth = min(values[-3] - values[-2], values[-1] - values[-2])
+        #         if valley_depth > 5:  # Significant valley
+        #             logging.info("ExtruderStallDetector %s: Valley pattern detected (depth=%d)",
+        #                         self.name, valley_depth)
+        #             stall_detected = True
         
         return stall_detected
     

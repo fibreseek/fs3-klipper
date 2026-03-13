@@ -21,6 +21,8 @@ class PowerlossProgress():
         self.save_prog_thread.setName("PowerlossProgressThread")
         self.powerloss_init_file = self.prefix + ".init"
         self.current_print_file = None
+        self.recording_active = True
+        self._record_lock = threading.Lock()
         # For async scan operations
         self.scan_results = {}
         self.scan_callbacks = {}
@@ -93,6 +95,11 @@ class PowerlossProgress():
                 self.file_idx += 1
                 if self.file_idx >= self.max_file_num:
                     self.file_idx = 0
+            elif command == 'clear':
+                self._do_clear_files()
+                done_event = record.get('done_event')
+                if done_event is not None:
+                    done_event.set()
             elif command == 'scan':
                 # Async scan operation
                 scan_id = record.get('scan_id')
@@ -159,7 +166,25 @@ class PowerlossProgress():
         with self.scan_lock:
             return self.scan_results.get(scan_id, {'status': 'unknown'})
     
+    def _do_clear_files(self):
+        """Delete powerloss record files. Must be called from background thread."""
+        for i in range(self.max_file_num):
+            file_path = self.prefix + ".%d" % i
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception:
+                logging.exception("Failed to remove powerloss file: %s" % file_path)
+        try:
+            if os.path.exists(self.powerloss_init_file):
+                os.remove(self.powerloss_init_file)
+        except Exception:
+            logging.exception("Failed to remove powerloss init file: %s" % self.powerloss_init_file)
+        self.current_print_file = None
+
     def start_record(self, file_path=None):
+        with self._record_lock:
+            self.recording_active = True
         record_args = {'MODIFYTIME':time.time(), 'FILE_PATH':file_path}
         record = {'command':'start', 'args':record_args}
         try:
@@ -169,6 +194,9 @@ class PowerlossProgress():
             logging.exception("start record progress put queue fail.")
 
     def record(self, position, line, current_z):
+        with self._record_lock:
+            if not self.recording_active:
+                return
         record = {'command':'record', 'args':{'MODIFYTIME':time.time(), 'SEEKPOSITION':position, 'RECORD_LINE':line, 'CURRENT_Z': current_z}}
         try:
             logging.debug("powerloss_progress record: record_line:[%s] seek_position:[%u], modify_time:[%f], queue_len:[%u]" %(str(line).strip(), position, record['args']['MODIFYTIME'], self.bg_queue.qsize()))
@@ -527,23 +555,25 @@ class PowerlossProgress():
         
         return latest_seek_position, latest_z_position
 
-    def clear_record(self):
-        """Clear all powerloss record files."""
-        for i in range(self.max_file_num):
-            file_path = self.prefix + ".%d" % i
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except Exception:
-                logging.exception("Failed to remove powerloss file: %s" % file_path)
-        
-        # Also remove init file
+    def stop_and_clear_record(self, timeout=5.0):
+        """Stop recording and clear powerloss files. Waits for background thread
+        to process the clear command, avoiding race where async thread could
+        recreate files after they are deleted."""
+        with self._record_lock:
+            self.recording_active = False
+        done_event = threading.Event()
         try:
-            if os.path.exists(self.powerloss_init_file):
-                os.remove(self.powerloss_init_file)
+            self.bg_queue.put_nowait({'command': 'clear', 'done_event': done_event})
         except Exception:
-            logging.exception("Failed to remove powerloss init file: %s" % self.powerloss_init_file)
-        self.current_print_file = None
+            logging.exception("Failed to queue clear record command")
+            done_event.set()
+        if not done_event.wait(timeout=timeout):
+            logging.warning("Timeout waiting for powerloss clear to complete")
+
+    def clear_record(self):
+        """Clear all powerloss record files. Prefer stop_and_clear_record() for
+        cancel/reset to avoid race with async recording thread."""
+        self.stop_and_clear_record()
 
     def scan_init_paramaters_for_startup(self, stop_byte=2000):
         """Scan the print file for the latest bed and chamber temperature settings."""

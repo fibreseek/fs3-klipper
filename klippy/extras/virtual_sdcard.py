@@ -53,6 +53,8 @@ class VirtualSD:
         self.u_pattern = re.compile(r'\bU[\d\.\-]+\b')
         self.v_pattern = re.compile(r'\bV[\d\.\-]+\b')
         self.f_pattern = re.compile(r'\bF([\d\.]+)\b')
+        self.uv_mode = 0 # 0: none, 1: UV, 2: U, 3: V
+        self.uv_p_value = 0.0 # UV p value
         # Register commands
         self.gcode = self.printer.lookup_object('gcode')
         for cmd in ['M20', 'M21', 'M23', 'M24', 'M25', 'M26', 'M27', 'M39']:
@@ -81,6 +83,10 @@ class VirtualSD:
         self.gcode.register_command(
             "RECOVER_PRINT_FILE", self.cmd_RECOVER_PRINT_FILE,
             desc=self.cmd_RECOVER_PRINT_FILE_help)
+        
+        self.gcode.register_command(
+            "CLEAR_POWERLOSS_FILE", self.cmd_CLEAR_POWERLOSS_FILE,
+            desc="Clear powerloss file")
 
         self.print_progress = 0
         self.printed_pos_z = 0
@@ -91,7 +97,7 @@ class VirtualSD:
         self.powerloss_file_exist = self.powerloss_progress.check_powerloss_file()
         self.powerloss_info = None
         self.powerloss_position = None
-        
+
         # Double buffer mechanism for prefetching
         self.prefetch_queue = queue.Queue(maxsize=2)  # Queue for prefetched data
         self.prefetch_thread = None
@@ -214,10 +220,14 @@ class VirtualSD:
             self.current_file.close()
             self.current_file = None
         self.file_position = self.file_size = 0
+        self.uv_mode = 0
+        self.uv_p_value = 0.0
         self.extruder_switch_detected = False
         self.powerloss_file_exist = False
         self.powerloss_progress.clear_record()
-        self.print_stats.reset()
+        # 若处于 preprinting（宏预备后调用 BASE），不重置 print_stats，保留 state/prep_stage
+        if self.print_stats.state != "preprinting":
+            self.print_stats.reset()
         self.printer.send_event("virtual_sdcard:reset_file")
     cmd_SDCARD_RESET_FILE_help = "Clears a loaded SD File. Stops the print "\
         "if necessary"
@@ -270,8 +280,19 @@ class VirtualSD:
         try:
             if fname not in flist:
                 fname = files_by_lower[fname.lower()]
+        except KeyError:
+            logging.warning("virtual_sdcard file not found: '%s', "
+                            "available files: %s", filename,
+                            [f[0] for f in files])
+            raise gcmd.error("File not found '%s'" % filename)
+        try:
             fname = os.path.join(self.sdcard_dirname, fname)
-            f = io.open(fname, 'r', newline='')
+            f = io.open(fname, 'r', newline='', encoding='utf-8',
+                        errors='replace')
+        except Exception as e:
+            logging.exception("virtual_sdcard file open")
+            raise gcmd.error("Unable to open file '%s': %s" % (fname, e))
+        try:
             f.seek(0, os.SEEK_END)
             fsize = f.tell()
 
@@ -282,41 +303,39 @@ class VirtualSD:
             file_pos = fsize
             buffer = ""
             
-            while file_pos > 0:
-                # 读取一块数据，从末尾向前
+            stop_scan = False
+            while file_pos > 0 and not stop_scan:
                 read_size = min(buffer_size, file_pos)
                 file_pos -= read_size
                 f.seek(file_pos)
                 chunk = f.read(read_size)
                 buffer = chunk + buffer
                 
-                # 按行处理缓冲区
                 lines = buffer.split('\n')
-                buffer = lines[0]  # 保留未完成的行
+                buffer = lines[0]
                 
-                # 从末尾向前处理完整的行
                 for i in range(len(lines) - 1, 0, -1):
                     line = lines[i]
-                    scanned_bytes += len(line.encode()) + 1  # +1 for newline
+                    scanned_bytes += len(line.encode()) + 1
                     
                     if "; SESSION:" in line:
                         found_session = True
                         break
                     
-                    # 如果没有找到 SESSION，扫描到不出现";"时停止
-                    if ';' not in line and ';' not in line:
+                    if ';' not in line:
+                        stop_scan = True
                         break
                 
                 if found_session:
                     break
             
-            # 如果找到了 SESSION，减去扫描的字节数
             if found_session:
                 fsize = fsize - scanned_bytes
             f.seek(0)
-        except:
-            logging.exception("virtual_sdcard file open")
-            raise gcmd.error("Unable to open file %s" % filename)
+        except Exception as e:
+            f.close()
+            logging.exception("virtual_sdcard file read")
+            raise gcmd.error("Error reading file '%s': %s" % (fname, e))
         gcmd.respond_raw("File opened:%s Size:%d" % (filename, fsize))
         gcmd.respond_raw("File selected")
         self.current_file = f
@@ -417,10 +436,26 @@ class VirtualSD:
         self.is_recover_print = True
         gcmd.respond_raw("get recover print %s %d" % (filename, self.file_position))
 
+    def cmd_CLEAR_POWERLOSS_FILE(self, gcmd):
+        # Clear powerloss file
+        self.powerloss_progress.clear_record()
+        gcmd.respond_raw("[POWERLOSS] Powerloss file cleared")
+
     def cmd_CHECK_POWERLOSS_FILE(self, gcmd):
         # Check if powerloss file exists
         if self.powerloss_file_exist:
             gcmd.respond_raw("[POWERLOSS] Powerloss file exists. [FILE: %s]" % self.powerloss_progress.current_print_file)
+
+            # 在主动检查断电续打文件时，将 print_stats 状态设置为暂停，
+            # 方便上位机在用户选择是否恢复打印前展示为“暂停”状态
+            try:
+                pl_file = getattr(self.powerloss_progress, "current_print_file", None)
+                if pl_file:
+                    self.print_stats.filename = os.path.basename(pl_file)
+                self.print_stats.state = "paused"
+                self.print_stats.error_message = ""
+            except Exception:
+                logging.exception("virtual_sdcard: failed to set print_stats paused in CHECK_POWERLOSS_FILE")
 
             powerloss_init_info = self.powerloss_progress.scan_init_paramaters_for_startup()
             gcode_script = []
@@ -518,6 +553,7 @@ class VirtualSD:
             gcmd.respond_raw("File scan timeout after %.0fs. Aborting recovery." % max_wait_time)
             return
         
+        self.print_stats.note_preprinting()
         # Apply recovered parameters
         self._apply_prepare_recover_parameters(gcmd, self.powerloss_info, powerloss_z)
         
@@ -950,13 +986,24 @@ class VirtualSD:
                     # Both U and V present
                     p_match = p_pattern.search(line)
                     p_value = float(p_match.group(1)) if p_match else 0
-                    processed_lines.append((f"SET_EXTRUDER_MODE S=1 P={p_value}", True))  # Injected
+                    if self.uv_mode != 1:
+                        self.uv_mode = 1
+                        self.uv_p_value = p_value
+                        processed_lines.append((f"SET_EXTRUDER_MODE S=1 P={p_value}", True))  # Injected
+                    else:
+                        if p_value != self.uv_p_value:
+                            self.uv_p_value = p_value
+                            processed_lines.append((f"SET_EXTRUDER_MODE S=1 P={p_value}", True))  # Injected
                 elif has_u:
                     # Only U present
-                    processed_lines.append(("SET_EXTRUDER_MODE S=0", True))  # Injected
+                    if self.uv_mode != 2:
+                        self.uv_mode = 2
+                        processed_lines.append(("SET_EXTRUDER_MODE S=0", True))  # Injected
                 elif has_v:
                     # Only V present
-                    processed_lines.append(("SET_EXTRUDER_MODE S=2", True))  # Injected
+                    if self.uv_mode != 3:
+                        self.uv_mode = 3
+                        processed_lines.append(("SET_EXTRUDER_MODE S=2", True))  # Injected
             
             # Adjust speed for stealthchop if applicable
             if self.stealthchop > 100:
