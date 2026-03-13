@@ -225,7 +225,9 @@ class VirtualSD:
         self.extruder_switch_detected = False
         self.powerloss_file_exist = False
         self.powerloss_progress.clear_record()
-        self.print_stats.reset()
+        # 若处于 preprinting（宏预备后调用 BASE），不重置 print_stats，保留 state/prep_stage
+        if self.print_stats.state != "preprinting":
+            self.print_stats.reset()
         self.printer.send_event("virtual_sdcard:reset_file")
     cmd_SDCARD_RESET_FILE_help = "Clears a loaded SD File. Stops the print "\
         "if necessary"
@@ -340,6 +342,9 @@ class VirtualSD:
         self.file_position = 0
         self.file_size = fsize
         self.print_stats.set_current_file(filename)
+        # 若非 preprinting（非宏预备流程），标记为 precheck，供上位机/Moonraker 状态查询
+        if self.print_stats.state != "preprinting":
+            self.print_stats.note_precheck()
     def cmd_M24(self, gcmd):
         # Start/resume SD print
         self.do_resume()

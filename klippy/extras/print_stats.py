@@ -20,10 +20,21 @@ class PrintStats:
         self.reset()
         # Register commands
         self.gcode = printer.lookup_object('gcode')
+        # 打印统计相关指令
         self.gcode.register_command(
             "SET_PRINT_STATS_INFO", self.cmd_SET_PRINT_STATS_INFO,
             desc=self.cmd_SET_PRINT_STATS_INFO_help)
-            
+        # 预检查阶段状态设置指令（供 Moonraker 调用）
+        self.gcode.register_command(
+            "SET_PRINT_PRECHECK_STATE", self.cmd_SET_PRINT_PRECHECK_STATE,
+            desc=self.cmd_SET_PRINT_PRECHECK_STATE_help)
+        # 预备动作阶段状态（加热、归位、清理、调平等），供上位机订阅 print_stats 获取
+        self.gcode.register_command(
+            "SET_PRINT_PREPRINTING_STATE", self.cmd_SET_PRINT_PREPRINTING_STATE,
+            desc=self.cmd_SET_PRINT_PREPRINTING_STATE_help)
+        self.gcode.register_command(
+            "SET_PRINT_PREP_STAGE", self.cmd_SET_PRINT_PREP_STAGE,
+            desc=self.cmd_SET_PRINT_PREP_STAGE_help)
         # Delay toolhead lookup until it's actually needed
         self._toolhead = None
         # Register event handler for extruder activation
@@ -95,8 +106,48 @@ class PrintStats:
             self.last_v_pos = cur_epos
         
     def set_current_file(self, filename):
+        # 若当前为 preprinting（宏预备后调用 BASE），只更新 filename，保留 state/prep_stage
+        if self.state == "preprinting":
+            self.filename = filename
+            return
         self.reset()
         self.filename = filename
+
+    def note_precheck(self):
+        # 进入打印前预检查阶段
+        self.state = "precheck"
+        self.error_message = ""
+
+    def note_preprinting(self):
+        # 进入预备动作阶段（加热、归位、清理、调平等）
+        self.state = "preprinting"
+        self.error_message = ""
+
+    def note_set_prep_stage(self, stage):
+        self.prep_stage = stage
+        if self.state not in ("preprinting", "precheck"):
+            self.state = "preprinting"
+
+    cmd_SET_PRINT_PRECHECK_STATE_help = (
+        "Set print_stats state to 'precheck' before starting the actual print"
+    )
+    def cmd_SET_PRINT_PRECHECK_STATE(self, gcmd):
+        # 该指令通常由 Moonraker 在预检查流程开始时调用
+        self.note_precheck()
+
+    cmd_SET_PRINT_PREPRINTING_STATE_help = (
+        "Set print_stats state to 'preprinting' (physical prep: heating, homing, etc.)"
+    )
+    def cmd_SET_PRINT_PREPRINTING_STATE(self, gcmd):
+        self.note_preprinting()
+
+    cmd_SET_PRINT_PREP_STAGE_help = (
+        "Set prep_stage for preprinting. STAGE=heating_bed|heating_nozzle|homing|cleaning|leveling|ready"
+    )
+    def cmd_SET_PRINT_PREP_STAGE(self, gcmd):
+        stage = gcmd.get("STAGE", "ready")
+        self.note_set_prep_stage(stage)
+
     def note_start(self):
         curtime = self.reactor.monotonic()
         if self.print_start_time is None:
@@ -109,7 +160,9 @@ class PrintStats:
         # Reset last e-position
         gc_status = self.gcode_move.get_status(curtime)
         self.last_epos = gc_status['position'].e
+        # 实际开始执行 G-code 时进入 printing（包括从 precheck/preprinting 过渡）
         self.state = "printing"
+        self.prep_stage = None
         self.error_message = ""
     def note_pause(self):
         if self.last_pause_time is None:
@@ -137,8 +190,10 @@ class PrintStats:
             self.init_duration = self.total_duration - \
                 self.prev_pause_duration
         self.print_start_time = None
-    cmd_SET_PRINT_STATS_INFO_help = "Pass slicer info like layer act and " \
-                                    "total to klipper"
+    cmd_SET_PRINT_STATS_INFO_help = (
+        "Pass slicer info like layer act and total to klipper. "
+        "Optional STATE=standby to set print state to standby."
+    )
     def cmd_SET_PRINT_STATS_INFO(self, gcmd):
         total_layer = gcmd.get_int("TOTAL_LAYER", self.info_total_layer, \
                                    minval=0)
@@ -155,9 +210,19 @@ class PrintStats:
                 current_layer is not None and \
                 current_layer != self.info_current_layer:
             self.info_current_layer = min(current_layer, self.info_total_layer)
+
+        # 可选的 STATE 参数：目前仅支持 STATE=standby
+        state = gcmd.get("STATE", None)
+        if state is not None and state.lower() == "standby":
+            # 只更新状态及相关信息，避免影响计时和耗材统计
+            self.state = "standby"
+            self.error_message = ""
+            self.prep_stage = None
+            
     def reset(self):
         self.filename = self.error_message = ""
         self.state = "standby"
+        self.prep_stage = None
         self.prev_pause_duration = self.last_epos = 0.
         self.filament_used = self.total_duration = 0.
         self.e_filament_used = self.u_filament_used = self.v_filament_used = 0.
@@ -192,7 +257,8 @@ class PrintStats:
             'state': self.state,
             'message': self.error_message,
             'info': {'total_layer': self.info_total_layer,
-                     'current_layer': self.info_current_layer}
+                     'current_layer': self.info_current_layer,
+                     'prep_stage': self.prep_stage}
         }
 
 def load_config(config):
