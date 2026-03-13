@@ -439,6 +439,7 @@ class VirtualSD:
     def cmd_CLEAR_POWERLOSS_FILE(self, gcmd):
         # Clear powerloss file
         self.powerloss_progress.clear_record()
+        self.powerloss_file_exist = False
         gcmd.respond_raw("[POWERLOSS] Powerloss file cleared")
 
     def cmd_CHECK_POWERLOSS_FILE(self, gcmd):
