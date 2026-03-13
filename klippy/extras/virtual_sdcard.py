@@ -97,7 +97,7 @@ class VirtualSD:
         self.powerloss_file_exist = self.powerloss_progress.check_powerloss_file()
         self.powerloss_info = None
         self.powerloss_position = None
-        
+
         # Double buffer mechanism for prefetching
         self.prefetch_queue = queue.Queue(maxsize=2)  # Queue for prefetched data
         self.prefetch_thread = None
@@ -342,9 +342,6 @@ class VirtualSD:
         self.file_position = 0
         self.file_size = fsize
         self.print_stats.set_current_file(filename)
-        # 若非 preprinting（非宏预备流程），标记为 precheck，供上位机/Moonraker 状态查询
-        if self.print_stats.state != "preprinting":
-            self.print_stats.note_precheck()
     def cmd_M24(self, gcmd):
         # Start/resume SD print
         self.do_resume()
@@ -442,12 +439,23 @@ class VirtualSD:
     def cmd_CLEAR_POWERLOSS_FILE(self, gcmd):
         # Clear powerloss file
         self.powerloss_progress.clear_record()
-        gcmd.respond_raw("Powerloss file cleared")
+        gcmd.respond_raw("[POWERLOSS] Powerloss file cleared")
 
     def cmd_CHECK_POWERLOSS_FILE(self, gcmd):
         # Check if powerloss file exists
         if self.powerloss_file_exist:
             gcmd.respond_raw("[POWERLOSS] Powerloss file exists. [FILE: %s]" % self.powerloss_progress.current_print_file)
+
+            # 在主动检查断电续打文件时，将 print_stats 状态设置为暂停，
+            # 方便上位机在用户选择是否恢复打印前展示为“暂停”状态
+            try:
+                pl_file = getattr(self.powerloss_progress, "current_print_file", None)
+                if pl_file:
+                    self.print_stats.filename = os.path.basename(pl_file)
+                self.print_stats.state = "paused"
+                self.print_stats.error_message = ""
+            except Exception:
+                logging.exception("virtual_sdcard: failed to set print_stats paused in CHECK_POWERLOSS_FILE")
 
             powerloss_init_info = self.powerloss_progress.scan_init_paramaters_for_startup()
             gcode_script = []
@@ -545,6 +553,7 @@ class VirtualSD:
             gcmd.respond_raw("File scan timeout after %.0fs. Aborting recovery." % max_wait_time)
             return
         
+        self.print_stats.note_preprinting()
         # Apply recovered parameters
         self._apply_prepare_recover_parameters(gcmd, self.powerloss_info, powerloss_z)
         

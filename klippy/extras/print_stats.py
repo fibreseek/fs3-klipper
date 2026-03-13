@@ -122,6 +122,10 @@ class PrintStats:
         # 进入预备动作阶段（加热、归位、清理、调平等）
         self.state = "preprinting"
         self.error_message = ""
+    
+    def note_pausing(self):
+        self.state = "pausing"
+        self.error_message = ""
 
     def note_set_prep_stage(self, stage):
         self.prep_stage = stage
@@ -211,11 +215,11 @@ class PrintStats:
                 current_layer != self.info_current_layer:
             self.info_current_layer = min(current_layer, self.info_total_layer)
 
-        # 可选的 STATE 参数：目前仅支持 STATE=standby
+        # 可选的 STATE 参数，用于设置打印状态
         state = gcmd.get("STATE", None)
-        if state is not None and state.lower() == "standby":
+        if state is not None:
             # 只更新状态及相关信息，避免影响计时和耗材统计
-            self.state = "standby"
+            self.state = state
             self.error_message = ""
             self.prep_stage = None
             
