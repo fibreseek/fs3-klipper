@@ -1985,6 +1985,10 @@ class LoadUnloadHandler:
             self.load_step = State.FINISHED
             self.gcode.respond_info(f"[{channel_name} LOAD] STATE:90 FINISHED")
 
+            # 进料完成后关闭加热器
+            self.gcode.run_script_from_command("M104 T0 S0")
+            self.gcode.run_script_from_command("M104 T1 S0")
+
         elif self.operation_mode == OperationMode.UNLOADING:
             # 卸料完成
             self.operation_mode = OperationMode.IDLE
