@@ -210,8 +210,8 @@ class LoadUnloadHandler:
         self.load_preloading_filament_speed = config.getfloat('load_preloading_filament_speed', 300.0) # 进料预加载挤出速度 (mm/min)
 
         # 退料类型参数 (退料时清理喷嘴的回抽和预加载参数)
-        self.unload_clean_retract_speed = config.getfloat('unload_clean_retract_speed', 300.0)    # 退料时清理喷嘴的回抽速度 (mm/min)
-        self.unload_clean_retract_e = config.getfloat('unload_clean_retract_e', -40.0)             # 退料时回抽长度 (mm)
+        self.unload_clean_retract_speed = config.getfloat('unload_clean_retract_speed', 1200)    # 退料时清理喷嘴的回抽速度 (mm/min)
+        self.unload_clean_retract_e = config.getfloat('unload_clean_retract_e', -15.0)             # 退料时回抽长度 (mm)
         self.unload_preloading_filament_e = config.getfloat('unload_preloading_filament_e', 20.0)  # 退料预加载挤出长度 (mm) - F/P2使用
         self.unload_preloading_filament_speed = config.getfloat('unload_preloading_filament_speed', 100.0) # 退料预加载挤出速度 (mm/min)
         # P1通道退料专用参数 (预加载挤出长度较小)
@@ -466,20 +466,8 @@ class LoadUnloadHandler:
         self._stop_process_timer()
 
         if index == Channel.F:
-            # F/P1 通道统一降温逻辑
-            nozzle = self.load_unload_nozzle
-            target = self.load_unload_temperature
-            cooling_temp = target - self.temperature_offset  # 降温，防止拉丝
-
-            gcmd.respond_info(f"[{channel_name} LOAD] Cooling started...")
-            self.gcode.run_script_from_command("M106 P1 S255")  # 开启侧吹/喉管风扇
-            self.gcode.run_script_from_command("M106 P2 S255")  # 开启侧吹/喉管风扇
-            self.gcode.run_script_from_command(f"M104 T{nozzle} S{cooling_temp}")  # 立即降温
-
-            # F/P1 通道特有逻辑：切断耗材纤维
+            # F 通道：切断耗材纤维，进入阶段 40（降温、开风扇、V 进挤在 CONFIRM_CLEANED 执行）
             self.gcode.run_script_from_command("M2800")
-
-            # 统一进入阶段 40：等待用户手动清理喷嘴
             self.load_step = State.WAIT_USER_CLEAN
             self.user_confirmed = 0
             gcmd.respond_info(f"[{channel_name} LOAD] STATE:40 WAIT_USER_CLEAN")
@@ -531,6 +519,17 @@ class LoadUnloadHandler:
 
         # 检查是否在等待清理状态
         if (index == Channel.F or index == Channel.P1) and load_step == State.WAIT_USER_CLEAN:
+            if index == Channel.F:
+                # F 通道：用户确认清理完成后，执行 V 进挤 2mm、降温、开风扇，再进入自动擦嘴
+                self.gcode.run_script_from_command("M83")
+                self.gcode.run_script_from_command("AE2")
+                self.gcode.run_script_from_command("G1 V2 F100")
+                nozzle = self.load_unload_nozzle
+                target = self.load_unload_temperature
+                cooling_temp = target - self.temperature_offset
+                self.gcode.run_script_from_command("M106 P1 S255")
+                self.gcode.run_script_from_command("M106 P2 S255")
+                self.gcode.run_script_from_command(f"M104 T{nozzle} S{cooling_temp}")
             self._finish_loadunload()
         else:
             gcmd.respond_info(f"[{channel_name} LOAD] STATE:99 ERROR Invalid state")
@@ -578,6 +577,8 @@ class LoadUnloadHandler:
         self.gcode.run_script_from_command("M106 P1 S0")
         self.gcode.run_script_from_command("M106 P2 S0")
 
+        self._sync_print_stats_load_unload("error", "Load/unload timeout")
+
     cmd_EXIT_LOADUNLOAD_help = "退出进出料流程"
     def cmd_EXIT_LOADUNLOAD(self, gcmd):
         """
@@ -624,6 +625,7 @@ class LoadUnloadHandler:
         self.gcode.run_script_from_command("M106 P1 S0")
         self.gcode.run_script_from_command("M106 P2 S0")
 
+        self._sync_print_stats_load_unload("standby")
         gcmd.respond_info(f"[{channel_name} {action}] STATE:91 CANCELLED")
 
     cmd_PREPARE_LOAD_UNLOAD_NOZZLE_help = "准备进出料喷嘴"
@@ -692,9 +694,12 @@ class LoadUnloadHandler:
             gcmd.respond_info(f"[{channel_name} {action}] ERROR: No operation in progress")
             return
 
-        # 停止所有定时循环
+        # 停止所有定时循环（与 EXIT_LOADUNLOAD 一致）
         self._stop_process_timer()
         self._stop_temp_timer()
+        self._stop_timeout_timer()
+        self._stop_load_unload_timer()
+        self._restore_idle_timeout()
 
         gcmd.respond_info(f"[{channel_name} {action}] User manually finished the process")
 
@@ -946,6 +951,8 @@ class LoadUnloadHandler:
         # 设置操作模式为IDLE，阻止其他操作（必须在设置load_step之前）
         self.operation_mode = OperationMode.IDLE
         self.load_step = State.ERROR
+        self._sync_print_stats_load_unload("error",
+            f"P1 slow extrusion timeout ({self.p1_slow_extrusion_timeout}s)")
         self.gcode.respond_info(f"[{channel_name} LOAD] STATE:99 ERROR (Timeout: {self.p1_slow_extrusion_timeout}s)")
 
         # P1 通道特有：关闭温度和风扇，取消注册堵料检测事件
@@ -1018,6 +1025,25 @@ class LoadUnloadHandler:
     # ============================================================
     # 辅助方法
     # ============================================================
+
+    def _sync_print_stats_load_unload(self, end_state, error_message=""):
+        """
+        同步 print_stats 状态，与状态机设计一致
+        end_state: 'load_unload' | 'standby' | 'error'
+        """
+        try:
+            print_stats = self.printer.lookup_object('print_stats')
+            if end_state == "load_unload":
+                self.gcode.run_script_from_command("SET_PRINT_LOAD_UNLOAD_STATE")
+            elif end_state == "standby":
+                self.gcode.run_script_from_command("SET_PRINT_STATS_INFO STATE=standby")
+            elif end_state == "error":
+                print_stats.state = "error"
+                print_stats.error_message = error_message
+                print_stats.prep_stage = None
+                print_stats._stop_busy_timer()
+        except Exception as e:
+            logger.debug(f"[_sync_print_stats_load_unload] {e}")
 
     def _send_state_code(self, state_code, state_name, channel_name=None, action='LOAD'):
         """
@@ -1182,9 +1208,8 @@ class LoadUnloadHandler:
 
         # ------ 阶段22：熔融挤出 (5mm/s) ------
         elif load_step == State.MELT_EXTRUDING:
-            # 检查用户是否已确认挤出
+            # 检查用户是否已确认挤出（备用路径，F通道主流程在cmd_CONFIRM_EXTRUDED）
             if self.user_confirmed == 1:
-                # 用户已确认，跳转到清理阶段（M2800由cmd_CONFIRM_EXTRUDED执行）
                 self.user_confirmed = 0
                 self.load_step = State.WAIT_USER_CLEAN
                 self.gcode.respond_info(f"[{channel_name} LOAD] STATE:40 WAIT_USER_CLEAN")
@@ -1405,6 +1430,7 @@ class LoadUnloadHandler:
             if extruder is None:
                 self.gcode.respond_info(f"[{channel_name} LOAD] ERROR: Extruder '{extruder_name}' not found in PREHEAT_LOW")
                 self.load_step = State.ERROR
+                self._sync_print_stats_load_unload("error", f"Extruder '{extruder_name}' not found")
                 return self.reactor.NEVER
 
             current_temp = extruder.heater.get_temp(eventtime)[0]
@@ -1517,6 +1543,7 @@ class LoadUnloadHandler:
             # 完成流程
             self.operation_mode = OperationMode.IDLE
             self.load_step = State.FINISHED
+            self._sync_print_stats_load_unload("standby")
             self._send_state_code(90, 'FINISHED', channel_name)
 
             # P1 通道特有：关闭温度和风扇，取消注册堵料检测事件
@@ -1781,6 +1808,7 @@ class LoadUnloadHandler:
         # 激活对应的挤出机
         logger.debug("[_prepare_load] Calling PREPARE_LOAD_UNLOAD_NOZZLE")
         self.gcode.run_script_from_command("PREPARE_LOAD_UNLOAD_NOZZLE")
+        self._sync_print_stats_load_unload("load_unload")
         logger.debug("[_prepare_load] Completed")
 
     def _prepare_unload(self):
@@ -1818,6 +1846,7 @@ class LoadUnloadHandler:
 
         # 激活对应的挤出机
         self.gcode.run_script_from_command("PREPARE_LOAD_UNLOAD_NOZZLE")
+        self._sync_print_stats_load_unload("load_unload")
 
     def _preloading_retract_filament(self):
         """
@@ -1983,6 +2012,7 @@ class LoadUnloadHandler:
 
             # 进料完成，输出完成状态
             self.load_step = State.FINISHED
+            self._sync_print_stats_load_unload("standby")
             self.gcode.respond_info(f"[{channel_name} LOAD] STATE:90 FINISHED")
 
             # 进料完成后关闭加热器
@@ -2006,6 +2036,7 @@ class LoadUnloadHandler:
 
             # 等待所有运动完成
             self.gcode.run_script_from_command("M400")
+            self._sync_print_stats_load_unload("standby")
             self.gcode.respond_info(f"[{channel_name} UNLOAD] STATE:90 FINISHED")
 
             # 关闭加热器

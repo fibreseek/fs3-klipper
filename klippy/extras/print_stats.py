@@ -4,6 +4,13 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
+# 有效状态集合，与状态机设计保持一致
+VALID_STATES = (
+    "standby", "precheck", "preprinting", "printing", "pausing", "paused",
+    "complete", "cancelled", "load_unload", "calibration", "maintenance",
+    "busy", "error"
+)
+
 class PrintStats:
     def __init__(self, config):
         self.printer = printer = config.get_printer()
@@ -17,6 +24,9 @@ class PrintStats:
         self.last_u_pos = 0.
         self.last_v_pos = 0.
         self.current_extruder = None
+        self._busy_timer = None
+        self._busy_check_interval = config.getfloat("busy_check_interval", 0.5,
+                                                    minval=0.05, maxval=1.0)
         self.reset()
         # Register commands
         self.gcode = printer.lookup_object('gcode')
@@ -35,6 +45,12 @@ class PrintStats:
         self.gcode.register_command(
             "SET_PRINT_PREP_STAGE", self.cmd_SET_PRINT_PREP_STAGE,
             desc=self.cmd_SET_PRINT_PREP_STAGE_help)
+        # 辅助状态设置指令（供 Moonraker/宏 调用）
+        for state_name in ("load_unload", "calibration", "maintenance", "busy"):
+            self.gcode.register_command(
+                "SET_PRINT_" + state_name.upper() + "_STATE",
+                self._make_set_state_cmd(state_name),
+                desc="Set print_stats state to '%s'" % state_name)
         # Delay toolhead lookup until it's actually needed
         self._toolhead = None
         # Register event handler for extruder activation
@@ -42,7 +58,53 @@ class PrintStats:
                                       self._handle_activate_extruder)
         printer.register_event_handler("gcode:move_extruder",
                 self._handle_move_extruder)
-    
+        printer.register_event_handler("klippy:ready", self._handle_ready)
+
+    def _handle_ready(self):
+        """注册定时器，用于 standby 下检测 G-code 执行并自动切换 busy"""
+        self._start_busy_timer()
+
+    def _start_busy_timer(self):
+        """启动 busy 轮询定时器（仅在 standby/busy 时需要）"""
+        if self._busy_timer is not None:
+            return
+        self._busy_timer = self.reactor.register_timer(
+            self._check_gcode_busy, self.reactor.NOW)
+
+    def _stop_busy_timer(self):
+        """停止 busy 轮询定时器，减少 CPU 占用"""
+        if self._busy_timer is None:
+            return
+        self.reactor.unregister_timer(self._busy_timer)
+        self._busy_timer = None
+
+    def _check_gcode_busy(self, eventtime):
+        """仅在 standby/busy 间自动切换，不覆盖 load_unload/calibration/maintenance"""
+        if self.state not in ("standby", "busy"):
+            self._stop_busy_timer()
+            return self.reactor.NEVER
+        gcode_mutex = self.gcode.get_mutex()
+        if gcode_mutex.test():
+            self.state = "busy"
+        elif self.state == "busy":
+            self.state = "standby"
+        return eventtime + self._busy_check_interval
+
+    def _make_set_state_cmd(self, state_name):
+        def cmd(gcmd):
+            self._set_state(state_name)
+        return cmd
+
+    def _set_state(self, state):
+        """设置辅助状态（load_unload/calibration/maintenance/busy）"""
+        self.state = state
+        self.error_message = ""
+        self.prep_stage = None
+        if state == "busy":
+            self._start_busy_timer()
+        else:
+            self._stop_busy_timer()
+
     def _handle_move_extruder(self, move_extruder, move_pos, absolute_mode):
         self.current_extruder = move_extruder
         if self.current_extruder == 'extruder':
@@ -128,9 +190,10 @@ class PrintStats:
         self.error_message = ""
 
     def note_set_prep_stage(self, stage):
-        self.prep_stage = stage
+        """仅在 precheck/preprinting 下更新 prep_stage，避免误从 printing/paused 等切换"""
         if self.state not in ("preprinting", "precheck"):
-            self.state = "preprinting"
+            return
+        self.prep_stage = stage
 
     cmd_SET_PRINT_PRECHECK_STATE_help = (
         "Set print_stats state to 'precheck' before starting the actual print"
@@ -195,8 +258,10 @@ class PrintStats:
                 self.prev_pause_duration
         self.print_start_time = None
     cmd_SET_PRINT_STATS_INFO_help = (
-        "Pass slicer info like layer act and total to klipper. "
-        "Optional STATE=standby to set print state to standby."
+        "Pass slicer info like layer and total to klipper. "
+        "Optional STATE= to set print state. Valid: standby, precheck, preprinting, "
+        "printing, pausing, paused, complete, cancelled, load_unload, calibration, "
+        "maintenance, busy, error."
     )
     def cmd_SET_PRINT_STATS_INFO(self, gcmd):
         total_layer = gcmd.get_int("TOTAL_LAYER", self.info_total_layer, \
@@ -215,17 +280,24 @@ class PrintStats:
                 current_layer != self.info_current_layer:
             self.info_current_layer = min(current_layer, self.info_total_layer)
 
-        # 可选的 STATE 参数，用于设置打印状态
+        # 可选的 STATE 参数，仅接受有效状态
         state = gcmd.get("STATE", None)
         if state is not None:
-            # 只更新状态及相关信息，避免影响计时和耗材统计
+            if state not in VALID_STATES:
+                raise gcmd.error("Invalid STATE='%s', must be one of: %s" % (
+                    state, ", ".join(VALID_STATES)))
             self.state = state
             self.error_message = ""
             self.prep_stage = None
+            if state in ("standby", "busy"):
+                self._start_busy_timer()
+            else:
+                self._stop_busy_timer()
             
     def reset(self):
         self.filename = self.error_message = ""
         self.state = "standby"
+        self._start_busy_timer()
         self.prep_stage = None
         self.prev_pause_duration = self.last_epos = 0.
         self.filament_used = self.total_duration = 0.
