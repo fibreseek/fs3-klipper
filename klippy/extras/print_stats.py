@@ -4,6 +4,8 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
+import logging
+
 # 有效状态集合，与状态机设计保持一致
 VALID_STATES = (
     "standby", "precheck", "preprinting", "printing", "pausing", "paused",
@@ -122,6 +124,7 @@ class PrintStats:
                 self.v_filament_used = move_pos
             else:
                 self.v_filament_used += move_pos
+        self.filament_used = self.e_filament_used + self.u_filament_used + self.v_filament_used
 
     def _handle_activate_extruder(self):
         # Get the current extruder name
