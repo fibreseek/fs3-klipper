@@ -39,6 +39,11 @@ class GCodeMove:
         gcode.register_command('M114', self.cmd_M114, True)
         gcode.register_command('GET_POSITION', self.cmd_GET_POSITION, True,
                                desc=self.cmd_GET_POSITION_help)
+        # 注册新的 GET_X_STEPPER_DIFF 命令（T0和T1）
+        gcode.register_command('GET_X_STEPPER_DIFF_T0', self.cmd_GET_X_STEPPER_DIFF_T0, True,
+                               desc=self.cmd_GET_X_STEPPER_DIFF_T0_help)
+        gcode.register_command('GET_X_STEPPER_DIFF_T1', self.cmd_GET_X_STEPPER_DIFF_T1, True,
+                               desc=self.cmd_GET_X_STEPPER_DIFF_T1_help)
         self.Coord = gcode.Coord
         # G-Code coordinate manipulation
         self.absolute_coord = self.absolute_extrude = True
@@ -133,8 +138,7 @@ class GCodeMove:
         elif 'U' in params:
             if self.absolute_extrude:
                 raise gcmd.error("M83 MODE ONLY!")
-                
-            self.printer.send_event("gcode:move_extruder", 'extruder', float(params['U']), self.absolute_extrude)
+
             if 'V' in params:
                 self.printer.send_event("gcode:move_extruder", 'extruder2', float(params['V']), self.absolute_extrude)         
         elif 'V' in params: 
@@ -324,6 +328,142 @@ class GCodeMove:
                           "gcode homing: %s"
                           % (mcu_pos, stepper_pos, kin_pos, toolhead_pos,
                              gcode_pos, base_pos, homing_pos))
+
+    cmd_GET_X_STEPPER_DIFF_T0_help = "Get X stepper diff for T0 (forward homing)"
+
+    def cmd_GET_X_STEPPER_DIFF_T0(self, gcmd):
+        self.gcode = self.printer.lookup_object('gcode')
+        self.save_variables = self.printer.lookup_object('save_variables')
+        all_vars = self.save_variables.allVariables
+
+        self.t0_offset = all_vars.get('t0_switch_y', 250.0)
+    
+        self.gcode.run_script_from_command("G28 XY")
+        self.gcode.run_script_from_command("G1 X150 Y%.1f F6000" % self.t0_offset)
+        self.gcode.run_script_from_command("G4 P500")
+        self.gcode.run_script_from_command("M400")
+        self.gcode.run_script_from_command("SET_RAIL_ENDSTOP RAIL=stepper_x SPEED=100.0")
+        self.gcode.run_script_from_command("G4 P500")
+        self.gcode.run_script_from_command("M400")
+
+        toolhead = self.printer.lookup_object('toolhead')
+        if toolhead is None:
+            raise gcmd.error("Printer not ready")
+        
+        kin = toolhead.get_kinematics()
+        steppers = kin.get_steppers()
+        
+        x_stepper = None
+        for stepper in steppers:
+            if 'stepper_x' in stepper.get_name():
+                x_stepper = stepper
+                break
+        
+        if x_stepper is None:
+            raise gcmd.error("X stepper not found")
+
+        configfile = self.printer.lookup_object('configfile')
+        sconfig = configfile.get_status(None)['settings']
+        stconfig = sconfig.get('stepper_x', {})
+        original_speed = stconfig['homing_speed']
+        rotation_distance = stconfig['rotation_distance']
+        microsteps = stconfig['microsteps']
+        full_steps_per_rotation = stconfig['full_steps_per_rotation']
+        # self.gcode.run_script_from_command('M118 speed: %.1f' % original_speed)
+        # self.gcode.run_script_from_command('M118 rotation_distance: %.1f' % rotation_distance)
+        # self.gcode.run_script_from_command('M118 microsteps: %.1f' % microsteps)
+        # self.gcode.run_script_from_command('M118 full_steps_per_rotation: %.1f' % full_steps_per_rotation)
+        steps_per_mm = (full_steps_per_rotation * microsteps) / rotation_distance
+
+        first_position = x_stepper.get_mcu_position()
+        gcmd.respond_raw("First X stepper position: %d" % (first_position))
+
+        self.gcode.run_script_from_command("G28.1 X")
+        
+        second_position = x_stepper.get_mcu_position()
+        gcmd.respond_raw("Second X stepper position: %d" % (second_position))
+
+        self.gcode.run_script_from_command("G1 X150 Y%.1f F6000" % self.t0_offset)
+        
+        diff_steps = abs(second_position - first_position)
+        diff_mm = diff_steps / steps_per_mm
+        
+        self.gcode.run_script_from_command('M118 T0 position : %.6f mm' % (diff_mm + 150))
+        self.gcode.run_script_from_command('SET_TOOL_SWITCH_POSITION T=0 X=%.6f' % (diff_mm + 150))
+        self.gcode.run_script_from_command("G4 P500")
+        self.gcode.run_script_from_command("M400")
+        self.gcode.run_script_from_command("SET_RAIL_ENDSTOP RAIL=stepper_x SPEED=%.1f" % original_speed)
+        # self.gcode.run_script_from_command("G28 XY")
+        self.gcode.run_script_from_command("G1 X150 Y150 F6000")
+        self.gcode.run_script_from_command("M84")
+        
+        return diff_steps, diff_mm
+
+    cmd_GET_X_STEPPER_DIFF_T1_help = "Get X stepper diff for T1 (reverse homing)"
+
+    def cmd_GET_X_STEPPER_DIFF_T1(self, gcmd):
+        self.gcode = self.printer.lookup_object('gcode')
+        self.save_variables = self.printer.lookup_object('save_variables')
+        all_vars = self.save_variables.allVariables
+
+        self.t1_offset = all_vars.get('t1_switch_y', 250.0)
+
+        self.gcode.run_script_from_command("G28 XY")
+        self.gcode.run_script_from_command("G1 X150 Y%.1f F6000" % self.t1_offset)
+        self.gcode.run_script_from_command("G4 P500")
+        self.gcode.run_script_from_command("M400")
+        self.gcode.run_script_from_command("SET_RAIL_ENDSTOP RAIL=stepper_x POSITION=-41 DIRECTION=0 SPEED=100.0")
+        self.gcode.run_script_from_command("G4 P500")
+        self.gcode.run_script_from_command("M400")
+
+        toolhead = self.printer.lookup_object('toolhead')
+        if toolhead is None:
+            raise gcmd.error("Printer not ready")
+        
+        kin = toolhead.get_kinematics()
+        steppers = kin.get_steppers()
+        
+        x_stepper = None
+        for stepper in steppers:
+            if 'stepper_x' in stepper.get_name():
+                x_stepper = stepper
+                break
+        
+        if x_stepper is None:
+            raise gcmd.error("X stepper not found")
+
+        configfile = self.printer.lookup_object('configfile')
+        sconfig = configfile.get_status(None)['settings']
+        stconfig = sconfig.get('stepper_x', {})
+        original_speed = stconfig['homing_speed']
+        rotation_distance = stconfig['rotation_distance']
+        microsteps = stconfig['microsteps']
+        full_steps_per_rotation = stconfig['full_steps_per_rotation']
+        steps_per_mm = (full_steps_per_rotation * microsteps) / rotation_distance
+
+        first_position = x_stepper.get_mcu_position()
+        gcmd.respond_raw("First T1 X stepper position: %d" % (first_position))
+
+        self.gcode.run_script_from_command("G28.1 X")
+        
+        second_position = x_stepper.get_mcu_position()
+        gcmd.respond_raw("Second T1 X stepper position: %d" % (second_position))
+
+        self.gcode.run_script_from_command("G1 X150 Y%.1f F6000" % self.t1_offset)
+        
+        diff_steps = abs(second_position - first_position)
+        diff_mm = diff_steps / steps_per_mm
+        
+        self.gcode.run_script_from_command('M118 T1 position : %.6f mm' % (150 - diff_mm))
+        self.gcode.run_script_from_command('SET_TOOL_SWITCH_POSITION T=1 X=%.6f' % (150 - diff_mm))
+        self.gcode.run_script_from_command("G4 P500")
+        self.gcode.run_script_from_command("M400")
+        self.gcode.run_script_from_command("SET_RAIL_ENDSTOP POSITION=310 DIRECTION=1 RAIL=stepper_x SPEED=%.1f" % original_speed)
+        # self.gcode.run_script_from_command("G28 XY")
+        self.gcode.run_script_from_command("G1 X150 Y150 F6000")
+        self.gcode.run_script_from_command("M84")
+        
+        return diff_steps, diff_mm
 
 def load_config(config):
     return GCodeMove(config)
