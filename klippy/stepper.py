@@ -60,6 +60,7 @@ class MCU_stepper:
             return self._name[8:]
         return self._name
     def units_in_radians(self):
+        # Returns true if distances are in radians instead of millimeters
         return self._units_in_radians
     def get_pulse_duration(self):
         return self._step_pulse_duration, self._step_both_edge
@@ -75,16 +76,23 @@ class MCU_stepper:
         if self._step_pulse_duration is None:
             self._step_pulse_duration = .000002
         invert_step = self._invert_step
+        # Check if can enable "step on both edges"
         constants = self._mcu.get_constants()
         ssbe = int(constants.get('STEPPER_STEP_BOTH_EDGE', '0'))
         sbe = int(constants.get('STEPPER_BOTH_EDGE', '0'))
         sou = int(constants.get('STEPPER_OPTIMIZED_UNSTEP', '0'))
         want_both_edges = self._req_step_both_edge
         if self._step_pulse_duration > MIN_BOTH_EDGE_DURATION:
+            # If user has requested a very large step pulse duration
+            # then disable step on both edges (rise and fall times may
+            # not be symetric)
             want_both_edges = False
         elif sbe and self._step_pulse_duration>MIN_OPTIMIZED_BOTH_EDGE_DURATION:
+            # Older MCU and user has requested large pulse duration
             want_both_edges = False
+            # Older MCU that doesn't support step on both edges
         elif not sbe and not ssbe:
+            # MCU has optimized step/unstep - better to use that
             want_both_edges = False
         elif sou:
             want_both_edges = False
@@ -92,7 +100,9 @@ class MCU_stepper:
             self._step_both_edge = True
             invert_step = -1
             if sbe:
+                # Older MCU requires setting step_pulse_ticks=0 to enable
                 self._step_pulse_duration = 0.
+        # Configure stepper object
         step_pulse_ticks = self._mcu.seconds_to_clock(self._step_pulse_duration)
         self._mcu.add_config_cmd(
             "config_stepper oid=%d step_pin=%s dir_pin=%s invert_step=%d"
@@ -225,6 +235,7 @@ class MCU_stepper:
     def add_active_callback(self, cb):
         self._active_callbacks.append(cb)
     def generate_steps(self, flush_time):
+        # Check for activity if necessary
         if self._active_callbacks:
             sk = self._stepper_kinematics
             ret = self._itersolve_check_active(sk, flush_time)
@@ -233,6 +244,7 @@ class MCU_stepper:
                 self._active_callbacks = []
                 for cb in cbs:
                     cb(ret)
+        # Generate steps
         sk = self._stepper_kinematics
         ret = self._itersolve_generate_steps(sk, flush_time)
         if ret:
@@ -242,9 +254,11 @@ class MCU_stepper:
         a = axis.encode()
         return ffi_lib.itersolve_is_active_axis(self._stepper_kinematics, a)
 
+# Helper code to build a stepper object from a config section
 def PrinterStepper(config, units_in_radians=False):
     printer = config.get_printer()
     name = config.get_name()
+    # Stepper definition
     ppins = printer.lookup_object('pins')
     step_pin = config.get('step_pin')
     step_pin_params = ppins.lookup_pin(step_pin, can_invert=True)
@@ -257,11 +271,13 @@ def PrinterStepper(config, units_in_radians=False):
     mcu_stepper = MCU_stepper(name, step_pin_params, dir_pin_params,
                               rotation_dist, steps_per_rotation,
                               step_pulse_duration, units_in_radians)
+    # Register with helper modules
     for mname in ['stepper_enable', 'force_move', 'motion_report']:
         m = printer.load_object(config, mname)
         m.register_stepper(config, mcu_stepper)
     return mcu_stepper
 
+# Parse stepper gear_ratio config parameter
 def parse_gear_ratio(config, note_valid):
     gear_ratio = config.getlists('gear_ratio', (), seps=(':', ','), count=2,
                                  parser=float, note_valid=note_valid)
@@ -270,8 +286,11 @@ def parse_gear_ratio(config, note_valid):
         result *= g1 / g2
     return result
 
+# Obtain "step distance" information from a config section
 def parse_step_distance(config, units_in_radians=None, note_valid=False):
+    # Check rotation_distance and gear_ratio
     if units_in_radians is None:
+        # Caller doesn't know if units are in radians - infer it
         rd = config.get('rotation_distance', None, note_valid=False)
         gr = config.get('gear_ratio', None, note_valid=False)
         units_in_radians = rd is None and gr is not None
@@ -281,6 +300,7 @@ def parse_step_distance(config, units_in_radians=None, note_valid=False):
     else:
         rotation_dist = config.getfloat('rotation_distance', above=0.,
                                         note_valid=note_valid)
+    # Check microsteps and full_steps_per_rotation
     microsteps = config.getint('microsteps', minval=1, note_valid=note_valid)
     full_steps = config.getint('full_steps_per_rotation', 200, minval=1,
                                note_valid=note_valid)
@@ -298,6 +318,7 @@ def parse_step_distance(config, units_in_radians=None, note_valid=False):
 class PrinterRail:
     def __init__(self, config, need_position_minmax=True,
                  default_position_endstop=None, units_in_radians=False):
+        # Primary stepper and endstop
         self.stepper_units_in_radians = units_in_radians
         self.steppers = []
         self.endstops = []
@@ -307,6 +328,7 @@ class PrinterRail:
         self.get_name = mcu_stepper.get_name
         self.get_commanded_position = mcu_stepper.get_commanded_position
         self.calc_position_from_coord = mcu_stepper.calc_position_from_coord
+        # Primary endstop position
         mcu_endstop = self.endstops[0][0]
         if hasattr(mcu_endstop, "get_position_endstop"):
             self.position_endstop = mcu_endstop.get_position_endstop()
