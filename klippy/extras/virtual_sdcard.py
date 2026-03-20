@@ -1207,9 +1207,10 @@ class VirtualSD:
         if error_message is not None:
             self.print_stats.note_error(error_message)
         elif self.current_file is not None:
-            self.print_stats.note_pause()
+            logging.info("SD card print paused")
         else:
             self.print_stats.note_complete()
+            logging.info("SD card print completed")
         return self.reactor.NEVER
 
 def load_config(config):
