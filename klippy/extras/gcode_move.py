@@ -129,7 +129,7 @@ class GCodeMove:
     # extruder carbon fibre
     # extruder1 plastics
     # extruder2 carbon fibre adhesive
-    # mode 0: E 1: UV 2: U 3: V
+    # mode 0: E 1: UV(trapq=V) 2: U 3: V
     def aniso_extruder_switch(self, gcmd):
         params = gcmd.get_command_parameters()
         
@@ -139,13 +139,13 @@ class GCodeMove:
             if self.absolute_extrude:
                 raise gcmd.error("M83 MODE ONLY!")
 
-            self.printer.send_event("gcode:move_extruder", 'extruder', float(params['U']), self.absolute_extrude)
+            self.printer.send_event("gcode:move_extruder", 'extruder2', float(params['U']), self.absolute_extrude)
             if 'V' in params:
-                self.printer.send_event("gcode:move_extruder", 'extruder2', float(params['V']), self.absolute_extrude)         
+                self.printer.send_event("gcode:move_extruder", 'extruder', float(params['V']), self.absolute_extrude)         
         elif 'V' in params: 
             if self.absolute_extrude:
                 raise gcmd.error("M83 MODE ONLY!")
-            self.printer.send_event("gcode:move_extruder", 'extruder2', float(params['V']), self.absolute_extrude)
+            self.printer.send_event("gcode:move_extruder", 'extruder', float(params['V']), self.absolute_extrude)
 
     def cmd_G1(self, gcmd):
         # Move
@@ -173,14 +173,21 @@ class GCodeMove:
                 else:
                     # value relative to base coordinate position
                     self.last_position[3] = v + self.base_position[3]
-            if 'U' in params:
-                v = float(params['U']) * self.extrude_factor
+            # UV 同移）
+            if 'U' in params and 'V' in params:
+                val = float(params['V']) * self.extrude_factor
+                if not self.absolute_coord or not self.absolute_extrude:
+                    self.last_position[3] += val
+                else:
+                    self.last_position[3] = val + self.base_position[3]
+            elif 'U' in params:
+                val = float(params['U']) * self.extrude_factor
                 if not self.absolute_coord or not self.absolute_extrude:
                     # value relative to position of last move
-                    self.last_position[3] += v
+                    self.last_position[3] += val
                 else:
                     # value relative to base coordinate position
-                    self.last_position[3] = v + self.base_position[3]
+                    self.last_position[3] = val + self.base_position[3]
             elif 'V' in params:
                 val = float(params['V']) * self.extrude_factor
                 if not self.absolute_coord or not self.absolute_extrude:

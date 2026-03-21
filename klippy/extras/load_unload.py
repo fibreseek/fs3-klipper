@@ -348,6 +348,7 @@ class LoadUnloadHandler:
         if index == Channel.P1:
             # P1通道，直接进入等待插入
             self.load_step = State.WAIT_INSERT
+            self.gcode.run_script_from_command("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=0")
             gcmd.respond_info(f"[{channel_name} LOAD] STATE:11 WAIT_INSERT")
             # 启动核心处理定时器开始检测耗材
             self._start_process_timer(1.0)
@@ -522,7 +523,7 @@ class LoadUnloadHandler:
             if index == Channel.F:
                 # F 通道：用户确认清理完成后，执行 V 进挤 2mm、降温、开风扇，再进入自动擦嘴
                 self.gcode.run_script_from_command("M83")
-                self.gcode.run_script_from_command("AE2")
+                self.gcode.run_script_from_command("ACTIVATE_LEFT_P_EXTRUDER")
                 self.gcode.run_script_from_command("G1 V2 F100")
                 nozzle = self.load_unload_nozzle
                 target = self.load_unload_temperature
@@ -565,9 +566,8 @@ class LoadUnloadHandler:
         self.load_step = State.IDLE
         self.user_confirmed = 0
 
-        # F通道需要恢复最低挤出温度限制
-        if index == Channel.F:
-            self.gcode.run_script_from_command("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=180")
+        # 恢复最低挤出温度限制
+        self.gcode.run_script_from_command("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=180")
 
         # 关闭加热器
         self.gcode.run_script_from_command("M104 T0 S0")
@@ -613,9 +613,8 @@ class LoadUnloadHandler:
         self.load_step = State.IDLE
         self.user_confirmed = 0
 
-        # F通道需要恢复最低挤出温度限制
-        if index == Channel.F:
-            self.gcode.run_script_from_command("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=180")
+        # 恢复最低挤出温度限制
+        self.gcode.run_script_from_command("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=180")
 
         # 关闭加热器
         self.gcode.run_script_from_command("M104 T0 S0")
@@ -636,8 +635,8 @@ class LoadUnloadHandler:
         功能：根据通道索引激活对应的挤出机
 
         挤出机映射:
-        - F(0)  -> extruder  (U轴)
-        - P1(1) -> extruder2 (V轴)
+        - F(0)  -> extruder2  (U轴)
+        - P1(1) -> extruder (V轴)
         - P2(2) -> extruder1 (E轴)
 
         这个映射确保每个通道使用正确的挤出机轴
@@ -645,8 +644,8 @@ class LoadUnloadHandler:
         logger.debug("[PREPARE_LOAD_UNLOAD_NOZZLE] Starting")
         index = self.load_unload_index
         extruder_map = {
-            Channel.F: 'extruder',
-            Channel.P1: 'extruder2',
+            Channel.F: 'extruder2',
+            Channel.P1: 'extruder',
             Channel.P2: 'extruder1'
         }
         extruder_name = extruder_map.get(index, 'extruder')
@@ -2030,9 +2029,8 @@ class LoadUnloadHandler:
             self._stop_load_unload_timer()  # 停止进退料超时定时器
             self._restore_idle_timeout()  # 恢复 idle_timeout
 
-            # F通道退料完成，恢复最低挤出温度限制
-            if index == Channel.F:
-                self.gcode.run_script_from_command("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=180")
+            # 恢复最低挤出温度限制
+            self.gcode.run_script_from_command("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=180")
 
             # 等待所有运动完成
             self.gcode.run_script_from_command("M400")

@@ -111,9 +111,9 @@ class PrintStats:
         self.current_extruder = move_extruder
         if self.current_extruder == 'extruder':
             if absolute_mode:
-                self.u_filament_used = move_pos
+                self.v_filament_used = move_pos
             else:
-                self.u_filament_used += move_pos
+                self.v_filament_used += move_pos
         elif self.current_extruder == 'extruder1':
             if absolute_mode:
                 self.e_filament_used = move_pos
@@ -121,9 +121,9 @@ class PrintStats:
                 self.e_filament_used += move_pos
         elif self.current_extruder == 'extruder2':
             if absolute_mode:
-                self.v_filament_used = move_pos
+                self.u_filament_used = move_pos
             else:
-                self.v_filament_used += move_pos
+                self.u_filament_used += move_pos
         self.filament_used = self.e_filament_used + self.u_filament_used + self.v_filament_used
 
     def _handle_activate_extruder(self):
@@ -140,11 +140,11 @@ class PrintStats:
         cur_epos = gc_status['position'].e
         
         if self.current_extruder == 'extruder':
-            self.last_u_pos = cur_epos
+            self.last_v_pos = cur_epos
         elif self.current_extruder == 'extruder1':
             self.last_e_pos = cur_epos
         elif self.current_extruder == 'extruder2':
-            self.last_v_pos = cur_epos
+            self.last_u_pos = cur_epos
     
     def _update_filament_usage(self, eventtime):
         gc_status = self.gcode_move.get_status(eventtime)
@@ -158,17 +158,17 @@ class PrintStats:
         
         # Update individual extruder usage based on current extruder
         if self.current_extruder == 'extruder':
-            u_delta = (cur_epos - self.last_u_pos) / extrude_factor
-            self.u_filament_used += u_delta
-            self.last_u_pos = cur_epos
+            v_delta = (cur_epos - self.last_v_pos) / extrude_factor
+            self.v_filament_used += v_delta
+            self.last_v_pos = cur_epos
         elif self.current_extruder == 'extruder1':
             e_delta = (cur_epos - self.last_e_pos) / extrude_factor
             self.e_filament_used += e_delta
             self.last_e_pos = cur_epos
         elif self.current_extruder == 'extruder2':
-            v_delta = (cur_epos - self.last_v_pos) / extrude_factor
-            self.v_filament_used += v_delta
-            self.last_v_pos = cur_epos
+            u_delta = (cur_epos - self.last_u_pos) / extrude_factor
+            self.u_filament_used += u_delta
+            self.last_u_pos = cur_epos
         
     def set_current_file(self, filename):
         # 若当前为 preprinting（宏预备后调用 BASE），只更新 filename，保留 state/prep_stage
@@ -190,6 +190,10 @@ class PrintStats:
     
     def note_pausing(self):
         self.state = "pausing"
+        self.error_message = ""
+    
+    def note_standby(self):
+        self.state = "standby"
         self.error_message = ""
 
     def note_set_prep_stage(self, stage):
