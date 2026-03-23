@@ -131,6 +131,8 @@ class LoadUnloadHandler:
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object('gcode')
         self.reactor = self.printer.get_reactor()
+        # 进入 load_unload 前的 print_stats.state，用于结束后恢复（如 paused / standby）
+        self._print_stats_state_before_load_unload = None
 
         # ========================================================
         # 状态变量 (对应 global_variables.cfg)
@@ -1028,19 +1030,34 @@ class LoadUnloadHandler:
     def _sync_print_stats_load_unload(self, end_state, error_message=""):
         """
         同步 print_stats 状态，与状态机设计一致
-        end_state: 'load_unload' | 'standby' | 'error'
+        end_state: 'load_unload' | 'standby' | 'error'（error 仅记录日志并同样恢复先前状态）
+
+        进入 load_unload 前必须记下来源状态；结束时用 SET_PRINT_STATS_INFO 恢复。
+        error 与正常结束相同：回到进入前状态，不把 print_stats 设为 error。
+        若在已是 load_unload 时再调用 load_unload，不覆盖已保存的来源状态。
         """
         try:
             print_stats = self.printer.lookup_object('print_stats')
             if end_state == "load_unload":
-                self.gcode.run_script_from_command("SET_PRINT_LOAD_UNLOAD_STATE")
-            elif end_state == "standby":
-                self.gcode.run_script_from_command("SET_PRINT_STATS_INFO STATE=standby")
-            elif end_state == "error":
-                print_stats.state = "error"
-                print_stats.error_message = error_message
-                print_stats.prep_stage = None
-                print_stats._stop_busy_timer()
+                if print_stats.state != "load_unload":
+                    self._print_stats_state_before_load_unload = print_stats.state
+                logger.debug(
+                    "[_sync_print_stats_load_unload] enter load_unload, restore_after=%s"
+                    % (self._print_stats_state_before_load_unload,))
+                self.gcode.run_script_from_command("SET_PRINT_STATS_INFO STATE=load_unload")
+            elif end_state in ("standby", "error"):
+                if end_state == "error" and error_message:
+                    logger.error(
+                        "[_sync_print_stats_load_unload] %s" % (error_message,))
+                restore = self._print_stats_state_before_load_unload
+                self._print_stats_state_before_load_unload = None
+                if restore not in ("standby", "paused"):
+                    restore = "standby"
+                logger.debug(
+                    "[_sync_print_stats_load_unload] restore print_stats -> %s (end=%s)"
+                    % (restore, end_state))
+                self.gcode.run_script_from_command(
+                    "SET_PRINT_STATS_INFO STATE=%s" % (restore,))
         except Exception as e:
             logger.debug(f"[_sync_print_stats_load_unload] {e}")
 

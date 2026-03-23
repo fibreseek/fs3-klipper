@@ -5,6 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
 import logging
+import os
 
 # 有效状态集合，与状态机设计保持一致
 VALID_STATES = (
@@ -12,6 +13,38 @@ VALID_STATES = (
     "complete", "cancelled", "load_unload", "calibration", "maintenance",
     "busy", "error"
 )
+
+# 内部 note_*、SET_PRINT_STATS_INFO STATE=、SET_PRINT_*_STATE 共用。
+# 与状态机流转图一致；paused <-> load_unload 表示暂停时可进退料，结束后可回到 paused。
+# printing -> paused 与内部 note_pause 一致；precheck -> printing 对应 note_start 跳过 preprinting 的边界情况。
+# paused -> preprinting 用于断电恢复 PREPARE_RECOVER_PRINT_FILE；paused -> standby 用于清除断电记录等。
+# precheck/preprinting -> standby/cancelled 供正式打印前中止作业。
+STATE_TRANSITIONS = {
+    "standby": frozenset({
+        "precheck", "paused", "load_unload", "calibration", "maintenance",
+        "busy",
+    }),
+    "precheck": frozenset({
+        "preprinting", "printing", "standby", "cancelled", "error",
+    }),
+    "preprinting": frozenset({
+        "printing", "paused", "standby", "cancelled", "error",
+    }),
+    "printing": frozenset({
+        "pausing", "paused", "complete", "cancelled", "error",
+    }),
+    "pausing": frozenset({"paused", "cancelled", "error"}),
+    "paused": frozenset({
+        "printing", "preprinting", "standby", "cancelled", "load_unload", "error",
+    }),
+    "complete": frozenset({"standby"}),
+    "cancelled": frozenset({"standby"}),
+    "error": frozenset({"standby"}),
+    "load_unload": frozenset({"standby", "paused", "error"}),
+    "calibration": frozenset({"standby", "error"}),
+    "maintenance": frozenset({"standby", "error"}),
+    "busy": frozenset({"standby", "error"}),
+}
 
 class PrintStats:
     def __init__(self, config):
@@ -94,11 +127,24 @@ class PrintStats:
 
     def _make_set_state_cmd(self, state_name):
         def cmd(gcmd):
-            self._set_state(state_name)
+            self._set_state(state_name, gcmd)
         return cmd
 
-    def _set_state(self, state):
+    def _require_allowed_state_transition(self, new_state, gcmd=None):
+        old = self.state
+        if old == new_state:
+            return
+        allowed = STATE_TRANSITIONS.get(old)
+        if allowed is None or new_state not in allowed:
+            msg = "Invalid print_stats state transition %s -> %s" % (old, new_state)
+            if gcmd is not None:
+                raise gcmd.error(msg)
+            logger.error(f"[_require_allowed_state_transition] {msg}")
+            raise self.printer.command_error(msg)
+
+    def _set_state(self, state, gcmd):
         """设置辅助状态（load_unload/calibration/maintenance/busy）"""
+        self._require_allowed_state_transition(state, gcmd)
         self.state = state
         self.error_message = ""
         self.prep_stage = None
@@ -180,20 +226,32 @@ class PrintStats:
 
     def note_precheck(self):
         # 进入打印前预检查阶段
+        self._require_allowed_state_transition("precheck")
         self.state = "precheck"
         self.error_message = ""
 
     def note_preprinting(self):
         # 进入预备动作阶段（加热、归位、清理、调平等）
+        self._require_allowed_state_transition("preprinting")
         self.state = "preprinting"
         self.error_message = ""
     
     def note_pausing(self):
+        self._require_allowed_state_transition("pausing")
         self.state = "pausing"
         self.error_message = ""
     
     def note_standby(self):
+        self._require_allowed_state_transition("standby")
         self.state = "standby"
+        self.error_message = ""
+
+    def note_powerloss_recovery_paused(self, filename=None, gcmd=None):
+        """检测到断电续打文件时进入 paused；不经过暂停宏，不修改 last_pause_time。"""
+        if filename:
+            self.filename = os.path.basename(filename)
+        self._require_allowed_state_transition("paused", gcmd)
+        self.state = "paused"
         self.error_message = ""
 
     def note_set_prep_stage(self, stage):
@@ -223,6 +281,7 @@ class PrintStats:
         self.note_set_prep_stage(stage)
 
     def note_start(self):
+        self._require_allowed_state_transition("printing")
         curtime = self.reactor.monotonic()
         if self.print_start_time is None:
             self.print_start_time = curtime
@@ -245,6 +304,7 @@ class PrintStats:
             # update filament usage
             # self._update_filament_usage(curtime)
         if self.state != "error":
+            self._require_allowed_state_transition("paused")
             self.state = "paused"
     def note_complete(self):
         self._note_finish("complete")
@@ -255,6 +315,7 @@ class PrintStats:
     def _note_finish(self, state, error_message = ""):
         if self.print_start_time is None:
             return
+        self._require_allowed_state_transition(state)
         self.state = state
         self.error_message = error_message
         eventtime = self.reactor.monotonic()
@@ -266,9 +327,10 @@ class PrintStats:
         self.print_start_time = None
     cmd_SET_PRINT_STATS_INFO_help = (
         "Pass slicer info like layer and total to klipper. "
-        "Optional STATE= to set print state. Valid: standby, precheck, preprinting, "
-        "printing, pausing, paused, complete, cancelled, load_unload, calibration, "
-        "maintenance, busy, error."
+        "Optional STATE= to set print state (must follow configured state machine "
+        "transitions, e.g. paused may enter load_unload for filament change). "
+        "Valid: standby, precheck, preprinting, printing, pausing, paused, complete, "
+        "cancelled, load_unload, calibration, maintenance, busy, error."
     )
     def cmd_SET_PRINT_STATS_INFO(self, gcmd):
         total_layer = gcmd.get_int("TOTAL_LAYER", self.info_total_layer, \
@@ -287,12 +349,13 @@ class PrintStats:
                 current_layer != self.info_current_layer:
             self.info_current_layer = min(current_layer, self.info_total_layer)
 
-        # 可选的 STATE 参数，仅接受有效状态
+        # 可选的 STATE 参数，仅接受有效状态且须满足状态机允许变迁
         state = gcmd.get("STATE", None)
         if state is not None:
             if state not in VALID_STATES:
                 raise gcmd.error("Invalid STATE='%s', must be one of: %s" % (
                     state, ", ".join(VALID_STATES)))
+            self._require_allowed_state_transition(state, gcmd)
             self.state = state
             self.error_message = ""
             self.prep_stage = None

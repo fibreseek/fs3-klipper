@@ -449,15 +449,10 @@ class VirtualSD:
             gcmd.respond_raw("[POWERLOSS] Powerloss file exists. [FILE: %s]" % self.powerloss_progress.current_print_file)
 
             # 在主动检查断电续打文件时，将 print_stats 状态设置为暂停，
-            # 方便上位机在用户选择是否恢复打印前展示为“暂停”状态
-            try:
-                pl_file = getattr(self.powerloss_progress, "current_print_file", None)
-                if pl_file:
-                    self.print_stats.filename = os.path.basename(pl_file)
-                self.print_stats.state = "paused"
-                self.print_stats.error_message = ""
-            except Exception:
-                logging.exception("virtual_sdcard: failed to set print_stats paused in CHECK_POWERLOSS_FILE")
+            # 方便上位机在用户选择是否恢复打印前展示为“暂停”状态（经状态机校验）
+            pl_file = getattr(self.powerloss_progress, "current_print_file", None)
+            self.print_stats.note_powerloss_recovery_paused(
+                filename=pl_file, gcmd=gcmd)
 
             powerloss_init_info = self.powerloss_progress.scan_init_paramaters_for_startup()
             gcode_script = []
