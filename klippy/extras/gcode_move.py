@@ -346,6 +346,7 @@ class GCodeMove:
 
         self.t0_offset = all_vars.get('t0_switch_y', 250.0)
     
+        self.gcode.run_script_from_command("SET_PRINT_STATS_INFO STATE=calibration")
         self.gcode.run_script_from_command("G28 XY")
         self.gcode.run_script_from_command("G1 X150 Y%.1f F6000" % self.t0_offset)
         self.gcode.run_script_from_command("G4 P500")
@@ -402,9 +403,9 @@ class GCodeMove:
         self.gcode.run_script_from_command("M400")
         self.gcode.run_script_from_command("SET_RAIL_ENDSTOP RAIL=stepper_x SPEED=%.1f" % original_speed)
         # self.gcode.run_script_from_command("G28 XY")
-        self.gcode.run_script_from_command("G1 X150 Y150 F6000")
+        # self.gcode.run_script_from_command("G1 X150 Y150 F6000")
         self.gcode.run_script_from_command("M84")
-        
+        self.gcode.run_script_from_command("SET_PRINT_STATS_INFO STATE=standby")
         return diff_steps, diff_mm
 
     cmd_GET_X_STEPPER_DIFF_T1_help = "Get X stepper diff for T1 (reverse homing)"
@@ -416,6 +417,7 @@ class GCodeMove:
 
         self.t1_offset = all_vars.get('t1_switch_y', 250.0)
 
+        self.gcode.run_script_from_command("SET_PRINT_STATS_INFO STATE=calibration")
         self.gcode.run_script_from_command("G28 XY")
         self.gcode.run_script_from_command("G1 X150 Y%.1f F6000" % self.t1_offset)
         self.gcode.run_script_from_command("G4 P500")
@@ -468,9 +470,9 @@ class GCodeMove:
         self.gcode.run_script_from_command("M400")
         self.gcode.run_script_from_command("SET_RAIL_ENDSTOP POSITION=310 DIRECTION=1 RAIL=stepper_x SPEED=%.1f" % original_speed)
         # self.gcode.run_script_from_command("G28 XY")
-        self.gcode.run_script_from_command("G1 X150 Y150 F6000")
+        # self.gcode.run_script_from_command("G1 X150 Y150 F6000")
         self.gcode.run_script_from_command("M84")
-        
+        self.gcode.run_script_from_command("SET_PRINT_STATS_INFO STATE=standby")
         return diff_steps, diff_mm
 
 def load_config(config):
