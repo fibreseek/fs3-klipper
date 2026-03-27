@@ -18,6 +18,8 @@
 #   23 = PREHEAT_LOW       低温预热50°C (P1内部状态)
 #   24 = CLOG_DETECTION    堵料检测中 (P1内部状态)
 #   25 = CLOG_RETRACTED    堵料回退完成 (P1内部状态，耗材已到达喷头)
+#   26 = WAIT_MOMENT_FOR_FAST_MOVE 等待时机进行快速移动 (P1内部状态)
+#   27 = SLOW_EXTRUSION_CHECK_CLOG 慢速挤出后检测堵料中 (P1内部状态)
 # 3x: 确认阶段
 #   30 = CONFIRM_EXTRUSION 等待确认是否挤出
 #   31 = RETRYING          补料重试中
@@ -38,7 +40,7 @@
 进料流程说明:
   F通道 (L=1): 10(预热中) -> 22(熔融挤出) -> [30(确认)] -> 40(用户清理) -> 41(自动擦嘴) -> 90
   F通道 (L=0): 10(预热中) -> 11(等待插入) -> 20(快速进料) -> 22(熔融挤出) -> [30(确认)] -> 40(用户清理) -> 41(自动擦嘴) -> 90
-  P1通道: 11(等待插入) -> 12(检测到耗材) -> 24(50°C预热+快挤出) -> 21(慢速挤出,堵料检测) -> 25(回退5mm+前进3mm) -> 90(完成)
+  P1通道: 11(等待插入) -> 12(检测到耗材) -> 24(50°C预热+快挤出) -> 21(慢速挤出) -> 27(堵料检测) -> 25(回退5mm+前进3mm) -> 90(完成)
   P2通道 (任何): 10(预热中) -> 11(等待插入) -> 22(熔融挤出) -> [30(确认)] -> 41(自动擦嘴) -> 90
   注: P1通道不设置初始温度，保持当前温度；在阶段2(24)设置50°C
   注: P1通道堵料检测仅在慢速挤出阶段(21)进行，检测到耗材停止运动=到达喷头
@@ -71,7 +73,7 @@ class State:
     MELT_EXTRUDING = 22    # 熔融挤出中 (所有通道)
         # P1堵料检测阶段 (新增，使用2x编号)
     SLOW_EXTRUSION = 21    # 慢速逐毫米挤出中 (1mm-by-1mm with timeout)
-    SLOW_EXTRUSION_CHECK_CLOG = 22 # 慢速挤出后检测堵料中
+    SLOW_EXTRUSION_CHECK_CLOG = 27 # 慢速挤出后检测堵料中
     PREHEAT_LOW = 23       # 低温预热中 (50°C)
     CLOG_DETECTION = 24    # 堵料检测中 (快速进料1000mm @ 20mm/s)
     CLOG_RETRACTED = 25    # 堵料回退完成 (回退10mm)
@@ -143,6 +145,7 @@ class LoadUnloadHandler:
         self.load_unload_nozzle = 0     # 喷嘴索引: 0=T0, 1=T1
         self.load_unload_temperature = 200 # 进料/退料温度，默认200°C
         self.operation_mode = OperationMode.IDLE # 操作模式: 0=空闲, 1=进料, -1=退料
+        self.last_operation_mode = OperationMode.IDLE # 超时前最后的操作模式，供FINISH_LOADUNLOAD使用
         self.load_step = State.IDLE    # 当前状态机步骤
         self.user_confirmed = 0        # 用户确认标志: 0=未确认, 1=已确认挤出, 2=继续补料
         self.was_loaded_parameter = 0  # 存储L参数，供F/P1通道温度达标后判断使用
@@ -182,6 +185,7 @@ class LoadUnloadHandler:
         # ========================================================
         self.p2_long_distance = config.getfloat('p2_long_distance', 112.5)      # P2 进料距离 (mm) - 2.5mm/s * 45s = 112.5mm
         self.p2_step_length = config.getfloat('p2_step_length', 2.5)            # P2 每次进料步长 (mm) - 2.5mm @ 2.5mm/s = 1秒/步
+        self.load_step_time = config.getfloat('load_step_time', 0.25, above=0.)  # 进料单步时长(秒)，用于平滑进料并限制停止残留
 
         # ========================================================
         # 通用参数
@@ -193,6 +197,7 @@ class LoadUnloadHandler:
         # 退料速度 (不同通道使用不同速度)
         self.f_p1_unload_speed = config.getfloat('f_p1_unload_speed', 1200.0)  # F/P1 退料速度 (F1200 = 20mm/s，已限制最大速度)
         self.p2_unload_speed = config.getfloat('p2_unload_speed', 1000.0)       # P2 退料速度 (F1000 = 16.67mm/s)
+        self.unload_step_time = config.getfloat('unload_step_time', 0.25, above=0.)  # 退料单步时长(秒)，用于平滑退料并限制停止残留
 
         # 清理参数 (喷嘴位置和运动参数)
         self.clean_nozzle_x = config.getfloat('clean_nozzle_x', 267.0)         # 初始清理X位置，预挤出耗材进入废料盒
@@ -412,6 +417,7 @@ class LoadUnloadHandler:
         self.load_unload_nozzle = nozzle
         self.load_unload_temperature = target
         self.load_unload_index = index
+        self.load_distance = 0.0
         # 停止任何残留的定时器（防止上一次操作的定时器干扰新操作）
         self._stop_temp_timer()
         self._stop_process_timer()
@@ -457,10 +463,19 @@ class LoadUnloadHandler:
         index = self.load_unload_index
         channel_name = self._get_channel_name(index)
 
+        # UI/上位机可能会在流程推进后重复下发该命令。
+        # 对已进入收尾阶段的情况直接忽略。
+        if index == Channel.P2 and load_step in [State.AUTO_CLEANING, State.FINISHED, State.IDLE]:
+            return
+
         if load_step not in [State.MELT_EXTRUDING, State.CONFIRM_EXTRUSION, State.RETRYING]:
             gcmd.respond_info(f"[{channel_name} LOAD] STATE:99 ERROR Invalid state for confirmation")
             return
 
+        # P1 通道不支持用户确认挤出，P1 流程由堵料检测自动完成
+        if index == Channel.P1:
+            gcmd.respond_info(f"[{channel_name} LOAD] STATE:99 ERROR P1 does not support manual confirmation")
+            return
 
         # 设置用户确认标志，让挤出循环自动停止
         self.user_confirmed = 1
@@ -475,8 +490,8 @@ class LoadUnloadHandler:
             self.user_confirmed = 0
             gcmd.respond_info(f"[{channel_name} LOAD] STATE:40 WAIT_USER_CLEAN")
             gcmd.respond_info(f"ACTION:PROMPT_CONFIRM {channel_name}_CLEANED")
-        else:
-            # P2 通道直接结束逻辑（通常直接进入自动擦嘴流程）
+        elif index == Channel.P2:
+            # P2 通道直接结束逻辑（进入自动擦嘴流程）
             self._finish_loadunload()
 
     cmd_CONTINUE_LOAD_help = "继续补料（用户确认未出料）"
@@ -563,7 +578,8 @@ class LoadUnloadHandler:
         self.printer.send_event("filament_clog:check_stop")
         self.gcode.respond_info("filament_clog:check_stop")
 
-        # 重置状态变量
+        # 重置状态变量（先保存操作模式，供超时后FINISH_LOADUNLOAD使用）
+        self.last_operation_mode = self.operation_mode
         self.operation_mode = OperationMode.IDLE
         self.load_step = State.IDLE
         self.user_confirmed = 0
@@ -692,6 +708,14 @@ class LoadUnloadHandler:
 
         # 检查是否有正在进行的流程
         if self.operation_mode == OperationMode.IDLE:
+            # 超时后 operation_mode 已被重置为 IDLE，但 load_step 保留 TIMEOUT
+            # 用户点击 Finish 需要发送 STATE:90 让 UI 退出 loading 状态
+            if self.load_step == State.TIMEOUT:
+                last_action = 'LOAD' if self.last_operation_mode == OperationMode.LOADING else 'UNLOAD'
+                gcmd.respond_info(f"[{channel_name} {last_action}] User confirmed after timeout")
+                gcmd.respond_info(f"[{channel_name} {last_action}] STATE:90 FINISHED")
+                self.load_step = State.IDLE
+                return
             gcmd.respond_info(f"[{channel_name} {action}] ERROR: No operation in progress")
             return
 
@@ -727,6 +751,7 @@ class LoadUnloadHandler:
 
     def _start_temp_timer(self, duration):
         """启动温度等待定时器（用于温度达标检测）"""
+        self._stop_temp_timer()
         self.temp_timer = self.reactor.register_timer(
             self._temp_timer_handler, self.reactor.NOW
         )
@@ -979,6 +1004,14 @@ class LoadUnloadHandler:
         channel_name = self._get_channel_name(index)
         is_loading = self.operation_mode == OperationMode.LOADING
 
+        # 如果流程已经结束（EXIT/FINISH 已处理），跳过超时处理
+        # reactor 可能在 unregister_timer 后仍会触发一次已到期的定时器回调
+        if self.operation_mode == OperationMode.IDLE or \
+                self.load_step in [State.FINISHED, State.IDLE]:
+            logger.debug(f"[_load_unload_timeout] Already in terminal state "
+                         f"{self.load_step}, skipping")
+            return self.reactor.NEVER
+
         logger.warning(f"[_load_unload_timeout] Load/unload timeout for {channel_name}")
 
         # 发送超时状态码
@@ -1202,9 +1235,11 @@ class LoadUnloadHandler:
 
         # ------ 阶段20：F远端快速进料 1100mm (30mm/s) ------
         elif load_step == State.FAST_LOADING:
-            step_length = self.f_step_length  # 30mm每步，30mm/s速度 = 1秒/步
+            speed_mm_s = self.f_step_length
+            remaining_distance = self.f_long_distance - self.load_distance
+            step_length = min(speed_mm_s * self.load_step_time, remaining_distance)
             self.gcode.run_script_from_command("M83")  # 设置相对坐标模式
-            self.gcode.run_script_from_command(f"G1 U{step_length} F{step_length * 60}")  # U轴进料
+            self.gcode.run_script_from_command(f"G1 U{step_length} F{speed_mm_s * 60}")  # U轴进料
             self.load_distance += step_length
             current_distance = self.load_distance
 
@@ -1220,7 +1255,8 @@ class LoadUnloadHandler:
                 return eventtime + 0.1
 
             # 继续进料
-            return eventtime + 1.0
+            move_duration = step_length / speed_mm_s if speed_mm_s > 0 else self.load_step_time
+            return eventtime + move_duration
 
         # ------ 阶段22：熔融挤出 (5mm/s) ------
         elif load_step == State.MELT_EXTRUDING:
@@ -1233,9 +1269,11 @@ class LoadUnloadHandler:
                 return self.reactor.NEVER
 
             # 继续熔融挤出
-            melt_step = self.f_melt_step_length  # 5mm每步，5mm/s速度 = 1秒/步
+            speed_mm_s = self.f_melt_step_length
+            remaining_distance = self.f_melt_distance - self.load_distance
+            melt_step = min(speed_mm_s * self.load_step_time, remaining_distance)
             self.gcode.run_script_from_command("M83")
-            self.gcode.run_script_from_command(f"G1 U{melt_step} F{melt_step * 60}")
+            self.gcode.run_script_from_command(f"G1 U{melt_step} F{speed_mm_s * 60}")
             self.load_distance += melt_step
             current_distance = self.load_distance
 
@@ -1250,11 +1288,14 @@ class LoadUnloadHandler:
                 return self.reactor.NEVER
 
             # 继续挤出
-            return eventtime + 1.0
+            move_duration = melt_step / speed_mm_s if speed_mm_s > 0 else self.load_step_time
+            return eventtime + move_duration
 
         # ------ 阶段31：用户确认未出料，补料重试 50mm ------
         elif load_step == State.RETRYING:
-            retry_step = self.retry_step_length  # 5mm每步
+            speed_mm_s = self.retry_speed / 60.0
+            remaining_distance = self.retry_distance - self.load_distance
+            retry_step = min(speed_mm_s * self.load_step_time, remaining_distance)
             self.gcode.run_script_from_command(f"G1 U{retry_step} F{self.retry_speed}")
             self.load_distance += retry_step
             current_distance = self.load_distance
@@ -1270,7 +1311,8 @@ class LoadUnloadHandler:
                 return self.reactor.NEVER
 
             # 继续补料
-            return eventtime + 1.0
+            move_duration = retry_step / speed_mm_s if speed_mm_s > 0 else self.load_step_time
+            return eventtime + move_duration
 
         return self.reactor.NEVER
 
@@ -1417,7 +1459,8 @@ class LoadUnloadHandler:
                 # 距离未达标，执行快速进料
                 # 计算本步需要挤出的长度（防止超出目标距离）
                 remaining_distance = self.p1_long_distance - self.load_distance
-                step_length = min(self.p1_step_length, remaining_distance)  # 使用配置的步长
+                speed_mm_s = self.p1_fast_move_speed / 60.0
+                step_length = min(speed_mm_s * self.load_step_time, remaining_distance)
 
                 self.gcode.run_script_from_command("M83")
                 self.gcode.run_script_from_command(f"G1 V{step_length} F{self.p1_fast_move_speed}")  # V轴进料
@@ -1428,7 +1471,6 @@ class LoadUnloadHandler:
                 self.gcode.respond_info(f"[{channel_name} LOAD] FAST_EXTRUSION {current_distance:.0f}/{self.p1_long_distance:.0f}mm")
 
                 # 计算本次移动所需时间，动态调整下一次进料的时间
-                speed_mm_s = self.p1_fast_move_speed / 60.0
                 move_duration = step_length / speed_mm_s if speed_mm_s > 0 else 1.0
                 # 继续进料循环
                 return eventtime + move_duration
@@ -1490,9 +1532,6 @@ class LoadUnloadHandler:
             self.gcode.run_script_from_command(f"G1 V{step_length} F{self.p1_slow_move_speed}")  # V轴进料
             self.p1_slow_extrusion_distance += step_length
 
-            toolhead = self.printer.lookup_object('toolhead')
-            toolhead.wait_moves()
-
             elapsed_time = eventtime - self.p1_slow_extrusion_start_time
             self.gcode.respond_info(f"[{channel_name} LOAD] SLOW_EXTRUSION {self.p1_slow_extrusion_distance:.0f}mm ({elapsed_time:.0f}s)")
 
@@ -1511,7 +1550,7 @@ class LoadUnloadHandler:
                 logger.debug("[SLOW_EXTRUSION_CHECK_CLOG] Clog detected, skipping motion commands")
                 return self.reactor.NEVER
 
-            self._send_state_code(22, 'SLOW_EXTRUSION_CHECK_CLOG', channel_name)
+            self._send_state_code(27, 'SLOW_EXTRUSION_CHECK_CLOG', channel_name)
 
             # 移除重复的 M400：在 CLOG_DETECTION 切换状态时已经等待过了
             # 这里不需要再次等待，直接开始慢速挤出
@@ -1521,9 +1560,6 @@ class LoadUnloadHandler:
             self.gcode.run_script_from_command("M83")
             self.gcode.run_script_from_command(f"G1 V{step_length} F{self.p1_slow_move_speed}")  # V轴进料
             self.p1_slow_extrusion_distance += step_length
-
-            toolhead = self.printer.lookup_object('toolhead')
-            toolhead.wait_moves()
 
             elapsed_time = eventtime - self.p1_slow_extrusion_start_time
             self.gcode.respond_info(f"[{channel_name} LOAD] SLOW_EXTRUSION_CHECK_CLOG {self.p1_slow_extrusion_distance:.0f}mm ({elapsed_time:.0f}s)")
@@ -1633,9 +1669,11 @@ class LoadUnloadHandler:
                 return self.reactor.NEVER
 
             # 继续熔融挤出
-            step_length = self.p2_step_length  # 5mm每步
+            speed_mm_s = self.p2_step_length
+            remaining_distance = self.p2_long_distance - self.load_distance
+            step_length = min(speed_mm_s * self.load_step_time, remaining_distance)
             self.gcode.run_script_from_command("M83")
-            self.gcode.run_script_from_command(f"G1 E{step_length} F{step_length * 60}")  # E轴进料
+            self.gcode.run_script_from_command(f"G1 E{step_length} F{speed_mm_s * 60}")  # E轴进料
             self.load_distance += step_length
             current_distance = self.load_distance
 
@@ -1649,12 +1687,14 @@ class LoadUnloadHandler:
                 self.gcode.respond_info("ACTION:PROMPT_CONFIRM P2_EXTRUDED")
                 return self.reactor.NEVER
 
-            # 继续挤出
-            return eventtime + 1.0
+            move_duration = step_length / speed_mm_s if speed_mm_s > 0 else self.load_step_time
+            return eventtime + move_duration
 
         # ------ 阶段31：用户确认未出料，补料重试 50mm ------
         elif load_step == State.RETRYING:
-            retry_step = self.retry_step_length
+            speed_mm_s = self.retry_speed / 60.0
+            remaining_distance = self.retry_distance - self.load_distance
+            retry_step = min(speed_mm_s * self.load_step_time, remaining_distance)
             self.gcode.run_script_from_command("M83")
             self.gcode.run_script_from_command(f"G1 E{retry_step} F{self.retry_speed}")
             self.load_distance += retry_step
@@ -1670,8 +1710,8 @@ class LoadUnloadHandler:
                 self.gcode.respond_info("ACTION:PROMPT_CONFIRM P2_EXTRUDED")
                 return self.reactor.NEVER
 
-            # 继续补料
-            return eventtime + 1.0
+            move_duration = retry_step / speed_mm_s if speed_mm_s > 0 else self.load_step_time
+            return eventtime + move_duration
 
         return self.reactor.NEVER
 
@@ -1738,8 +1778,9 @@ class LoadUnloadHandler:
             self._finish_loadunload()
             return self.reactor.NEVER
 
-        # 继续退料动作
-        step_length = unload_speed / 60  # 计算每步的进料量(mm)
+        # 继续退料动作：使用更小的时间片，提高连续性并限制停止残留
+        speed_mm_s = unload_speed / 60.0
+        step_length = speed_mm_s * self.unload_step_time
         current_speed = unload_speed
 
         # 根据通道选择对应的轴进行退料
@@ -1757,7 +1798,8 @@ class LoadUnloadHandler:
             self.gcode.respond_info(f"[{channel_name} UNLOAD] PROGRESS {self.load_distance:.0f}mm")
 
         # 继续退料循环
-        return eventtime + 1.0
+        move_duration = step_length / speed_mm_s if speed_mm_s > 0 else 0.25
+        return eventtime + move_duration
 
     # ============================================================
     # 辅助方法
@@ -2002,31 +2044,25 @@ class LoadUnloadHandler:
         channel_name = self._get_channel_name(index)
 
         if self.operation_mode == OperationMode.LOADING:
-            # 进料完成
-            self.operation_mode = OperationMode.IDLE
+            # 进料完成：先停定时器，再执行清理，最后才设 IDLE
             self.load_step = State.AUTO_CLEANING
             # 停止所有定时器，防止继续执行旧逻辑
             self._stop_process_timer()
             self._stop_temp_timer()
             self._stop_timeout_timer()
-            self._stop_load_unload_timer()  # 停止进退料超时定时器
-            self._restore_idle_timeout()  # 恢复 idle_timeout
-            self._stop_temp_timer()
-            self._stop_timeout_timer()
+            self._stop_load_unload_timer()
+            self._restore_idle_timeout()
             self.gcode.respond_info(f"[{channel_name} LOAD] STATE:41 AUTO_CLEANING")
 
             # 根据通道调用清理逻辑
             if index == Channel.F:
                 self.gcode.run_script_from_command("G1 Y100 F4000")
                 self._clean_nozzle()
-            elif index == Channel.P1:
-                # P1通道：调用自动清理
-                self._clean_nozzle()
             else:
-                # P2通道直接调用清理
                 self._clean_nozzle()
 
-            # 进料完成，输出完成状态
+            # 清理完成后才设置 IDLE，防止清理期间被误判为空闲
+            self.operation_mode = OperationMode.IDLE
             self.load_step = State.FINISHED
             self._sync_print_stats_load_unload("standby")
             self.gcode.respond_info(f"[{channel_name} LOAD] STATE:90 FINISHED")
@@ -2036,21 +2072,23 @@ class LoadUnloadHandler:
             self.gcode.run_script_from_command("M104 T1 S0")
 
         elif self.operation_mode == OperationMode.UNLOADING:
-            # 卸料完成
-            self.operation_mode = OperationMode.IDLE
+            # 卸料完成：先停定时器和执行收尾动作，最后才设 IDLE
             self.load_step = State.FINISHED
             # 停止所有定时器
             self._stop_process_timer()
             self._stop_temp_timer()
             self._stop_timeout_timer()
-            self._stop_load_unload_timer()  # 停止进退料超时定时器
-            self._restore_idle_timeout()  # 恢复 idle_timeout
+            self._stop_load_unload_timer()
+            self._restore_idle_timeout()
 
             # 恢复最低挤出温度限制
             self.gcode.run_script_from_command("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=180")
 
             # 等待所有运动完成
             self.gcode.run_script_from_command("M400")
+
+            # 收尾动作完成后才设置 IDLE
+            self.operation_mode = OperationMode.IDLE
             self._sync_print_stats_load_unload("standby")
             self.gcode.respond_info(f"[{channel_name} UNLOAD] STATE:90 FINISHED")
 
