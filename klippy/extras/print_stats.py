@@ -280,6 +280,19 @@ class PrintStats:
         stage = gcmd.get("STAGE", "ready")
         self.note_set_prep_stage(stage)
 
+    def restore_print_times(self, saved_total_duration, saved_print_duration):
+        """Restore print timing after powerloss recovery.
+        Must be called after note_start() has set print_start_time.
+        Adjusts print_start_time backward so that total_duration continues
+        from the saved value, and sets init_duration so that print_duration
+        is correct."""
+        if self.print_start_time is None:
+            return
+        curtime = self.reactor.monotonic()
+        self.print_start_time = curtime - saved_total_duration
+        self.init_duration = saved_total_duration - saved_print_duration
+        self.prev_pause_duration = 0.
+
     def note_start(self):
         self._require_allowed_state_transition("printing")
         curtime = self.reactor.monotonic()

@@ -193,11 +193,17 @@ class PowerlossProgress():
         except Exception:
             logging.exception("start record progress put queue fail.")
 
-    def record(self, position, line, current_z):
+    def record(self, position, line, current_z,
+               print_duration=None, total_duration=None):
         with self._record_lock:
             if not self.recording_active:
                 return
-        record = {'command':'record', 'args':{'MODIFYTIME':time.time(), 'SEEKPOSITION':position, 'RECORD_LINE':line, 'CURRENT_Z': current_z}}
+        record = {'command':'record', 'args':{
+            'MODIFYTIME':time.time(), 'SEEKPOSITION':position,
+            'RECORD_LINE':line, 'CURRENT_Z': current_z,
+            'PRINT_DURATION': print_duration,
+            'TOTAL_DURATION': total_duration,
+        }}
         try:
             logging.debug("powerloss_progress record: record_line:[%s] seek_position:[%u], modify_time:[%f], queue_len:[%u]" %(str(line).strip(), position, record['args']['MODIFYTIME'], self.bg_queue.qsize()))
             self.bg_queue.put_nowait(record)
@@ -533,6 +539,8 @@ class PowerlossProgress():
         latest_time = 0
         latest_seek_position = None
         latest_z_position = None
+        latest_print_duration = None
+        latest_total_duration = None
         
         for i in range(self.max_file_num):
             file_path = self.prefix + ".%d" % i
@@ -549,11 +557,14 @@ class PowerlossProgress():
                     if modify_time > latest_time and seek_position is not None:
                         latest_time = modify_time
                         latest_seek_position = seek_position
+                        latest_print_duration = data.get('PRINT_DURATION')
+                        latest_total_duration = data.get('TOTAL_DURATION')
             except Exception:
                 logging.exception("Failed to read powerloss file: %s" % file_path)
                 continue
         
-        return latest_seek_position, latest_z_position
+        return (latest_seek_position, latest_z_position,
+                latest_print_duration, latest_total_duration)
 
     def stop_and_clear_record(self, timeout=5.0):
         """Stop recording and clear powerloss files. Waits for background thread

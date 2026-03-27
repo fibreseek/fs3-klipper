@@ -97,6 +97,7 @@ class VirtualSD:
         self.powerloss_file_exist = self.powerloss_progress.check_powerloss_file()
         self.powerloss_info = None
         self.powerloss_position = None
+        self._recovery_print_times = None
 
         # Double buffer mechanism for prefetching
         self.prefetch_queue = queue.Queue(maxsize=2)  # Queue for prefetched data
@@ -135,10 +136,15 @@ class VirtualSD:
                          self.file_position, repr(data[readcount:]))
     def get_zmove_value(self, z_move_val):
         if self.work_timer is not None and self.is_start_move:
-            # self.gcode.respond_raw("get z move value %.3f"%(z_move_val))
+            self.gcode.respond_raw("get z move value %.3f"%(z_move_val))
             if self.printed_pos_z != z_move_val:
                 self.printed_pos_z = z_move_val
-                self.powerloss_progress.record(self.file_position, "", self.printed_pos_z)
+                eventtime = self.reactor.monotonic()
+                stats = self.print_stats.get_status(eventtime)
+                self.powerloss_progress.record(
+                    self.file_position, "", self.printed_pos_z,
+                    print_duration=stats['print_duration'],
+                    total_duration=stats['total_duration'])
     def stats(self, eventtime):
         if self.work_timer is None:
             return False, ""
@@ -497,13 +503,21 @@ class VirtualSD:
             return
         
         # Get powerloss point (byte position)
-        powerloss_position, powerloss_z = self.powerloss_progress.get_powerloss_point()
+        (powerloss_position, powerloss_z,
+         saved_print_duration, saved_total_duration
+        ) = self.powerloss_progress.get_powerloss_point()
         if powerloss_position is None:
             gcmd.respond_raw("No valid powerloss position found.")
             return
         
         self.powerloss_position = powerloss_position
-        gcmd.respond_raw("Powerloss position: %d bytes, Z height: %.2f" % (powerloss_position, powerloss_z))
+        self._recovery_print_times = (
+            saved_total_duration or 0., saved_print_duration or 0.)
+        gcmd.respond_raw("Powerloss position: %d bytes, Z height: %.2f, "
+                         "saved print_duration: %.1f, total_duration: %.1f"
+                         % (powerloss_position, powerloss_z,
+                            saved_print_duration or 0.,
+                            saved_total_duration or 0.))
         
         # Check if current print file is available
         if not self.powerloss_progress.current_print_file:
@@ -556,10 +570,50 @@ class VirtualSD:
         
         gcmd.respond_raw("Prepare recover print started: %s at position %d, Z height: %.2f" % (file_path, self.file_position, powerloss_z))
     
+    def _get_powerloss_bed_mesh_z_adjustment(self, file_info, gcode_z):
+        """与 bed_mesh MoveSplitter 一致：在断电 XY 处网床对 Z 的补偿（含 fade）。"""
+        bm = self.printer.lookup_object('bed_mesh', None)
+        if bm is None:
+            return 0.
+        zm = bm.get_mesh()
+        if zm is None:
+            return 0.
+        x = file_info.get('x_position')
+        y = file_info.get('y_position')
+        if x is None or y is None:
+            logging.info(
+                "virtual_sdcard: powerloss skip bed_mesh Z, no x/y in scan")
+            return 0.
+        # current_tool = file_info.get('current_tool', 0)
+        # if current_tool == 1:
+        #     x = x - self.variables.get('xoffset', 0.0)
+        #     y = y - self.variables.get('yoffset', 0.0)
+        raw = zm.calc_z(x, y)
+        z_factor = bm.get_z_factor(gcode_z)
+        fade_target = bm.fade_target
+        result = z_factor * (raw - fade_target) + fade_target
+        logging.info("virtual_sdcard: bed_mesh Z: %.4f, result: %.4f" % (raw, result))
+        return result
+    
+    def _run_script_list(self, scripts, label):
+        if not scripts:
+            return
+        self.gcode.respond_raw(label)
+        for cmd in scripts:
+            try:
+                cmd = cmd + '\n'
+                self.gcode.run_script_from_command(cmd)
+                logging.info("Prepared command: %s" % cmd)
+            except Exception as e:
+                logging.warning("Failed to execute recovery command %s: %s"
+                                % (cmd, str(e)))
+                self.gcode.respond_raw("Warning: Failed to execute %s" % cmd)
+
     def _apply_prepare_recover_parameters(self, gcmd, file_info, powerloss_z):
         """Apply recovered parameters as gcode commands."""
         gcode_script = []
         new_powerloss_z = powerloss_z
+        mesh_profile_loaded = False
         
         # Apply extrusion mode (M82/M83)
         extrusion_mode = file_info.get('extrusion_mode')
@@ -639,51 +693,55 @@ class VirtualSD:
         # 如果是左喷嘴，切换纤维
         if current_tool == 0:
             gcode_script.append("M2800")
-
-        # 加载调平数据
-        if self.config.has_section('bed_mesh model_leveling'):
-            gcode_script.append("BED_MESH_PROFILE LOAD=model_leveling")
-            gcmd.respond_raw("Loading bed mesh profile: model_leveling")
-        elif self.config.has_section('bed_mesh default'):
-            gcode_script.append("BED_MESH_PROFILE LOAD=default")
-            gcmd.respond_raw("Loading bed mesh profile: default")
         
         # 获取z offset值
         cfg_path = os.path.expanduser(self.variables.get('filename'))
         config = configparser.ConfigParser()
         config.read(cfg_path)
         zoffset = config.getfloat('Variables', 'zoffset')
+
+        # temp_x = file_info.get('x_position', 0.0)
+        # temp_y = file_info.get('y_position', 0.0)
         
         if zoffset is not None and current_tool == 1:
             new_powerloss_z = powerloss_z + zoffset
             gcmd.respond_raw("Right nozzle z offset applied: %.3f, adjusted Z: %.3f" % (zoffset, new_powerloss_z))
-        
-        # current z 强制设定
-        gcode_script.append("SET_KINEMATIC_POSITION Z=%.3f" % new_powerloss_z)
-        # 相对向下移动4mm
-        gcode_script.append("G1 Z%.3f F300" % (new_powerloss_z + 4.0))
 
-        # xy归零
-        gcode_script.append("M118 [POWERLOSS] Prepare to home X and Y axes")
-        gcode_script.append("G28 X Y")
-
-        # 移动到擦料站位置,结束
-        gcode_script.append("MOVE_TO_WASTE_STATION")
-        gcode_script.append("M400")
-        gcode_script.append("M118 [POWERLOSS] Prepare to recover print finished, current_tool: %d" % current_tool)
+        # gcode_script.append("SET_KINEMATIC_POSITION Z=%.3f" % new_powerloss_z)
+        # gcode_script.append("SET_KINEMATIC_POSITION X=%.3f Y=%.3f" % (temp_x, temp_y))
         
-        # Execute all gcode commands
-        if gcode_script:
-            gcmd.respond_raw("Prepare applying recovery parameters...")
-            for cmd in gcode_script:
-                try:
-                    cmd = cmd + '\n'
-                    self.gcode.run_script_from_command(cmd)
-                except Exception as e:
-                    logging.warning("Failed to execute recovery command %s: %s" % (cmd, str(e)))
-                    gcmd.respond_raw("Warning: Failed to execute %s" % cmd)
-        else:
-            gcmd.respond_raw("No recovery parameters to apply.")
+        # 加载调平数据（须在 SET_KINEMATIC_POSITION 之前执行，以便叠加网床 Z）
+        if self.config.has_section('bed_mesh model_leveling'):
+            gcode_script.append("BED_MESH_PROFILE LOAD=model_leveling")
+            gcmd.respond_raw("Loading bed mesh profile: model_leveling")
+            mesh_profile_loaded = True
+        elif self.config.has_section('bed_mesh default'):
+            gcode_script.append("BED_MESH_PROFILE LOAD=default")
+            gcmd.respond_raw("Loading bed mesh profile: default")
+            mesh_profile_loaded = True
+
+        self._run_script_list(gcode_script, "Prepare applying recovery parameters...")
+
+        if mesh_profile_loaded:
+            mesh_z = self._get_powerloss_bed_mesh_z_adjustment(
+                file_info, new_powerloss_z)
+            new_powerloss_z += mesh_z
+            gcmd.respond_raw(
+                "Bed mesh Z at powerloss XY added: %.4f, kinematic Z: %.3f"
+                % (mesh_z, new_powerloss_z))
+
+        gcode_script_tail = [
+            "SET_KINEMATIC_POSITION Z=%.3f" % new_powerloss_z,
+            "G1 Z%.3f F300" % (new_powerloss_z + 4.0),
+            "M118 [POWERLOSS] Prepare to home X and Y axes",
+            "G28 X Y",
+            "MOVE_TO_WASTE_STATION",
+            "M400",
+            "M118 [POWERLOSS] Prepare to recover print finished, current_tool: %d"
+            % current_tool,
+        ]
+        self._run_script_list(gcode_script_tail,
+                         "Prepare applying Z position and homing...")
     
     cmd_RECOVER_PRINT_FILE_help = "Automatically recover print from powerloss. "\
         "This command scans powerloss files to find the last print position, "\
@@ -834,6 +892,7 @@ class VirtualSD:
         # Then move to Z height if available
         if z_height is not None:
             gcode_script.append("G1 Z%.3f F600" % z_height)
+            self.printed_pos_z = z_height
         
         # if current_tool == 1:
         #     gcode_script.append("G1 E3 F600")  # 恢复挤出3mm以补偿预拉伸
@@ -853,6 +912,7 @@ class VirtualSD:
                 try:
                     cmd = cmd + '\n'
                     self.gcode.run_script_from_command(cmd)
+                    logging.info("Recovered command: %s" % cmd)
                 except Exception as e:
                     logging.warning("Failed to execute recovery command %s: %s" % (cmd, str(e)))
                     gcmd.respond_raw("Warning: Failed to execute %s" % cmd)
@@ -1037,6 +1097,10 @@ class VirtualSD:
             self.work_timer = None
             return self.reactor.NEVER
         self.print_stats.note_start()
+        if self._recovery_print_times is not None:
+            total_dur, print_dur = self._recovery_print_times
+            self.print_stats.restore_print_times(total_dur, print_dur)
+            self._recovery_print_times = None
         gcode_mutex = self.gcode.get_mutex()
         
         # Double buffer mechanism:
@@ -1173,9 +1237,12 @@ class VirtualSD:
             # 500ms record powerloss file
             now = self.reactor.monotonic()
             record_timeout = now - self.powerloss_record_time
-            # self.gcode.respond_raw("check record timeout .... %.3f is_start_move = %d"%(record_timeout,self.is_start_move))
             if self.is_start_move and record_timeout >= 0.5 :
-                self.powerloss_progress.record(self.file_position, line, self.printed_pos_z)
+                stats = self.print_stats.get_status(now)
+                self.powerloss_progress.record(
+                    self.file_position, line, self.printed_pos_z,
+                    print_duration=stats['print_duration'],
+                    total_duration=stats['total_duration'])
                 self.powerloss_record_time = now
 
             # Do we need to skip around? (only check for non-injected lines)
