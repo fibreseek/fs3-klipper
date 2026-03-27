@@ -455,6 +455,12 @@ class GCodeMove:
         gcmd.respond_raw("First T1 X stepper position: %d" % (first_position))
 
         self.gcode.run_script_from_command("G28.1 X")
+        self.gcode.run_script_from_command("G1 X300 Y0 F6000")
+        self.gcode.run_script_from_command("G4 P500")
+        self.gcode.run_script_from_command("G1 X150 Y%.1f F6000" % self.t1_offset)
+        self.gcode.run_script_from_command("G4 P500")
+        self.gcode.run_script_from_command("M400")
+        self.gcode.run_script_from_command("G28.1 X")
         
         second_position = x_stepper.get_mcu_position()
         gcmd.respond_raw("Second T1 X stepper position: %d" % (second_position))
