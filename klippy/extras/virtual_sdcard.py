@@ -136,7 +136,7 @@ class VirtualSD:
                          self.file_position, repr(data[readcount:]))
     def get_zmove_value(self, z_move_val):
         if self.work_timer is not None and self.is_start_move:
-            self.gcode.respond_raw("get z move value %.3f"%(z_move_val))
+            # self.gcode.respond_raw("get z move value %.3f"%(z_move_val))
             if self.printed_pos_z != z_move_val:
                 self.printed_pos_z = z_move_val
                 eventtime = self.reactor.monotonic()
@@ -513,6 +513,7 @@ class VirtualSD:
         self.powerloss_position = powerloss_position
         self._recovery_print_times = (
             saved_total_duration or 0., saved_print_duration or 0.)
+        self.print_stats.restore_print_times(saved_total_duration, saved_print_duration)
         gcmd.respond_raw("Powerloss position: %d bytes, Z height: %.2f, "
                          "saved print_duration: %.1f, total_duration: %.1f"
                          % (powerloss_position, powerloss_z,
@@ -894,8 +895,8 @@ class VirtualSD:
             gcode_script.append("G1 Z%.3f F600" % z_height)
             self.printed_pos_z = z_height
         
-        # if current_tool == 1:
-        #     gcode_script.append("G1 E3 F600")  # 恢复挤出3mm以补偿预拉伸
+        if current_tool == 1:
+            gcode_script.append("G1 E2 F600")  # 恢复挤出2mm以补偿预拉伸
 
         # Apply feedrate (print speed)
         feedrate = file_info.get('feedrate')

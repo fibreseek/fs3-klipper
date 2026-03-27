@@ -304,6 +304,7 @@ class LoadUnloadHandler:
         if target <= min_temp:
             gcmd.respond_info(f"[{channel_name} LOAD] ERROR: Temperature {target}C too low")
             return
+        self._sync_print_stats_load_unload("load_unload")
 
         # 初始化状态变量
         self.load_unload_index = index
@@ -407,6 +408,7 @@ class LoadUnloadHandler:
             gcmd.respond_info(f"[{channel_name} UNLOAD] ERROR: Extruder '{extruder_name}' not found")
             return
         min_temp = extruder.heater.min_extrude_temp
+        self._sync_print_stats_load_unload("load_unload")
 
         # 初始化变量
         self.load_unload_nozzle = nozzle
@@ -1863,7 +1865,6 @@ class LoadUnloadHandler:
         # 激活对应的挤出机
         self.gcode.run_script_from_command("PREPARE_LOAD_UNLOAD_NOZZLE")
         self._sync_print_stats_load_unload("load_unload")
-
     def _preloading_retract_filament(self):
         """
         预挤出回抽耗材
