@@ -312,23 +312,37 @@ class BlindsHallMonitor:
         state_changed = (sensor1_state != self.last_sensor1_state or 
                         sensor2_state != self.last_sensor2_state)
         
-        if state_changed:
-            logging.info("BlindsHallMonitor: State changed to %s" % current_blinds_state)
-            
+        # 成功条件：当前已到达目标百叶窗状态。不能要求必须出现一次“边沿”：
+        # 若宏或 G 代码连续两次启动监控，第二次常在物理已到达 OPEN/CLOSED 后执行，
+        # 会把 last_* 刷新成当前值，此后 state_changed 恒为 False，会误超时。
+        reached_expected = (
+            self.expected_final_state is not None
+            and current_blinds_state == self.expected_final_state)
+        
+        if reached_expected:
+            if state_changed:
+                logging.info("BlindsHallMonitor: State changed to %s" % current_blinds_state)
+            else:
+                logging.info(
+                    "BlindsHallMonitor: Target state %s held (stable, no new edge)"
+                    % current_blinds_state)
             self.last_sensor1_state = sensor1_state
             self.last_sensor2_state = sensor2_state
             self.last_door_sensor_state = door_state
-            
-            if (self.expected_final_state is not None and 
-                current_blinds_state == self.expected_final_state):
-                logging.info("BlindsHallMonitor: Expected state reached successfully")
-                # 只停止百叶窗监控，不停止门检测
-                self.monitoring_active = False
-                self.recovery_mode_active = False
-                self.expected_state_change_time = None
-                self.expected_final_state = None
-                self.initial_state = None
-                return
+            logging.info("BlindsHallMonitor: Expected state reached successfully")
+            # 只停止百叶窗监控，不停止门检测
+            self.monitoring_active = False
+            self.recovery_mode_active = False
+            self.expected_state_change_time = None
+            self.expected_final_state = None
+            self.initial_state = None
+            return
+        
+        if state_changed:
+            logging.info("BlindsHallMonitor: State changed to %s" % current_blinds_state)
+            self.last_sensor1_state = sensor1_state
+            self.last_sensor2_state = sensor2_state
+            self.last_door_sensor_state = door_state
         
         if (self.expected_state_change_time is not None and 
             current_time > self.expected_state_change_time):

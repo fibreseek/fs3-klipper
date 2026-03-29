@@ -7,6 +7,13 @@
 import logging
 import os
 
+logger = logging.getLogger(__name__)
+
+# 在 gcode.error 或 klippy shutdown 时自动切回 standby 的辅助状态（含 standby/busy 自动检测中的 busy）
+_FAULT_STANDBY_STATES = frozenset({
+    "load_unload", "calibration", "maintenance", "busy",
+})
+
 # 有效状态集合，与状态机设计保持一致
 VALID_STATES = (
     "standby", "precheck", "preprinting", "printing", "pausing", "paused",
@@ -94,6 +101,20 @@ class PrintStats:
         printer.register_event_handler("gcode:move_extruder",
                 self._handle_move_extruder)
         printer.register_event_handler("klippy:ready", self._handle_ready)
+        printer.register_event_handler("gcode:command_error",
+                                       self._handle_fault_standby_aux)
+        printer.register_event_handler("klippy:shutdown",
+                                       self._handle_fault_standby_aux)
+
+    def _handle_fault_standby_aux(self, *args):
+        """G-code 命令错误或 Klippy shutdown 时，将辅助状态统一回到 standby。"""
+        if self.state not in _FAULT_STANDBY_STATES:
+            return
+        try:
+            self.note_standby()
+            self._start_busy_timer()
+        except Exception:
+            logger.exception("print_stats: fault standby transition failed")
 
     def _handle_ready(self):
         """注册定时器，用于 standby 下检测 G-code 执行并自动切换 busy"""
