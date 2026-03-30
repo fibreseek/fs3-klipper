@@ -393,6 +393,11 @@ class PrintStats:
             self.state = state
             self.error_message = ""
             self.prep_stage = None
+            # 与 note_pause 一致：仅设 paused 而未执行 PAUSE 宏时，必须记录 last_pause_time，
+            # 否则 get_status 中 time_paused 无法抵消 total_duration，print_duration 会持续增加。
+            if state == "paused" and self.last_pause_time is None \
+                    and self.print_start_time is not None:
+                self.last_pause_time = self.reactor.monotonic()
             if state in ("standby", "busy"):
                 self._start_busy_timer()
             else:

@@ -10,6 +10,7 @@ class PauseResume:
         self.gcode = self.printer.lookup_object('gcode')
         self.recover_velocity = config.getfloat('recover_velocity', 50.)
         self.v_sd = None
+        self.print_stats = None
         self.is_paused = False
         self.sd_paused = False
         self.pause_command_sent = False
@@ -32,6 +33,7 @@ class PauseResume:
                                    self._handle_resume_request)
     def handle_connect(self):
         self.v_sd = self.printer.lookup_object('virtual_sdcard', None)
+        self.print_stats = self.printer.lookup_object('print_stats', None)
     def _handle_cancel_request(self, web_request):
         self.gcode.run_script("CANCEL_PRINT")
     def _handle_pause_request(self, web_request):
@@ -65,6 +67,10 @@ class PauseResume:
         self.send_pause_command()
         self.gcode.run_script_from_command("SAVE_GCODE_STATE NAME=PAUSE_STATE")
         self.is_paused = True
+        # 与 print_stats 暂停计时对齐：仅在实际打印中记录 last_pause_time
+        ps = self.print_stats
+        if ps is not None and ps.print_start_time is not None:
+            ps.note_pause()
     def send_resume_command(self):
         if self.sd_paused:
             # Printing from virtual sd, run pause command
