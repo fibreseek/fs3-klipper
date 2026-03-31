@@ -1888,7 +1888,7 @@ class LoadUnloadHandler:
         eventtime = self.reactor.monotonic()
 
         # 只在standby模式下移动
-        if print_stats.state == "standby":
+        if print_stats.state in ("standby", "load_unload"):
             # 如果未归零，先归零
             if "xyz" not in toolhead.get_status(eventtime)['homed_axes']:
                 self.gcode.run_script_from_command("G28")
