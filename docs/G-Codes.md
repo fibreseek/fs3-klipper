@@ -520,6 +520,11 @@ depend on the sensor type defined in the configuration.
 filament sensor on/off. If ENABLE is set to 0, the filament sensor
 will be disabled, if set to 1 it is enabled.
 
+#### SET_FILAMENT_SENSOR_DEBOUNCE
+`SET_FILAMENT_SENSOR_DEBOUNCE SENSOR=<sensor_name> DELAY=<seconds>`:
+Sets the debounce delay for a filament switch sensor at runtime. DELAY
+must be greater than or equal to zero.
+
 ### [firmware_retraction]
 
 The following standard G-Code commands are available when the

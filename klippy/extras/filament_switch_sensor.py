@@ -4,6 +4,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
+from . import buttons as buttons_module
 
 
 class RunoutHelper:
@@ -30,6 +31,7 @@ class RunoutHelper:
         self.min_event_systime = self.reactor.NEVER
         self.filament_present = False
         self.sensor_enabled = True
+        self.debounce_delay_updater = None
         # Register commands and event handlers
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
         self.gcode.register_mux_command(
@@ -40,6 +42,10 @@ class RunoutHelper:
             "SET_FILAMENT_SENSOR", "SENSOR", self.name,
             self.cmd_SET_FILAMENT_SENSOR,
             desc=self.cmd_SET_FILAMENT_SENSOR_help)
+        self.gcode.register_mux_command(
+            "SET_FILAMENT_SENSOR_DEBOUNCE", "SENSOR", self.name,
+            self.cmd_SET_FILAMENT_SENSOR_DEBOUNCE,
+            desc=self.cmd_SET_FILAMENT_SENSOR_DEBOUNCE_help)
     def _handle_ready(self):
         self.min_event_systime = self.reactor.monotonic() + 2.
     def _runout_event_handler(self, eventtime):
@@ -104,16 +110,46 @@ class RunoutHelper:
     cmd_SET_FILAMENT_SENSOR_help = "Sets the filament sensor on/off"
     def cmd_SET_FILAMENT_SENSOR(self, gcmd):
         self.sensor_enabled = gcmd.get_int("ENABLE", 1)
+    def set_debounce_delay_updater(self, debounce_delay_updater):
+        self.debounce_delay_updater = debounce_delay_updater
+    cmd_SET_FILAMENT_SENSOR_DEBOUNCE_help = (
+        "Sets debounce delay for filament sensor")
+    def cmd_SET_FILAMENT_SENSOR_DEBOUNCE(self, gcmd):
+        if self.debounce_delay_updater is None:
+            raise gcmd.error("Filament sensor debounce control unavailable")
+        debounce_delay = gcmd.get_float("DELAY", minval=0.)
+        self.debounce_delay_updater(debounce_delay)
+        gcmd.respond_info("Filament sensor %s debounce_delay set to %.3fs" % (
+            self.name, debounce_delay))
 
 class SwitchSensor:
     def __init__(self, config):
-        printer = config.get_printer()
+        self.printer = printer = config.get_printer()
         buttons = printer.load_object(config, 'buttons')
         switch_pin = config.get('switch_pin')
-        buttons.register_debounce_button(switch_pin, self._button_handler
-                                         , config)
+        self.debounce_button = buttons.register_debounce_button(
+            switch_pin, self._button_handler, config)
+        # Compatibility fallback: some custom buttons implementations may
+        # not return the debounce object even though registration succeeds.
+        if self.debounce_button is None:
+            self.debounce_button = buttons_module.DebounceButton(
+                config, self._button_handler)
+            buttons.register_buttons([switch_pin],
+                                     self.debounce_button.button_handler)
         self.runout_helper = RunoutHelper(config)
+        if self.debounce_button is not None:
+            self.runout_helper.set_debounce_delay_updater(
+                self._set_debounce_delay)
+        else:
+            logging.warning(
+                "Filament sensor %s: debounce control unavailable",
+                self.runout_helper.name)
         self.get_status = self.runout_helper.get_status
+    def _set_debounce_delay(self, debounce_delay):
+        if self.debounce_button is None:
+            raise self.printer.command_error(
+                "Filament sensor debounce control unavailable")
+        self.debounce_button.debounce_delay = debounce_delay
     def _button_handler(self, eventtime, state):
         self.runout_helper.note_filament_present(eventtime, state)
 

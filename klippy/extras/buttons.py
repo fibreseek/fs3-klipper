@@ -290,7 +290,8 @@ class PrinterButtons:
         adc_buttons.setup_button(min_val, max_val, callback)
     def register_debounce_button(self, pin, callback, config):
         debounce = DebounceButton(config, callback)
-        return self.register_buttons([pin], debounce.button_handler)
+        self.register_buttons([pin], debounce.button_handler)
+        return debounce
     def register_debounce_adc_button(self, pin, min_val, max_val, pullup
                                      , callback, config):
         debounce = DebounceButton(config, callback)
