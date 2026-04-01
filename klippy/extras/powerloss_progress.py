@@ -299,12 +299,12 @@ class PowerlossProgress():
                     
                     # Check if we've reached the stop_byte
                     if stop_byte is not None and total_bytes_read >= stop_byte:
-                        # Process any remaining buffer content before stopping
-                        if buffer.strip():
-                            line = buffer.strip()
-                            if not line.startswith(';'):
-                                info['gcode_lines'] += 1
-                                self._parse_gcode_line(line, info)
+                        # IMPORTANT:
+                        # stop_byte is the resume seek position (next line to execute).
+                        # At this boundary we must only keep *complete* lines before
+                        # stop_byte. Any trailing buffer here may be a partial next line;
+                        # parsing it would advance XY/E by one line and cause resume
+                        # mismatch (scanner says line N+1, execution starts at line N).
                         break
                     
                     # If we're at the end of file, process remaining buffer
@@ -537,6 +537,7 @@ class PowerlossProgress():
         and return the SEEKPOSITION from the file with the latest MODIFYTIME.
         Returns None if no valid file is found."""
         latest_time = 0
+        latest_data = None
         latest_seek_position = None
         latest_z_position = None
         latest_print_duration = None
@@ -551,18 +552,21 @@ class PowerlossProgress():
                 with open(file_path, "r") as f:
                     data = json.load(f)
                     modify_time = data.get('MODIFYTIME', 0)
-                    seek_position = data.get('SEEKPOSITION')
-                    latest_z_position = data.get('CURRENT_Z')
                     
-                    if modify_time > latest_time and seek_position is not None:
+                    if modify_time > latest_time:
                         latest_time = modify_time
-                        latest_seek_position = seek_position
-                        latest_print_duration = data.get('PRINT_DURATION')
-                        latest_total_duration = data.get('TOTAL_DURATION')
+                        latest_data = data
             except Exception:
                 logging.exception("Failed to read powerloss file: %s" % file_path)
                 continue
-        
+
+        # 先锁定 MODIFYTIME 最新文件，再从该文件读取所有恢复参数
+        if latest_data is not None:
+            latest_seek_position = latest_data.get('SEEKPOSITION')
+            latest_z_position = latest_data.get('CURRENT_Z')
+            latest_print_duration = latest_data.get('PRINT_DURATION')
+            latest_total_duration = latest_data.get('TOTAL_DURATION')
+
         return (latest_seek_position, latest_z_position,
                 latest_print_duration, latest_total_duration)
 

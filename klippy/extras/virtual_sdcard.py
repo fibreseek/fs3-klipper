@@ -135,16 +135,21 @@ class VirtualSD:
                          readpos, repr(data[:readcount]),
                          self.file_position, repr(data[readcount:]))
     def get_zmove_value(self, z_move_val):
-        if self.work_timer is not None and self.is_start_move:
-            # self.gcode.respond_raw("get z move value %.3f"%(z_move_val))
-            if self.printed_pos_z != z_move_val:
-                self.printed_pos_z = z_move_val
-                eventtime = self.reactor.monotonic()
-                stats = self.print_stats.get_status(eventtime)
-                self.powerloss_progress.record(
-                    self.file_position, "", self.printed_pos_z,
-                    print_duration=stats['print_duration'],
-                    total_duration=stats['total_duration'])
+        if not self.is_start_move:
+            return
+        eventtime = self.reactor.monotonic()
+        stats = self.print_stats.get_status(eventtime)
+        state = stats.get('state')
+        # 断电续打记录：打印中/暂停中/已暂停都要持续保存 Z 高度
+        if state not in ("printing", "pausing", "paused", "load_unload"):
+            return
+        # self.gcode.respond_raw("get z move value %.3f"%(z_move_val))
+        if self.printed_pos_z != z_move_val:
+            self.printed_pos_z = z_move_val
+            self.powerloss_progress.record(
+                self.file_position, "", self.printed_pos_z,
+                print_duration=stats['print_duration'],
+                total_duration=stats['total_duration'])
     def stats(self, eventtime):
         if self.work_timer is None:
             return False, ""
@@ -547,6 +552,16 @@ class VirtualSD:
                 self.powerloss_info = scan_result.get('data', {})
                 gcmd.respond_raw("File scan completed: %d gcode lines processed" % 
                                self.powerloss_info.get('gcode_lines', 0))
+                scan_x = self.powerloss_info.get('x_position')
+                scan_y = self.powerloss_info.get('y_position')
+                scan_e = self.powerloss_info.get('extrusion')
+                scan_mode = self.powerloss_info.get('extrusion_mode')
+                gcmd.respond_raw(
+                    "[POWERLOSS][SCAN] stop_byte=%d XY=(%s,%s) E=%s mode=%s"
+                    % (powerloss_position, scan_x, scan_y, scan_e, scan_mode))
+                logging.info(
+                    "virtual_sdcard recover scan: stop_byte=%d x=%s y=%s e=%s mode=%s",
+                    powerloss_position, scan_x, scan_y, scan_e, scan_mode)
                 break
             elif status == 'failed':
                 error = scan_result.get('error', 'Unknown error')
@@ -781,10 +796,18 @@ class VirtualSD:
         # Seek to position
         try:
             self.current_file.seek(self.file_position)
+            preview_line = self.current_file.readline().strip()
+            self.current_file.seek(self.file_position)
         except:
             logging.exception("virtual_sdcard recover seek")
             gcmd.respond_raw("Failed to seek to position %d" % self.powerloss_position)
             return
+        gcmd.respond_raw(
+            "[POWERLOSS][RESUME] seek=%d first_line=%s"
+            % (self.file_position, preview_line))
+        logging.info(
+            "virtual_sdcard recover resume: seek=%d first_line=%s",
+            self.file_position, preview_line)
         
         # Apply recovered parameters
         self._apply_recovery_parameters(gcmd, self.powerloss_info)
@@ -874,6 +897,15 @@ class VirtualSD:
         
         gcode_script.append("M118 [POWERLOSS] Recovering print with nozzle T%d" % current_tool)
         gcode_script.append("T%d" % current_tool)
+
+        # 与 PREPARE 阶段、换刀/清洗宏可能再次改变 M82/M83；必须在回到断点 XY 前与扫描一致。
+        # 扫描中的 extrusion 在「断点字节之前」按 M82 累计 E 更新；若此处仍为 M83，
+        # 则首行 G1 的 E 会被当成相对增量，与切片绝对 E 不符，易误报 maximum extrusion。
+        extrusion_mode = file_info.get('extrusion_mode')
+        if extrusion_mode == 'relative':
+            gcode_script.append("M83")
+        else:
+            gcode_script.append("M82")
         
         # Apply position (X, Y, Z, E) if available
         x_position = file_info.get('x_position')
@@ -894,9 +926,18 @@ class VirtualSD:
         if z_height is not None:
             gcode_script.append("G1 Z%.3f F600" % z_height)
             self.printed_pos_z = z_height
-        
+
+        # 同步挤出机坐标：扫描得到的 extrusion 为断点前行末的 E（与当前 M82/M83 语义一致）。
+        # 绝对挤出（M82）下为下一行执行前的累计 E，必须 G92；相对挤出（M83）下 E 为增量，勿用绝对 G92。
+        saved_e = file_info.get('extrusion')
         if current_tool == 1:
-            gcode_script.append("G1 E2 F600")  # 恢复挤出2mm以补偿预拉伸
+            # 相对挤出 2mm，避免在绝对模式下把 E 设为 2 破坏与切片文件的同步
+            gcode_script.append("M83")
+            gcode_script.append("G1 E2 F600")
+            if extrusion_mode != 'relative':
+                gcode_script.append("M82")
+        if saved_e is not None and extrusion_mode != 'relative':
+            gcode_script.append("G92 E%.5f" % (saved_e,))
 
         # Apply feedrate (print speed)
         feedrate = file_info.get('feedrate')
