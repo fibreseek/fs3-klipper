@@ -126,7 +126,7 @@ class PrinterFan:
         self.fan.set_speed_from_command(0.)
     
     def check_running_fans_rpm(self, eventtime):
-        fans = self.printer.lookup_objects('fan') + self.printer.lookup_objects('heater_fan')
+        fans = self.printer.lookup_objects('fan') + self.printer.lookup_objects('heater_fan') + self.printer.lookup_objects('fan_generic')
         for name, fan_obj in fans:
             speed = fan_obj.get_status(eventtime)['speed']
             if speed <= 0:
