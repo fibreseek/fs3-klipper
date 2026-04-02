@@ -136,8 +136,13 @@ class LoadUnloadHandler:
         # 进入 load_unload 前的 print_stats.state，用于结束后恢复（如 paused / standby）
         self._print_stats_state_before_load_unload = None
 
+        self.f_insert_bite_done = False  # F通道插入咬合完成标志
+
         # ========================================================
         # 状态变量 (对应 global_variables.cfg)
+        self.f_insert_bite_distance = config.getfloat('f_insert_bite_distance', 5.0)
+        self.f_insert_bite_speed = config.getfloat('f_insert_bite_speed', 300.0)
+
         # ========================================================
         self.load_distance = 0.0       # 当前进料距离 (mm)
         self.unload_distance = 0.0     # 当前出料距离 (mm)
@@ -326,9 +331,15 @@ class LoadUnloadHandler:
         self.p1_slow_extrusion_start_time = None  # 重置慢速挤出开始时间
         self.last_reported_state = None  # 重置上次报告状态，允许状态码重新发送
         # 停止任何残留的定时器（防止上一次操作的定时器干扰新操作）
+        self.f_insert_bite_done = False  # 复位F插入咬位标志
         self._stop_temp_timer()
         self._stop_process_timer()
         self._stop_timeout_timer()
+
+        # F通道：立即设置debounce=1
+        if index == Channel.F:
+            self.gcode.run_script_from_command(
+                "SET_FILAMENT_SENSOR_DEBOUNCE SENSOR=filament_sensor DELAY=1")
 
         # 停止P1堵料检测（防止上一次操作的堵料检测干扰新操作）
         self.printer.send_event("filament_clog:check_stop")
@@ -597,6 +608,7 @@ class LoadUnloadHandler:
         self.gcode.run_script_from_command("M106 P1 S0")
         self.gcode.run_script_from_command("M106 P2 S0")
 
+        self._restore_f_filament_sensor_debounce()
         self._sync_print_stats_load_unload("error", "Load/unload timeout")
 
     cmd_EXIT_LOADUNLOAD_help = "退出进出料流程"
@@ -644,6 +656,7 @@ class LoadUnloadHandler:
         self.gcode.run_script_from_command("M106 P1 S0")
         self.gcode.run_script_from_command("M106 P2 S0")
 
+        self._restore_f_filament_sensor_debounce()
         self._sync_print_stats_load_unload("standby")
         gcmd.respond_info(f"[{channel_name} {action}] STATE:91 CANCELLED")
 
@@ -843,6 +856,19 @@ class LoadUnloadHandler:
             finally:
                 self.saved_idle_timeout = None
 
+    def _restore_f_filament_sensor_debounce(self):
+        """
+        恢复 filament_sensor debounce 值为默认值 5
+
+        功能：
+        1. 将 filament_sensor 的 debounce 恢复为固定值 5
+        """
+        try:
+            self.gcode.run_script_from_command("SET_FILAMENT_SENSOR_DEBOUNCE SENSOR=filament_sensor DELAY=5")
+            logger.info("[_restore_f_filament_sensor_debounce] Restored filament_sensor debounce to 5")
+        except Exception as e:
+            logger.warning(f"[_restore_f_filament_sensor_debounce] Failed to restore debounce: {e}")
+
     # ============================================================
     # 定时器处理函数
     # ============================================================
@@ -876,6 +902,11 @@ class LoadUnloadHandler:
         action = 'LOAD' if self.operation_mode == OperationMode.LOADING else 'UNLOAD'
 
         logger.debug(f"[_temp_timer_handler] {channel_name} {action}: target={target}, nozzle={nozzle}, index={index}")
+
+        # F通道：在加热阶段持续检测并咬住耗材
+        if (self.operation_mode == OperationMode.LOADING
+                and index == Channel.F):
+            self._handle_f_insert_bite(eventtime)
 
         # 获取当前温度
         extruder_name = 'extruder' if nozzle == 0 else 'extruder1'
@@ -1111,6 +1142,24 @@ class LoadUnloadHandler:
                 channel_name = self._get_channel_name()
             self.gcode.respond_info(f"[{channel_name} {action}] STATE:{state_code} {state_name}")
             self.last_reported_state = state_code
+
+    def _handle_f_insert_bite(self, eventtime):
+        if self.load_unload_index != Channel.F or self.f_insert_bite_done:
+            return False
+        filament_sensor = self.printer.lookup_object(
+            'filament_switch_sensor filament_sensor', None)
+        sensor_status = filament_sensor.get_status(eventtime) if filament_sensor else {}
+        if not filament_sensor or not sensor_status.get('filament_detected', False):
+            return False
+        self.gcode.run_script_from_command("M83")
+        self.gcode.run_script_from_command(
+            f"G1 U{self.f_insert_bite_distance} F{self.f_insert_bite_speed}")
+        self.f_insert_bite_done = True
+        # 咬住后立即恢复debounce为5
+        self._restore_f_filament_sensor_debounce()
+        self.gcode.respond_info(
+            f"[F LOAD] FILAMENT_DETECTED - Bite {self.f_insert_bite_distance:.0f}mm")
+        return True
 
     # ============================================================
     # 堵料检测事件处理
@@ -1827,9 +1876,10 @@ class LoadUnloadHandler:
 
         功能：
         1. 设置操作模式为进料
-        2. 检查打印机状态，如果处于standby模式则归零坐标
-        3. 根据喷嘴选择移动到预装载位置
-        4. 调用PREPARE_LOAD_UNLOAD_NOZZLE激活对应挤出机
+        2. F通道：立即设置debounce=1并检测咬住耗材（与归位并行）
+        3. 检查打印机状态，如果处于standby模式则归零坐标
+        4. 根据喷嘴选择移动到预装载位置
+        5. 调用PREPARE_LOAD_UNLOAD_NOZZLE激活对应挤出机
         """
         logger.debug("[_prepare_load] Starting")
         self.operation_mode = OperationMode.LOADING
@@ -1837,6 +1887,11 @@ class LoadUnloadHandler:
         self.user_confirmed = 0
 
         self.gcode.respond_info("[LOAD FILAMENT] Checking printer status...")
+
+        # F通道：尝试检测并咬住耗材
+        if self.load_unload_index == Channel.F:
+            eventtime = self.reactor.monotonic()
+            self._handle_f_insert_bite(eventtime)
 
         print_stats = self.printer.lookup_object('print_stats')
         toolhead = self.printer.lookup_object('toolhead')
@@ -2083,6 +2138,7 @@ class LoadUnloadHandler:
             self._restore_idle_timeout()
 
             # 恢复最低挤出温度限制
+            self._restore_f_filament_sensor_debounce()
             self.gcode.run_script_from_command("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=180")
 
             # 等待所有运动完成
