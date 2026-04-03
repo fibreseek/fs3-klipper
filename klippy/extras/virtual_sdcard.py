@@ -53,6 +53,8 @@ class VirtualSD:
         self.u_pattern = re.compile(r'\bU[\d\.\-]+\b')
         self.v_pattern = re.compile(r'\bV[\d\.\-]+\b')
         self.f_pattern = re.compile(r'\bF([\d\.]+)\b')
+        self.extrude_restart_comment_pattern = re.compile(
+            r';\s*Extrude\s+restart\b', re.IGNORECASE)
         self.uv_mode = 0 # 0: none, 1: UV, 2: U, 3: V
         self.uv_p_value = 0.0 # UV p value
         # Register commands
@@ -1061,6 +1063,8 @@ class VirtualSD:
         """Process lines and insert extruder mode commands.
         Inserted commands are tuples (line, is_injected) where is_injected=True
         means the line should not count towards file_position.
+        G0/G1 lines with U and ``; Extrude restart`` are replaced by
+        FIBER_EXTRUDE_RESTART F=... U=...
         """
         processed_lines = []
         gcode_pattern = self.gcode_pattern
@@ -1075,15 +1079,22 @@ class VirtualSD:
                 processed_lines.append((line, False))  # Original line
                 continue
             
+            original_line = line
+            is_extrude_restart = (
+                gcode_pattern.match(original_line)
+                and u_pattern.search(original_line)
+                and self.extrude_restart_comment_pattern.search(original_line)
+            )
+            
             # Only process G0/G1 commands with U/V parameters
-            if gcode_pattern.match(line):
+            if gcode_pattern.match(original_line):
                 # Check for U and V parameters in one pass
-                has_u = u_pattern.search(line)
-                has_v = v_pattern.search(line)
+                has_u = u_pattern.search(original_line)
+                has_v = v_pattern.search(original_line)
                 
                 if has_u and has_v:
                     # Both U and V present
-                    p_match = p_pattern.search(line)
+                    p_match = p_pattern.search(original_line)
                     p_value = float(p_match.group(1)) if p_match else 0
                     if self.uv_mode != 1:
                         self.uv_mode = 1
@@ -1105,7 +1116,7 @@ class VirtualSD:
                         processed_lines.append(("SET_EXTRUDER_MODE S=2", True))  # Injected
             
             # Adjust speed for stealthchop if applicable
-            if self.stealthchop > 100:
+            if self.stealthchop > 100 and not is_extrude_restart:
                 f_match = self.f_pattern.search(line)
                 if f_match:
                     f_value = float(f_match.group(1))
@@ -1122,6 +1133,17 @@ class VirtualSD:
                         new_speed = (self.stealthchop + 20) * 60
                         line = self.f_pattern.sub(f"F{int(new_speed)}", line)
                         # self.gcode.respond_raw(f"Adjust speed in range: F{int(f_value)} to F{int(new_speed)}")
+
+            if is_extrude_restart:
+                u_m = re.search(r'\bU([\d\.\-]+)\b', original_line)
+                if u_m:
+                    parts = ["FIBER_EXTRUDE_RESTART"]
+                    f_m = self.f_pattern.search(original_line)
+                    if f_m:
+                        parts.append(f"F={f_m.group(1)}")
+                    parts.append(f"U={u_m.group(1)}")
+                    line = " ".join(parts)
+                    logging.info(f"Extrude restart: {line}")    
 
             processed_lines.append((line, False))  # Original line
         
@@ -1238,9 +1260,9 @@ class VirtualSD:
             if "Cutting completed" in line or "; Cutting completed." in line:
                 if self.waiting_pause_request == 1:
                     self.gcode.run_script("M400")
-                    self.gcode.run_script("PAUSE F=1")
+                    self.gcode.run_script("PAUSE FIBRE_IMMEDIATE=0")
                     self.gcode.run_script("WAITTING_PAUSE F=0")
-                    self.gcode.run_script("M118 [PAUSE] Delay pause completed!")
+                    self.gcode.run_script("M118 [PAUSE] delay over, do pause!")
 
             # Only update file_position for original lines, not injected commands
             if not is_injected:
