@@ -97,6 +97,8 @@ class VirtualSD:
         self.powerloss_progress = powerloss_progress.setup_powerloss_progress(POWERLOSS_FILE_NAME, 5)
         self.is_recover_print = False
         self.powerloss_file_exist = self.powerloss_progress.check_powerloss_file()
+        # CHECK_POWERLOSS_FILE 扫描 G-code 头得到的参数，供 load_unload 等复用（含喷嘴温度）
+        self.powerloss_init_info = None
         self.powerloss_info = None
         self.powerloss_position = None
         self._recovery_print_times = None
@@ -223,6 +225,7 @@ class VirtualSD:
         self.file_position = self.file_size = 0
         self.powerloss_record_time = self.reactor.monotonic()
         self.powerloss_file_exist = False
+        self.powerloss_init_info = None
         self.powerloss_progress.clear_record()
     # G-Code commands
     def cmd_error(self, gcmd):
@@ -237,6 +240,7 @@ class VirtualSD:
         self.uv_p_value = 0.0
         self.extruder_switch_detected = False
         self.powerloss_file_exist = False
+        self.powerloss_init_info = None
         self.powerloss_progress.clear_record()
         # 若处于 preprinting（宏预备后调用 BASE），不重置 print_stats，保留 state/prep_stage
         if self.print_stats.state != "preprinting":
@@ -262,6 +266,7 @@ class VirtualSD:
         self._load_file(gcmd, filename, check_subdirs=True)
         file_path = self.current_file.name if self.current_file else None
         self.powerloss_file_exist = False
+        self.powerloss_init_info = None
         self.powerloss_progress.clear_record()
         self.powerloss_progress.start_record(file_path)
         self.do_resume()
@@ -453,6 +458,7 @@ class VirtualSD:
         # Clear powerloss file
         self.powerloss_progress.clear_record()
         self.powerloss_file_exist = False
+        self.powerloss_init_info = None
         self.print_stats.note_standby()
         gcmd.respond_raw("[POWERLOSS] Powerloss file cleared")
 
@@ -468,6 +474,14 @@ class VirtualSD:
                 filename=pl_file, gcmd=gcmd)
 
             powerloss_init_info = self.powerloss_progress.scan_init_paramaters_for_startup()
+            self.powerloss_init_info = powerloss_init_info
+            logging.info(
+                "[POWERLOSS][CHECK] cache set id=%s current_tool=%s left_nozzle_temp=%s right_nozzle_temp=%s",
+                id(self.powerloss_init_info) if self.powerloss_init_info is not None else None,
+                powerloss_init_info.get('current_tool') if powerloss_init_info else None,
+                powerloss_init_info.get('left_nozzle_temp') if powerloss_init_info else None,
+                powerloss_init_info.get('right_nozzle_temp') if powerloss_init_info else None
+            )
             gcode_script = []
             if powerloss_init_info:
                 # Apply bed temperature
@@ -493,6 +507,7 @@ class VirtualSD:
             else:
                 self.gcode.respond_raw("No recovery parameters to apply.")
         else:
+            self.powerloss_init_info = None
             gcmd.respond_raw("[POWERLOSS] No powerloss file found.")
 
     cmd_PREPARE_RECOVER_PRINT_FILE_help = "Prepare for recovering print from powerloss. "\
@@ -1186,6 +1201,7 @@ class VirtualSD:
                             self.current_file.close()
                             self.current_file = None
                     self.powerloss_file_exist = False
+                    self.powerloss_init_info = None
                     self.powerloss_progress.clear_record()
                     logging.info("Finished SD card print")
                     self.gcode.run_script("PRINT_COMPLETED")

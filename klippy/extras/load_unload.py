@@ -1900,9 +1900,39 @@ class LoadUnloadHandler:
         logger.debug(f"[_prepare_load] print_stats.state={print_stats.state}")
         logger.debug("[_prepare_load] In standby mode, checking homed axes")
         # 如果未归零，先归零
-        if "xy" not in toolhead.get_status(eventtime)['homed_axes']:
-            logger.debug("[_prepare_load] Axes not homed, running G28")
-            self.gcode.run_script_from_command("G28 XY")
+        if self._print_stats_state_before_load_unload == "standby":
+            if "xyz" not in toolhead.get_status(eventtime)['homed_axes']:
+                self.gcode.run_script_from_command("G28")
+        elif self._print_stats_state_before_load_unload == "paused":
+            v_sd = self.printer.lookup_object('virtual_sdcard', None)
+            init_info = getattr(v_sd, 'powerloss_init_info', None) if v_sd else None
+            if (init_info and getattr(v_sd, 'powerloss_file_exist', False)):
+                logger.info("[_prepare_load] powerloss_init_info exists")
+                left_nozzle_temp = init_info.get('left_nozzle_temp')
+                right_nozzle_temp = init_info.get('right_nozzle_temp')
+                if left_nozzle_temp is not None:
+                    left_nozzle_temp = left_nozzle_temp - 50
+                    if left_nozzle_temp < 180:
+                        left_nozzle_temp = 180
+                    self.gcode.run_script_from_command("M2800")
+                    self.gcode.run_script_from_command("M104 S%.1f T0" % left_nozzle_temp)
+                if right_nozzle_temp is not None:
+                    right_nozzle_temp = right_nozzle_temp - 50
+                    if right_nozzle_temp < 180:
+                        right_nozzle_temp = 180
+                    self.gcode.run_script_from_command("M104 S%.1f T1" % right_nozzle_temp)
+                
+                if left_nozzle_temp is not None:
+                    self.gcode.run_script_from_command("M109 S%.1f T0" % left_nozzle_temp)
+                if right_nozzle_temp is not None:
+                    self.gcode.run_script_from_command("M109 S%.1f T1" % right_nozzle_temp)
+            else:
+                logger.info("[_prepare_load] powerloss_init_info does not exist")
+            if "xy" not in toolhead.get_status(eventtime)['homed_axes']:
+                self.gcode.run_script_from_command("G28 XY")
+        else:
+            if "xy" not in toolhead.get_status(eventtime)['homed_axes']:
+                self.gcode.run_script_from_command("G28 XY")
         
         th_status = toolhead.get_status(eventtime)
         if "z" in th_status['homed_axes']:
@@ -1918,13 +1948,14 @@ class LoadUnloadHandler:
             # T0左喷嘴
             logger.debug("[_prepare_load] Running T0, MOVE_TO_WASTE_STATION, MOVE_LEFT_PRELOAD_POSITION")
             self.gcode.run_script_from_command("T0 MOVE_Z=0")
+            self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
+            self.gcode.run_script_from_command("MOVE_LEFT_PRELOAD_POSITION")
         else:
             # T1右喷嘴
             logger.debug("[_prepare_load] Running T1, MOVE_TO_WASTE_STATION, MOVE_RIGHT_PRELOAD_POSITION")
             self.gcode.run_script_from_command("T1 MOVE_Z=0")
-        
-        self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
-        self.gcode.run_script_from_command("MOVE_LEFT_PRELOAD_POSITION")
+            self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
+            self.gcode.run_script_from_command("MOVE_RIGHT_PRELOAD_POSITION")
 
         # 激活对应的挤出机
         logger.debug("[_prepare_load] Calling PREPARE_LOAD_UNLOAD_NOZZLE")
@@ -1951,8 +1982,39 @@ class LoadUnloadHandler:
         # 只在standby模式下移动
         if print_stats.state in ("standby", "load_unload"):
             # 如果未归零，先归零
-            if "xy" not in toolhead.get_status(eventtime)['homed_axes']:
-                self.gcode.run_script_from_command("G28 XY")
+            if self._print_stats_state_before_load_unload == "standby":
+                if "xyz" not in toolhead.get_status(eventtime)['homed_axes']:
+                    self.gcode.run_script_from_command("G28")
+            elif self._print_stats_state_before_load_unload == "paused":
+                v_sd = self.printer.lookup_object('virtual_sdcard', None)
+                init_info = getattr(v_sd, 'powerloss_init_info', None) if v_sd else None
+                if (init_info and getattr(v_sd, 'powerloss_file_exist', False)):
+                    logger.debug("[_prepare_unload] powerloss_init_info exists")
+                    left_nozzle_temp = init_info.get('left_nozzle_temp')
+                    right_nozzle_temp = init_info.get('right_nozzle_temp')
+                    if left_nozzle_temp is not None:
+                        left_nozzle_temp = left_nozzle_temp - 50
+                        if left_nozzle_temp < 180:
+                            left_nozzle_temp = 180
+                        self.gcode.run_script_from_command("M2800")
+                        self.gcode.run_script_from_command("M104 S%.1f T0" % left_nozzle_temp)
+                    if right_nozzle_temp is not None:
+                        right_nozzle_temp = right_nozzle_temp - 50
+                        if right_nozzle_temp < 180:
+                            right_nozzle_temp = 180
+                        self.gcode.run_script_from_command("M104 S%.1f T1" % right_nozzle_temp)
+                    
+                    if left_nozzle_temp is not None:
+                        self.gcode.run_script_from_command("M109 S%.1f T0" % left_nozzle_temp)
+                    if right_nozzle_temp is not None:
+                        self.gcode.run_script_from_command("M109 S%.1f T1" % right_nozzle_temp)
+                else:
+                    logger.info("[_prepare_unload] powerloss_init_info does not exist")
+                if "xy" not in toolhead.get_status(eventtime)['homed_axes']:
+                    self.gcode.run_script_from_command("G28 XY")
+            else:
+                if "xy" not in toolhead.get_status(eventtime)['homed_axes']:
+                    self.gcode.run_script_from_command("G28 XY")
         
             # 平台下降30mm
             th_status = toolhead.get_status(eventtime)
