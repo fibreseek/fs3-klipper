@@ -174,7 +174,7 @@ class LoadUnloadHandler:
         self.f_melt_distance = config.getfloat('f_melt_distance', 250.0)       # F 熔融挤出距离 (mm)
         self.f_step_length = config.getfloat('f_step_length', 20.0)            # F 快速进料步长 (mm) - 20mm @ 20mm/s = 1秒/步
         self.f_melt_step_length = config.getfloat('f_melt_step_length', 5.0)    # F 熔融挤出步长 (mm) - 5mm @ 5mm/s = 1秒/步
-
+        self.load_unload_z = config.getfloat('load_unload_z', 30.0)            # 进退料时的Z轴高度 (mm)
         # ========================================================
         # P1 通道参数 (中距离快速进料 + 熔融挤出)
         # ========================================================
@@ -1900,25 +1900,31 @@ class LoadUnloadHandler:
         logger.debug(f"[_prepare_load] print_stats.state={print_stats.state}")
         logger.debug("[_prepare_load] In standby mode, checking homed axes")
         # 如果未归零，先归零
-        if "xyz" not in toolhead.get_status(eventtime)['homed_axes']:
+        if "xy" not in toolhead.get_status(eventtime)['homed_axes']:
             logger.debug("[_prepare_load] Axes not homed, running G28")
-            self.gcode.run_script_from_command("G28")
-
+            self.gcode.run_script_from_command("G28 XY")
+        
+        th_status = toolhead.get_status(eventtime)
+        if "z" in th_status['homed_axes']:
+            move_z = self.load_unload_z
+            current_z = toolhead.get_position()[2]
+            if move_z > current_z:
+                self.gcode.run_script_from_command(f"G1 Z{move_z} F600")
+        
         # 根据喷嘴选择移动到预装载位置
         nozzle = self.load_unload_nozzle
         logger.debug(f"[_prepare_load] nozzle={nozzle}, moving to preload position")
         if nozzle == 0:
             # T0左喷嘴
             logger.debug("[_prepare_load] Running T0, MOVE_TO_WASTE_STATION, MOVE_LEFT_PRELOAD_POSITION")
-            self.gcode.run_script_from_command("T0")
-            self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
-            self.gcode.run_script_from_command("MOVE_LEFT_PRELOAD_POSITION")
+            self.gcode.run_script_from_command("T0 MOVE_Z=0")
         else:
             # T1右喷嘴
             logger.debug("[_prepare_load] Running T1, MOVE_TO_WASTE_STATION, MOVE_RIGHT_PRELOAD_POSITION")
-            self.gcode.run_script_from_command("T1")
-            self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
-            self.gcode.run_script_from_command("MOVE_RIGHT_PRELOAD_POSITION")
+            self.gcode.run_script_from_command("T1 MOVE_Z=0")
+        
+        self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
+        self.gcode.run_script_from_command("MOVE_LEFT_PRELOAD_POSITION")
 
         # 激活对应的挤出机
         logger.debug("[_prepare_load] Calling PREPARE_LOAD_UNLOAD_NOZZLE")
@@ -1945,8 +1951,16 @@ class LoadUnloadHandler:
         # 只在standby模式下移动
         if print_stats.state in ("standby", "load_unload"):
             # 如果未归零，先归零
-            if "xyz" not in toolhead.get_status(eventtime)['homed_axes']:
-                self.gcode.run_script_from_command("G28")
+            if "xy" not in toolhead.get_status(eventtime)['homed_axes']:
+                self.gcode.run_script_from_command("G28 XY")
+        
+            # 平台下降30mm
+            th_status = toolhead.get_status(eventtime)
+            if "z" in th_status['homed_axes']:
+                move_z = self.load_unload_z
+                current_z = toolhead.get_position()[2]
+                if move_z > current_z:
+                    self.gcode.run_script_from_command(f"G1 Z{move_z} F600")
 
             # 根据喷嘴选择移动到预装载位置
             nozzle = self.load_unload_nozzle
