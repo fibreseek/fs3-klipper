@@ -352,7 +352,7 @@ class MySerial:
             return
         
         volt = self.adc_to_voltage(val)
-        gcmd.respond_info(f"Value: {val} | Voltage: {volt:.6f}V")
+        gcmd.respond_info(f"Tension Sensor Value: {val} | Voltage: {volt:.6f}V")
 
     def cmd_SHOW_CALIBRATION(self, gcmd):
         gcmd.respond_info(f"Calibration entries: {len(self.calibration_log)}")
