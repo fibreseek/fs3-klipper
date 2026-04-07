@@ -52,6 +52,7 @@ class EncoderSensor:
     def _handle_printing(self, print_time):
         self.reactor.update_timer(self._extruder_pos_update_timer,
                 self.reactor.NOW)
+        self.runout_helper.note_filament_present(self.reactor.NOW, True)
     def _handle_not_printing(self, print_time):
         self.reactor.update_timer(self._extruder_pos_update_timer,
                 self.reactor.NEVER)
