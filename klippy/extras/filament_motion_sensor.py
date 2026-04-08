@@ -54,6 +54,7 @@ class EncoderSensor:
         self.runout_helper.note_filament_present(self.reactor.NOW, True)
         self.reactor.update_timer(self._extruder_pos_update_timer,
                 self.reactor.NOW)
+        logging.info(f"{self.extruder_name}: Printing, Filament runout position: {self.filament_runout_pos}, Extruder position: {self._get_extruder_pos()}")
     def _handle_not_printing(self, print_time):
         self.reactor.update_timer(self._extruder_pos_update_timer,
                 self.reactor.NEVER)
@@ -67,6 +68,8 @@ class EncoderSensor:
         # Check for filament runout
         self.runout_helper.note_filament_present(eventtime,
                 extruder_pos < self.filament_runout_pos)
+        if extruder_pos >= self.filament_runout_pos:
+            logging.info(f"{self.extruder_name}: Extruder position: {extruder_pos}, Filament runout position: {self.filament_runout_pos}")
         return eventtime + CHECK_RUNOUT_TIMEOUT
     def encoder_event(self, eventtime, state):
         if self.extruder is not None:

@@ -1076,8 +1076,10 @@ class VirtualSD:
 
     def handle_extruder_mode(self, lines):
         """Process lines and insert extruder mode commands.
-        Inserted commands are tuples (line, is_injected) where is_injected=True
-        means the line should not count towards file_position.
+        Inserted commands are tuples (line, is_injected, raw_len) where:
+        - is_injected=True means the line should not count towards file_position.
+        - raw_len is the original file line byte-length (without newline) used
+          to advance file_position safely even if line text is rewritten.
         G0/G1 lines with U and ``; Extrude restart`` are replaced by
         FIBER_EXTRUDE_RESTART F=... U=...
         """
@@ -1090,8 +1092,12 @@ class VirtualSD:
         for line in lines:
             # Skip comments early
             stripped = line.strip()
+            if sys.version_info.major >= 3:
+                raw_len = len(line.encode())
+            else:
+                raw_len = len(line)
             if stripped.startswith(';'):
-                processed_lines.append((line, False))  # Original line
+                processed_lines.append((line, False, raw_len))  # Original line
                 continue
             
             original_line = line
@@ -1114,21 +1120,21 @@ class VirtualSD:
                     if self.uv_mode != 1:
                         self.uv_mode = 1
                         self.uv_p_value = p_value
-                        processed_lines.append((f"SET_EXTRUDER_MODE S=1 P={p_value}", True))  # Injected
+                        processed_lines.append((f"SET_EXTRUDER_MODE S=1 P={p_value}", True, None))  # Injected
                     else:
                         if p_value != self.uv_p_value:
                             self.uv_p_value = p_value
-                            processed_lines.append((f"SET_EXTRUDER_MODE S=1 P={p_value}", True))  # Injected
+                            processed_lines.append((f"SET_EXTRUDER_MODE S=1 P={p_value}", True, None))  # Injected
                 elif has_u:
                     # Only U present
                     if self.uv_mode != 2:
                         self.uv_mode = 2
-                        processed_lines.append(("SET_EXTRUDER_MODE S=0", True))  # Injected
+                        processed_lines.append(("SET_EXTRUDER_MODE S=0", True, None))  # Injected
                 elif has_v:
                     # Only V present
                     if self.uv_mode != 3:
                         self.uv_mode = 3
-                        processed_lines.append(("SET_EXTRUDER_MODE S=2", True))  # Injected
+                        processed_lines.append(("SET_EXTRUDER_MODE S=2", True, None))  # Injected
             
             # Adjust speed for stealthchop if applicable
             if self.stealthchop > 100 and not is_extrude_restart:
@@ -1160,7 +1166,7 @@ class VirtualSD:
                     line = " ".join(parts)
                     logging.info(f"Extrude restart: {line}")    
 
-            processed_lines.append((line, False))  # Original line
+            processed_lines.append((line, False, raw_len))  # Original line
         
         return processed_lines
 
@@ -1263,11 +1269,17 @@ class VirtualSD:
             self.cmd_from_sd = True
             item = current_buffer.pop()
             
-            # Handle both tuple (line, is_injected) and plain string formats
+            # Handle tuple formats and plain string for compatibility:
+            # - (line, is_injected)
+            # - (line, is_injected, raw_len)
             if isinstance(item, tuple):
-                line, is_injected = item
+                if len(item) >= 3:
+                    line, is_injected, raw_len = item
+                else:
+                    line, is_injected = item
+                    raw_len = None
             else:
-                line, is_injected = item, False
+                line, is_injected, raw_len = item, False, None
 
             if not self.extruder_switch_detected and ("switch extruder type to" in line or "; switch extruder type to:" in line):
                 self.extruder_switch_detected = True
@@ -1282,10 +1294,13 @@ class VirtualSD:
 
             # Only update file_position for original lines, not injected commands
             if not is_injected:
-                if sys.version_info.major >= 3:
-                    next_file_position = self.file_position + len(line.encode()) + 1
-                else:
-                    next_file_position = self.file_position + len(line) + 1
+                if raw_len is None:
+                    # Fallback for legacy tuple/plain-string paths
+                    if sys.version_info.major >= 3:
+                        raw_len = len(line.encode())
+                    else:
+                        raw_len = len(line)
+                next_file_position = self.file_position + raw_len + 1
                 self.next_file_position = next_file_position
             
             try:
@@ -1349,6 +1364,7 @@ class VirtualSD:
         self.cmd_from_sd = False
         if error_message is not None:
             self.print_stats.note_error(error_message)
+            self.print_stats.note_standby()
         elif self.current_file is not None:
             logging.info("SD card print paused")
         else:
