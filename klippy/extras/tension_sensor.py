@@ -17,7 +17,7 @@ class MySerial:
         self.GAIN = 128
         self.ADC_MAX = 2**23 - 1  # 8388607 (24-bit signed)
         
-        self.sample_interval = 0.5  # seconds
+        self.sample_interval = 1  # seconds
         
         # Learning phase parameters
         self.learning_window = 10
@@ -29,7 +29,7 @@ class MySerial:
         self.min_anomaly_deviation = 45000
         self.max_normal_value = 500000
         
-        self.anomaly_confirm_count = 10
+        self.anomaly_confirm_count = 5
         self.anomaly_counter = 0
         
         self.baseline_mean = None
