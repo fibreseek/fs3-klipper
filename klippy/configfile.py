@@ -385,11 +385,10 @@ class ConfigAutoSave:
             raise gcmd.error(msg)
         self._disallow_include_conflicts(regular_fileconfig)
         # Determine filenames
-        datestr = time.strftime("-%Y%m%d_%H%M%S")
-        backup_name = cfgname + datestr
+        backup_name = cfgname + ".bak"
         temp_name = cfgname + "_autosave"
         if cfgname.endswith(".cfg"):
-            backup_name = cfgname[:-4] + datestr + ".cfg"
+            backup_name = cfgname[:-4] + ".bak.cfg"
             temp_name = cfgname[:-4] + "_autosave.cfg"
         # Create new config file with temporary name and swap with main config
         logging.info("SAVE_CONFIG to '%s' (backup in '%s')",
@@ -411,8 +410,11 @@ class ConfigAutoSave:
                 f = open(temp_name, 'w')
                 f.write(data)
                 f.close()
-                os.rename(cfgname, backup_name)
-                os.rename(temp_name, cfgname)
+                try:
+                    os.replace(cfgname, backup_name)
+                except FileNotFoundError:
+                    pass
+                os.replace(temp_name, cfgname)
             except:
                 msg = "Unable to write config file during SAVE_CONFIG"
 
