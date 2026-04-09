@@ -164,6 +164,10 @@ class SmartEffectorProbe:
         buf = [131, 131]
         self._send_command(buf)
         gcmd.respond_info('SmartEffector sensitivity was reset')
+    def set_probe_z_offset(self, z_offset):
+        self.probe_offsets.set_z_offset(z_offset)
+        self.probe_wrapper.set_z_offset(z_offset)
+        self.homing_helper.set_z_offset(z_offset)
 
 def load_config(config):
     smart_effector = SmartEffectorProbe(config)

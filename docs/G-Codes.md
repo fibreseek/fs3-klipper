@@ -1098,6 +1098,17 @@ babystepping), and subtract if from the probe's z_offset.  This acts
 to take a frequently used babystepping value, and "make it permanent".
 Requires a `SAVE_CONFIG` to take effect.
 
+#### SET_PROBE_Z_OFFSET
+`SET_PROBE_Z_OFFSET Z=<value>`: Set the probe's `z_offset` to the given
+value (millimeters). The new offset applies immediately to probing and
+homing. The pending config is also updated; issue `SAVE_CONFIG` to
+write `printer.cfg` and restart Klipper so the value persists after
+restart.
+
+#### GET_PROBE_Z_OFFSET
+`GET_PROBE_Z_OFFSET`: Report the probe's currently active `z_offset`
+value used by probing and homing.
+
 ### [probe_eddy_current]
 
 The following commands are available when a

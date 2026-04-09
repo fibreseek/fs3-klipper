@@ -182,6 +182,12 @@ class ProbeCommandHelper:
         gcode.register_command('Z_OFFSET_APPLY_PROBE',
                                self.cmd_Z_OFFSET_APPLY_PROBE,
                                desc=self.cmd_Z_OFFSET_APPLY_PROBE_help)
+        gcode.register_command('SET_PROBE_Z_OFFSET',
+                               self.cmd_SET_PROBE_Z_OFFSET,
+                               desc=self.cmd_SET_PROBE_Z_OFFSET_help)
+        gcode.register_command('GET_PROBE_Z_OFFSET',
+                               self.cmd_GET_PROBE_Z_OFFSET,
+                               desc=self.cmd_GET_PROBE_Z_OFFSET_help)
 
     def _move(self, coord, speed):
         toolhead = self.printer.lookup_object('toolhead')
@@ -211,6 +217,10 @@ class ProbeCommandHelper:
         pos = run_single_probe(self.probe, gcmd)
         gcmd.respond_info("Result is z=%.6f" % (pos[2],))
         self.last_z_result = pos[2]
+    cmd_GET_PROBE_Z_OFFSET_help = "Report the probe's current z_offset"
+    def cmd_GET_PROBE_Z_OFFSET(self, gcmd):
+        z_offset = self.probe.get_offsets()[2]
+        gcmd.respond_info("[%s] z_offset: %.3f" % (self.name, z_offset))
     def probe_calibrate_finalize(self, kin_pos):
         if kin_pos is None:
             return
@@ -385,6 +395,18 @@ class ProbeCommandHelper:
             % (self.name, new_calibrate))
         configfile = self.printer.lookup_object('configfile')
         configfile.set(self.name, 'z_offset', "%.3f" % (new_calibrate,))
+    cmd_SET_PROBE_Z_OFFSET_help = "Set the probe's z_offset"
+    def cmd_SET_PROBE_Z_OFFSET(self, gcmd):
+        z_offset = gcmd.get_float('Z')
+        self.probe.set_probe_z_offset(z_offset)
+        gcmd.respond_info(
+            "%s: z_offset: %.3f\n"
+            "Value is active immediately for probing and homing.\n"
+            "The SAVE_CONFIG command will update the printer config file\n"
+            "with the above and restart the printer."
+            % (self.name, z_offset))
+        configfile = self.printer.lookup_object('configfile')
+        configfile.set(self.name, 'z_offset', "%.3f" % (z_offset,))
 
 # Helper to lookup the minimum Z position for the printer
 def lookup_minimum_z(config):
@@ -485,6 +507,18 @@ class HomingViaProbeHelper:
     def end_probe_session(self):
         self.results = []
         self.mcu_probe.multi_probe_end()
+    def set_z_offset(self, z_offset):
+        toolhead = self.printer.lookup_object('toolhead')
+        kin = toolhead.get_kinematics()
+        rails = []
+        if hasattr(kin, 'get_rails'):
+            rails = kin.get_rails()
+        elif hasattr(kin, 'rails'):
+            rails = kin.rails
+        for rail in rails:
+            endstops = [es for es, name in rail.get_endstops()]
+            if self.mcu_probe in endstops:
+                rail.position_endstop = z_offset
 
 # Helper to read multi-sample parameters from config
 class ProbeParameterHelper:
@@ -649,6 +683,8 @@ class ProbeOffsetsHelper:
         self.z_offset = config.getfloat('z_offset')
     def get_offsets(self):
         return self.x_offset, self.y_offset, self.z_offset
+    def set_z_offset(self, z_offset):
+        self.z_offset = z_offset
 
 
 ######################################################################
@@ -836,6 +872,8 @@ class ProbeEndstopWrapper:
             self._raise_probe()
     def get_position_endstop(self):
         return self.position_endstop
+    def set_z_offset(self, z_offset):
+        self.position_endstop = z_offset
 
 # Main external probe interface
 class PrinterProbe:
@@ -860,6 +898,10 @@ class PrinterProbe:
         return self.probe_session.start_probe_session(gcmd)
     def set_trigger_offset(self, offset):
         self.cmd_helper.set_trigger_offset(offset)
+    def set_probe_z_offset(self, z_offset):
+        self.probe_offsets.set_z_offset(z_offset)
+        self.mcu_probe.set_z_offset(z_offset)
+        self.homing_helper.set_z_offset(z_offset)
 
 def load_config(config):
     return PrinterProbe(config)

@@ -281,6 +281,10 @@ class BLTouchProbe:
         self.sync_print_time()
         self.store_output_mode(cmd)
         self.sync_print_time()
+    def set_probe_z_offset(self, z_offset):
+        self.probe_offsets.set_z_offset(z_offset)
+        self.position_endstop = z_offset
+        self.homing_helper.set_z_offset(z_offset)
 
 def load_config(config):
     blt = BLTouchProbe(config)

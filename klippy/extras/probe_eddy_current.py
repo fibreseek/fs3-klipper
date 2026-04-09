@@ -336,6 +336,8 @@ class EddyDescend:
         self._trigger_time = 0.
         self._gather = None
         probe.LookupZSteppers(config, self._dispatch.add_stepper)
+    def set_z_offset(self, z_offset):
+        self._z_offset = z_offset
     # Interface for phoming.probing_move()
     def get_steppers(self):
         return self._dispatch.get_steppers()
@@ -482,7 +484,8 @@ class PrinterEddyProbe:
         self.probe_session = probe.ProbeSessionHelper(
             config, self.param_helper, self.eddy_descend.start_probe_session)
         mcu_probe = EddyEndstopWrapper(self.sensor_helper, self.eddy_descend)
-        probe.HomingViaProbeHelper(config, mcu_probe, self.param_helper)
+        self.homing_helper = probe.HomingViaProbeHelper(
+            config, mcu_probe, self.param_helper)
         self.printer.add_object('probe', self)
     def add_client(self, cb):
         self.sensor_helper.add_client(cb)
@@ -501,6 +504,10 @@ class PrinterEddyProbe:
         return self.probe_session.start_probe_session(gcmd)
     def register_drift_compensation(self, comp):
         self.calibration.register_drift_compensation(comp)
+    def set_probe_z_offset(self, z_offset):
+        self.probe_offsets.set_z_offset(z_offset)
+        self.eddy_descend.set_z_offset(z_offset)
+        self.homing_helper.set_z_offset(z_offset)
 
 class DummyDriftCompensation:
     def get_temperature(self):
