@@ -17,7 +17,7 @@ class MySerial:
         self.GAIN = 128
         self.ADC_MAX = 2**23 - 1  # 8388607 (24-bit signed)
         
-        self.sample_interval = 1.0  # seconds
+        self.sample_interval = 1  # seconds
         
         # Learning phase parameters
         self.learning_window = 10
@@ -29,7 +29,7 @@ class MySerial:
         self.min_anomaly_deviation = 45000
         self.max_normal_value = 500000
         
-        self.anomaly_confirm_count = 20
+        self.anomaly_confirm_count = 5
         self.anomaly_counter = 0
         
         self.baseline_mean = None
@@ -434,9 +434,61 @@ class MySerial:
         gcmd.respond_info(f"Learning reset. Need {self.learning_window*self.sample_interval:.1f}s to establish baseline.")
 
     def cmd_CLEAR_POLLING_LOG(self, gcmd):
-        self.polling_log.clear()
-        self._save_history()
-        gcmd.respond_info("Log cleared")
+        try:
+            # 清除所有缓冲区
+            self.baseline_buffer.clear()
+            self.detection_buffer.clear()
+            self.value_history.clear()
+            
+            # 清除所有日志
+            self.calibration_log.clear()
+            self.polling_log.clear()
+            self.learning_history.clear()
+            
+            # 清除所有保存的数据
+            self.saved_baseline = None
+            self.initial_baseline = None
+            
+            # 重置状态
+            self.baseline_mean = None
+            self.baseline_std = None
+            self.current_state = "NORMAL"
+            self.is_learning = True
+            self.learning_progress = 0
+            self.jamming_triggered = False
+            self.anomaly_counter = 0
+            self.consecutive_deviant_learnings = 0
+            
+            # 删除并重新创建空的JSON文件
+            try:
+                if os.path.exists(self.calibration_file):
+                    os.remove(self.calibration_file)
+                    gcmd.respond_info(f"已删除文件: {self.calibration_file}")
+                
+                # 创建新的空文件
+                os.makedirs(os.path.dirname(self.calibration_file), exist_ok=True)
+                with open(self.calibration_file, 'w') as f:
+                    json.dump({
+                        'calibration_log': [],
+                        'polling_log': [],
+                        'saved_baseline': None,
+                        'learning_history': [],
+                        'initial_baseline': None
+                    }, f, indent=2)
+                
+                gcmd.respond_info("已创建新的空配置文件")
+                
+            except Exception as e:
+                gcmd.respond_info(f"警告: 无法更新文件 - {e}")
+            
+            gcmd.respond_info("=" * 50)
+            gcmd.respond_info("所有日志和历史数据已清除")
+            gcmd.respond_info("系统已重置为初始学习状态")
+            gcmd.respond_info(f"需要采集 {self.learning_window} 个样本建立基线")
+            gcmd.respond_info("=" * 50)
+            
+        except Exception as e:
+            gcmd.respond_info(f"错误: 清除日志失败 - {e}")
 
     def cmd_SHOW_POLLING_LOG(self, gcmd):
         count = gcmd.get_int('COUNT', 10)
