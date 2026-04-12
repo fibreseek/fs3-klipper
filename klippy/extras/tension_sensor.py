@@ -29,7 +29,7 @@ class MySerial:
         self.min_anomaly_deviation = 45000
         self.max_normal_value = 500000
         
-        self.anomaly_confirm_count = 5
+        self.anomaly_confirm_count = 20
         self.anomaly_counter = 0
         
         self.baseline_mean = None
