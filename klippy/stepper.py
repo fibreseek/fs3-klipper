@@ -384,7 +384,8 @@ class PrinterRail:
                                    self.cmd_SET_RAIL_ENDSTOP,
                                    desc=self.cmd_SET_RAIL_ENDSTOP_help)
     
-    cmd_SET_RAIL_ENDSTOP_help = "Set rail position endstop and homing speed"
+    cmd_SET_RAIL_ENDSTOP_help = (
+        "Set rail position endstop and homing speed (runtime only; not saved)")
     
     def cmd_SET_RAIL_ENDSTOP(self, gcmd):
         new_endstop = gcmd.get_float('POSITION', self.position_endstop)
@@ -408,26 +409,21 @@ class PrinterRail:
         
         self.position_endstop = new_endstop
         
-        configfile = self.printer.lookup_object('configfile')
-        
         msg_parts = []
         
         if new_endstop != old_endstop:
             msg_parts.append("position_endstop: %.3f -> %.3f" % (old_endstop, new_endstop))
-            configfile.set(self.get_name(), 'position_endstop', new_endstop)
         
         if new_direction is not None:
             self.homing_positive_dir = bool(new_direction)
             if new_direction != old_direction:
                 dir_str = "positive" if new_direction else "negative"
                 msg_parts.append("homing direction: %s" % dir_str)
-                configfile.set(self.get_name(), 'homing_positive_dir', self.homing_positive_dir)
         
         if new_homing_speed is not None:
             self.homing_speed = new_homing_speed
             if abs(new_homing_speed - old_homing_speed) > 0.001:
                 msg_parts.append("homing_speed: %.2f -> %.2f" % (old_homing_speed, new_homing_speed))
-                configfile.set(self.get_name(), 'homing_speed', self.homing_speed)
         
         if not msg_parts:
             msg_parts.append("No changes made")
