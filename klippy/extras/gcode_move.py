@@ -347,7 +347,7 @@ class GCodeMove:
         self.t0_offset = all_vars.get('t0_switch_y', 250.0)
     
         self.gcode.run_script_from_command("SET_PRINT_STATS_INFO STATE=calibration")
-        self.gcode.run_script_from_command("G28 XY")
+        self.gcode.run_script_from_command("G28")
         self.gcode.run_script_from_command("G1 X150 Y%.1f F6000" % self.t0_offset)
         self.gcode.run_script_from_command("G4 P500")
         self.gcode.run_script_from_command("M400")
@@ -424,7 +424,7 @@ class GCodeMove:
         self.t1_offset = all_vars.get('t1_switch_y', 250.0)
 
         self.gcode.run_script_from_command("SET_PRINT_STATS_INFO STATE=calibration")
-        self.gcode.run_script_from_command("G28 XY")
+        self.gcode.run_script_from_command("G28")
         self.gcode.run_script_from_command("G1 X150 Y%.1f F6000" % self.t1_offset)
         self.gcode.run_script_from_command("G4 P500")
         self.gcode.run_script_from_command("M400")
