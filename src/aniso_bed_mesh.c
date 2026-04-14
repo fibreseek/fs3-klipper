@@ -32,7 +32,8 @@
 #define CRITICAL_VALUE_CNT 30                              // 回溯临界拐点的容量
 #define SAMPLE_INTERVAL_US 200                             // 采样间隔200微秒
 #define SAMPLE_FREQUENCY_HZ (1000000 / SAMPLE_INTERVAL_US) // 采样频率5000Hz
-#define TRIGGER_COUNT_MAX 7                                // 触发计数最大值
+#define TRIGGER_COUNT_MAX 6                                // 触发计数最大值
+#define TRIGGER_THRESHOLD_FACTOR 0.1f                     // 动态阈值裕量
 
 static uint32_t sample_step_acc;                                  // 加速段对应电机微步数
 static uint32_t sample_step_start;                                // 起始电机微步数
@@ -50,8 +51,10 @@ static struct aniso_ring_buffer_t sample_datas_rb;                // 采样缓�
 static struct timer sample_timer;                                 // 采样定时器
 volatile float adc_val_min = INFINITY;                            // adc触发的负向阈值
 volatile float adc_val_max = -INFINITY;                           // adc触发的正向阈值
-volatile uint16_t trigger1_count = 0;
+volatile uint16_t trigger1_window_count = 0;
+volatile uint32_t trigger1_window_bits = 0;
 volatile int16_t printed_count = -1;
+// volatile struct aniso_adc_data_t debug_data;
 
 // 触发判断 阈值法
 uint8_t get_trigger1(void)
@@ -63,8 +66,8 @@ uint8_t get_trigger1(void)
         adc_val_max = fmaxf(adc_val_max, temp_data.flt_val);
         adc_val_min = fminf(adc_val_min, temp_data.flt_val);
     }
-    float max_factor = 0.1f;
-    float min_factor = 0.1f;
+    float max_factor = TRIGGER_THRESHOLD_FACTOR;
+    float min_factor = TRIGGER_THRESHOLD_FACTOR;
     float val_max = adc_val_max + adc_val_max * max_factor;
     float val_min = adc_val_min - adc_val_min * min_factor;
 
@@ -154,7 +157,8 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
         state_machine_flag = ANISO_STATE_PREHEAT;
         adc_val_min = INFINITY;
         adc_val_max = -INFINITY;
-        trigger1_count = 0;
+        trigger1_window_count = 0;
+        trigger1_window_bits = 0;
     }
     break;
 
@@ -193,20 +197,25 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
         sample_data.flt_val = aniso_kalman_filter_process(&kmf, sample_data.flt_val);
         aniso_ring_buffer_push(&sample_datas_rb, &sample_data); // 更新采样缓存（必须先push，判断trigger需要读缓存）
 
+        // debug_data = sample_data;
         sample_data.trigger = get_trigger1(); // 判断触发标志
         if (sample_data.trigger == 1)
         {
             aniso_ring_buffer_update(&sample_datas_rb, 0, &sample_data);
-            trigger1_count++;
-        }
-        else
-        {
-            trigger1_count = 0;
         }
 
-        if (trigger1_count > TRIGGER_COUNT_MAX)
+        trigger1_window_bits = (trigger1_window_bits << 1) | (sample_data.trigger ? 1U : 0U);
+        trigger1_window_bits &= (1U << TRIGGER_COUNT_MAX) - 1U;
+        if (trigger1_window_count < TRIGGER_COUNT_MAX)
         {
-            trigger1_count = 0;
+            trigger1_window_count++;
+        }
+
+        if (trigger1_window_count >= TRIGGER_COUNT_MAX &&
+            __builtin_popcount(trigger1_window_bits) > (TRIGGER_COUNT_MAX / 2))
+        {
+            trigger1_window_count = 0;
+            trigger1_window_bits = 0;
             gpio_out_write_now(triggerPF, 0);
             state_machine_flag = ANISO_STATE_STOP;
         }
@@ -216,6 +225,7 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
     // 停止阶段
     case ANISO_STATE_STOP:
     {
+        // printf_("sample_task stop log=%d\r\n", state_machine_flag);
         gpio_out_write_now(triggerPF, 1);
         memset(sample_datas_ar, 0, sizeof(sample_datas_ar));
         state_machine_flag = ANISO_STATE_IDLE;
@@ -234,13 +244,14 @@ uint8_t aniso_adc_sample(enum aniso_state_machine_t smf)
 /*
 void sample_task(void)
 {
+    printf_("sample_task state_machine_flag=%d trigger=%d, debug_data.flt_val=%d, debug_data.raw_val=%d\r\n", state_machine_flag, debug_data.trigger, (int32_t)(debug_data.flt_val * 1000), (int32_t)(debug_data.raw_val * 1000));
     if (state_machine_flag == ANISO_STATE_STOP)
     {
         if (printed_count >= 0 && printed_count < BUFFER_VALUE_CNT)
         {
             struct aniso_adc_data_t temp_data;
             aniso_ring_buffer_pick(&sample_datas_rb, printed_count, &temp_data);
-            // printf_("AEI_FLT=%d RAW_VAL=%d max=%d min=%d\r\n", (int32_t)(temp_data.flt_val * 1000), (int32_t)(temp_data.raw_val * 1000), (int32_t)(adc_val_max*1000), (int32_t)(adc_val_min*1000));
+            printf_("AEI_FLT=%d RAW_VAL=%d max=%d min=%d\r\n", (int32_t)(temp_data.flt_val * 1000), (int32_t)(temp_data.raw_val * 1000), (int32_t)(adc_val_max*1000), (int32_t)(adc_val_min*1000));
             printed_count++;
         }
 
@@ -249,6 +260,7 @@ void sample_task(void)
             printed_count = -1; // 打印完成，重置为-1，避免重复打印
             memset(sample_datas_ar, 0, sizeof(sample_datas_ar));
             state_machine_flag = ANISO_STATE_IDLE;
+            printf_("sample_task state_machine_flag=%d\r\n", state_machine_flag);
         }
     }
 }
@@ -279,7 +291,8 @@ void command_setup_aniso_bed_mesh(uint32_t *args)
         gpio_out_write_now(triggerPF, 1);
         state_machine_flag = ANISO_STATE_INIT;
         memset(sample_datas_ar, 0, sizeof(sample_datas_ar));
-        trigger1_count = 0;
+        trigger1_window_count = 0;
+        trigger1_window_bits = 0;
         sched_del_timer(&sample_timer);
         sample_timer.waketime = timer_read_time() + timer_from_us(SAMPLE_INTERVAL_US);
         sched_add_timer(&sample_timer);
