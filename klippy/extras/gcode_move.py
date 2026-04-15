@@ -347,7 +347,9 @@ class GCodeMove:
         self.t0_offset = all_vars.get('t0_switch_y', 250.0)
     
         self.gcode.run_script_from_command("SET_PRINT_STATS_INFO STATE=calibration")
-        self.gcode.run_script_from_command("G28")
+        self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z VELOCITY=10 DISTANCE=4")
+        self.gcode.run_script_from_command("G28 X Y")
+        self.gcode.run_script_from_command("SET_GCODE_OFFSET X=0 Y=0 Z=0")
         self.gcode.run_script_from_command("G1 X150 Y%.1f F6000" % self.t0_offset)
         self.gcode.run_script_from_command("G4 P500")
         self.gcode.run_script_from_command("M400")
@@ -376,33 +378,30 @@ class GCodeMove:
         sconfig = configfile.get_status(None)['settings']
         stconfig = sconfig.get('stepper_x', {})
         original_speed = stconfig['homing_speed']
-        rotation_distance = stconfig['rotation_distance']
-        microsteps = stconfig['microsteps']
-        full_steps_per_rotation = stconfig['full_steps_per_rotation']
+        step_dist = x_stepper.get_step_dist()
         # self.gcode.run_script_from_command('M118 speed: %.1f' % original_speed)
-        # self.gcode.run_script_from_command('M118 rotation_distance: %.1f' % rotation_distance)
-        # self.gcode.run_script_from_command('M118 microsteps: %.1f' % microsteps)
-        # self.gcode.run_script_from_command('M118 full_steps_per_rotation: %.1f' % full_steps_per_rotation)
-        steps_per_mm = (full_steps_per_rotation * microsteps) / rotation_distance
 
+        toolhead.flush_step_generation()
         first_position = x_stepper.get_mcu_position()
         gcmd.respond_raw("First X stepper position: %d" % (first_position))
 
         self.gcode.run_script_from_command("G28.1 X")
-        self.gcode.run_script_from_command("G1 X0 Y0 F6000")
+        self.gcode.run_script_from_command("G1 X20 Y20 F6000")
         self.gcode.run_script_from_command("G4 P500")
         self.gcode.run_script_from_command("G1 X150 Y%.1f F6000" % self.t0_offset)
         self.gcode.run_script_from_command("G4 P500")
         self.gcode.run_script_from_command("M400")
         self.gcode.run_script_from_command("G28.1 X")
+        self.gcode.run_script_from_command("M400")
         
+        toolhead.flush_step_generation()
         second_position = x_stepper.get_mcu_position()
         gcmd.respond_raw("Second X stepper position: %d" % (second_position))
 
         self.gcode.run_script_from_command("G1 X150 Y%.1f F6000" % self.t0_offset)
         
         diff_steps = abs(second_position - first_position)
-        diff_mm = diff_steps / steps_per_mm
+        diff_mm = diff_steps * step_dist
         
         self.gcode.run_script_from_command('M118 T0 position : %.6f mm' % (diff_mm + 150))
         self.gcode.run_script_from_command('SET_TOOL_SWITCH_POSITION T=0 X=%.6f' % (diff_mm + 150))
@@ -426,7 +425,9 @@ class GCodeMove:
         self.t1_offset = all_vars.get('t1_switch_y', 250.0)
 
         self.gcode.run_script_from_command("SET_PRINT_STATS_INFO STATE=calibration")
-        self.gcode.run_script_from_command("G28")
+        self.gcode.run_script_from_command("FORCE_MOVE STEPPER=stepper_z VELOCITY=10 DISTANCE=4")
+        self.gcode.run_script_from_command("G28 X Y")
+        self.gcode.run_script_from_command("SET_GCODE_OFFSET X=0 Y=0 Z=0")
         self.gcode.run_script_from_command("G1 X150 Y%.1f F6000" % self.t1_offset)
         self.gcode.run_script_from_command("G4 P500")
         self.gcode.run_script_from_command("M400")
@@ -455,29 +456,29 @@ class GCodeMove:
         sconfig = configfile.get_status(None)['settings']
         stconfig = sconfig.get('stepper_x', {})
         original_speed = stconfig['homing_speed']
-        rotation_distance = stconfig['rotation_distance']
-        microsteps = stconfig['microsteps']
-        full_steps_per_rotation = stconfig['full_steps_per_rotation']
-        steps_per_mm = (full_steps_per_rotation * microsteps) / rotation_distance
+        step_dist = x_stepper.get_step_dist()
 
+        toolhead.flush_step_generation()
         first_position = x_stepper.get_mcu_position()
         gcmd.respond_raw("First T1 X stepper position: %d" % (first_position))
 
         self.gcode.run_script_from_command("G28.1 X")
-        self.gcode.run_script_from_command("G1 X300 Y0 F6000")
+        self.gcode.run_script_from_command("G1 X280 Y20 F6000")
         self.gcode.run_script_from_command("G4 P500")
         self.gcode.run_script_from_command("G1 X150 Y%.1f F6000" % self.t1_offset)
         self.gcode.run_script_from_command("G4 P500")
         self.gcode.run_script_from_command("M400")
         self.gcode.run_script_from_command("G28.1 X")
+        self.gcode.run_script_from_command("M400")
         
+        toolhead.flush_step_generation()
         second_position = x_stepper.get_mcu_position()
         gcmd.respond_raw("Second T1 X stepper position: %d" % (second_position))
 
         self.gcode.run_script_from_command("G1 X150 Y%.1f F6000" % self.t1_offset)
         
         diff_steps = abs(second_position - first_position)
-        diff_mm = diff_steps / steps_per_mm
+        diff_mm = diff_steps * step_dist
         
         self.gcode.run_script_from_command('M118 T1 position : %.6f mm' % (150 - diff_mm))
         self.gcode.run_script_from_command('SET_TOOL_SWITCH_POSITION T=1 X=%.6f' % (150 - diff_mm))
