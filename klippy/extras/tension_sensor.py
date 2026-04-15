@@ -29,7 +29,9 @@ class MySerial:
         # 幅值饱和：|力值| 超过此值视为异常（正负对称）
         self.max_normal_value = 500000
         
-        self.jam_consecutive_frames = 3
+        self.jam_consecutive_frames = config.getint(
+            'jam_consecutive_frames', 3, minval=1, maxval=10
+        )
         self.consecutive_jam_frames = 0
         
         self.current_state = "NORMAL"
@@ -60,6 +62,16 @@ class MySerial:
         self.gcode.register_command('SHOW_POLLING_LOG', self.cmd_SHOW_POLLING_LOG)
         self.gcode.register_command('TENSION_SET_THRESHOLD', self.cmd_SET_THRESHOLD,
                                     desc="TENSION_SET_THRESHOLD MIN_DEV=<n>")
+        self.gcode.register_command(
+            'TENSION_SET_CONSECUTIVE',
+            self.cmd_SET_CONSECUTIVE,
+            desc="TENSION_SET_CONSECUTIVE FRAMES=<n>",
+        )
+        self.gcode.register_command(
+            'TENSION_SHOW_CONFIG',
+            self.cmd_SHOW_CONFIG,
+            desc="TENSION_SHOW_CONFIG",
+        )
         self.gcode.register_command('TENSION_RESET_LEARNING', self.cmd_RESET_DETECTION_BUFFERS)
         self.gcode.register_command('TENSION_DEBUG', self.cmd_TENSION_DEBUG)
         self.gcode.register_command('TENSION_RESET_ALARM', self.cmd_RESET_ALARM,)
@@ -312,6 +324,31 @@ class MySerial:
             changed.append(f"MIN_DEV={min_dev}")
         
         gcmd.respond_info(f"Updated: {', '.join(changed) if changed else 'None'}")
+
+    def cmd_SET_CONSECUTIVE(self, gcmd):
+        frames = gcmd.get_int('FRAMES', None, minval=1, maxval=100)
+        if frames is None:
+            gcmd.respond_info(
+                f"Usage: TENSION_SET_CONSECUTIVE FRAMES=<1..100> "
+                f"(current={self.jam_consecutive_frames})"
+            )
+            return
+        self.jam_consecutive_frames = frames
+        # 修改阈值后清除当前累计，避免沿用旧条件下的计数。
+        self.consecutive_jam_frames = 0
+        gcmd.respond_info(
+            f"Updated jam_consecutive_frames={self.jam_consecutive_frames}"
+        )
+
+    def cmd_SHOW_CONFIG(self, gcmd):
+        gcmd.respond_info("=== TENSION SENSOR CONFIG ===")
+        gcmd.respond_info(f"sample_interval: {self.sample_interval:.3f}s")
+        gcmd.respond_info(f"detection_buffer_size: {self.detection_buffer_size}")
+        gcmd.respond_info(f"threshold_sample_count: {self.threshold_sample_count}")
+        gcmd.respond_info(f"trigger_sample_count: {self.trigger_sample_count}")
+        gcmd.respond_info(f"jam_deviation_limit: {self.jam_deviation_limit}")
+        gcmd.respond_info(f"jam_consecutive_frames: {self.jam_consecutive_frames}")
+        gcmd.respond_info(f"max_normal_value: {self.max_normal_value}")
 
     def cmd_TENSION_DEBUG(self, gcmd):
         gcmd.respond_info("=== TENSION SENSOR DEBUG ===")
