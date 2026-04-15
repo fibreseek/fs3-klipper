@@ -25,7 +25,9 @@ class MySerial:
         
         # 判堵：力值为有符号 ADC（可正可负）。以窗口中心 mean_f 为参考，
         # 落在 (mean_f - limit, mean_f + limit) 之外视为堵料（与 |Δ|>limit 等价）。
-        self.jam_deviation_limit = 45000
+        self.jam_deviation_limit = config.getint(
+            'jam_deviation_limit', 45000, minval=1000, maxval=10000000
+        )
         # 幅值饱和：|力值| 超过此值视为异常（正负对称）
         self.max_normal_value = 500000
         
