@@ -352,6 +352,7 @@ class GCodeMove:
         self.gcode.run_script_from_command("G4 P500")
         self.gcode.run_script_from_command("M400")
         self.gcode.run_script_from_command("SET_RAIL_ENDSTOP RAIL=stepper_x SPEED=100.0")
+        self.gcode.run_script_from_command("SET_TMC_FIELD STEPPER=stepper_x FIELD=sgt VALUE=1")
         self.gcode.run_script_from_command("G4 P500")
         self.gcode.run_script_from_command("M400")
 
@@ -408,6 +409,7 @@ class GCodeMove:
         self.gcode.run_script_from_command("G4 P500")
         self.gcode.run_script_from_command("M400")
         self.gcode.run_script_from_command("SET_RAIL_ENDSTOP RAIL=stepper_x SPEED=%.1f" % original_speed)
+        self.gcode.run_script_from_command("SET_TMC_FIELD STEPPER=stepper_x FIELD=sgt VALUE=2")
         # self.gcode.run_script_from_command("G28 XY")
         # self.gcode.run_script_from_command("G1 X150 Y150 F6000")
         self.gcode.run_script_from_command("M84")
@@ -429,6 +431,7 @@ class GCodeMove:
         self.gcode.run_script_from_command("G4 P500")
         self.gcode.run_script_from_command("M400")
         self.gcode.run_script_from_command("SET_RAIL_ENDSTOP RAIL=stepper_x POSITION=-41 DIRECTION=0 SPEED=100.0")
+        self.gcode.run_script_from_command("SET_TMC_FIELD STEPPER=stepper_x FIELD=sgt VALUE=1")
         self.gcode.run_script_from_command("G4 P500")
         self.gcode.run_script_from_command("M400")
 
@@ -481,6 +484,7 @@ class GCodeMove:
         self.gcode.run_script_from_command("G4 P500")
         self.gcode.run_script_from_command("M400")
         self.gcode.run_script_from_command("SET_RAIL_ENDSTOP POSITION=310 DIRECTION=1 RAIL=stepper_x SPEED=%.1f" % original_speed)
+        self.gcode.run_script_from_command("SET_TMC_FIELD STEPPER=stepper_x FIELD=sgt VALUE=2")
         # self.gcode.run_script_from_command("G28 XY")
         # self.gcode.run_script_from_command("G1 X150 Y150 F6000")
         self.gcode.run_script_from_command("M84")
