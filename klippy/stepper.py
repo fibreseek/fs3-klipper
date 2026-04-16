@@ -391,6 +391,7 @@ class PrinterRail:
         new_endstop = gcmd.get_float('POSITION', self.position_endstop)
         new_direction = gcmd.get_int('DIRECTION', None)
         new_homing_speed = gcmd.get_float('SPEED', None)
+        new_second_homing_speed = gcmd.get_float('SECOND_SPEED', None)
         
         if new_endstop < self.position_min or new_endstop > self.position_max:
             raise gcmd.error(
@@ -400,12 +401,16 @@ class PrinterRail:
         if new_homing_speed is not None and new_homing_speed <= 0:
             raise gcmd.error("SPEED must be positive")
         
+        if new_second_homing_speed is not None and new_second_homing_speed <= 0:
+            raise gcmd.error("SECOND_SPEED must be positive")
+
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.flush_step_generation()
         
         old_endstop = self.position_endstop
         old_direction = self.homing_positive_dir
         old_homing_speed = self.homing_speed
+        old_second_homing_speed = self.second_homing_speed
         
         self.position_endstop = new_endstop
         
@@ -424,7 +429,12 @@ class PrinterRail:
             self.homing_speed = new_homing_speed
             if abs(new_homing_speed - old_homing_speed) > 0.001:
                 msg_parts.append("homing_speed: %.2f -> %.2f" % (old_homing_speed, new_homing_speed))
-        
+
+        if new_second_homing_speed is not None:
+            self.second_homing_speed = new_second_homing_speed
+            if abs(new_second_homing_speed - old_second_homing_speed) > 0.001:
+                msg_parts.append("second_homing_speed: %.2f -> %.2f" % (old_second_homing_speed, new_second_homing_speed))
+
         if not msg_parts:
             msg_parts.append("No changes made")
         
