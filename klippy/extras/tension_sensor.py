@@ -2,7 +2,6 @@ import logging
 import threading
 import time
 import collections
-import math
 
 class MySerial:
     def __init__(self, config):
@@ -15,16 +14,24 @@ class MySerial:
         
         self.sample_interval = 0.2  # seconds (200ms)
         
-        # 满 30 帧后：每帧用最旧 15 条（滤波）算参考 mean_f 与允许带；
-        # 用最新 3 点中位数与带比较判堵；需连续 3 帧均判堵才锁定（无再累计 5 次）。
-        self.detection_buffer_size = 30
-        self.threshold_sample_count = 15
+        # 判堵：最新 3 点中位数与基准 force_baseline 比较；连续 jam_consecutive_frames 帧超阈锁定。
+        # 基准仅由 TENSION_UPDATE_BASELINE 宏更新（主簇 + EMA），不再从滑动窗学习。
+        self.baseline_sample_count = 10
+        self.baseline_cluster_eps = config.getint(
+            'baseline_cluster_eps', 1200, minval=50, maxval=200000
+        )
+        self.baseline_cluster_min_points = config.getint(
+            'baseline_cluster_min_points', 4, minval=2, maxval=50
+        )
+        self.baseline_ema_alpha = config.getfloat(
+            'baseline_ema_alpha', 0.2, minval=0.01, maxval=1.0
+        )
         self.trigger_sample_count = 3
+        self.detection_buffer = collections.deque(maxlen=30)
         
-        self.detection_buffer = collections.deque(maxlen=self.detection_buffer_size)
+        self.force_baseline = None
         
-        # 判堵：力值为有符号 ADC（可正可负）。以窗口中心 mean_f 为参考，
-        # 落在 (mean_f - limit, mean_f + limit) 之外视为堵料（与 |Δ|>limit 等价）。
+        # 判堵：力值为有符号 ADC。以 force_baseline 为参考，单向偏离超过 jam_deviation_limit 视为堵料。
         self.jam_deviation_limit = config.getint(
             'jam_deviation_limit', 45000, minval=1000, maxval=10000000
         )
@@ -42,10 +49,14 @@ class MySerial:
         self.value_history = collections.deque(maxlen=500)
         
         self.calibration_log = []
-        self.polling_log = []
 
         self.polling_enabled = False
         self.polling_log_enabled = False
+        self.jam_detection_enabled = True
+        self._skip_jam_detection = False
+        self._baseline_update_running = False
+        self._baseline_update_thread = None
+        self._baseline_lock = threading.Lock()
         
         printer = config.get_printer()
         self.gcode = printer.lookup_object('gcode')
@@ -55,13 +66,11 @@ class MySerial:
 
     def _register_commands(self):
         self.gcode.register_command('TENSION_SENSOR_POLL', self.cmd_FORCE_SENSOR_POLL,
-                                    desc="TENSION_SENSOR_POLL ENABLE=<0|1> [LOGGING=<0|1>]")
+                                    desc="TENSION_SENSOR_POLL ENABLE=<0|1> [LOGGING=<0|1>] [DETECT=<0|1>]")
         self.gcode.register_command('TENSION_SENSOR_STATUS', self.cmd_FORCE_SENSOR_STATUS)
         self.gcode.register_command('SHOW_CALIBRATION', self.cmd_SHOW_CALIBRATION)
         self.gcode.register_command('GET_FORCE_VALUE', self.cmd_GET_FORCE_VALUE)
         self.gcode.register_command('GET_RAW_FORCE_DATA', self.cmd_GET_RAW_FORCE_DATA)
-        self.gcode.register_command('CLEAR_POLLING_LOG', self.cmd_CLEAR_POLLING_LOG)
-        self.gcode.register_command('SHOW_POLLING_LOG', self.cmd_SHOW_POLLING_LOG)
         self.gcode.register_command('TENSION_SET_THRESHOLD', self.cmd_SET_THRESHOLD,
                                     desc="TENSION_SET_THRESHOLD MIN_DEV=<n>")
         self.gcode.register_command(
@@ -74,10 +83,15 @@ class MySerial:
             self.cmd_SHOW_CONFIG,
             desc="TENSION_SHOW_CONFIG",
         )
+        self.gcode.register_command(
+            'TENSION_UPDATE_BASELINE',
+            self.cmd_TENSION_UPDATE_BASELINE,
+            desc="TENSION_UPDATE_BASELINE: 10 samples, trim outliers/min/max, set baseline (no jam during capture)",
+        )
         self.gcode.register_command('TENSION_RESET_LEARNING', self.cmd_RESET_DETECTION_BUFFERS)
         self.gcode.register_command('TENSION_DEBUG', self.cmd_TENSION_DEBUG)
         self.gcode.register_command('TENSION_RESET_ALARM', self.cmd_RESET_ALARM,)
-        self.gcode.register_command('TENSION_SHOW_BASELINE', self.cmd_SHOW_BASELINE_DEPRECATED)
+        self.gcode.register_command('TENSION_SHOW_BASELINE', self.cmd_SHOW_BASELINE)
         self.gcode.register_command('TENSION_SET_REFERENCE', self.cmd_REFERENCE_DEPRECATED)
         self.gcode.register_command('TENSION_SHOW_REFERENCE', self.cmd_REFERENCE_DEPRECATED)
         self.gcode.register_command('TENSION_SHOW_LEARNING_HISTORY', self.cmd_REFERENCE_DEPRECATED)
@@ -112,40 +126,60 @@ class MySerial:
             logging.error(f"SPI read failed: {e}")
             return None
 
-    def calculate_stats(self, values):
-        if len(values) < 10:
-            return None, None
-        
-        mean = sum(values) / len(values)
-        
-        variance = sum((x - mean) ** 2 for x in values) / len(values)
-        std = math.sqrt(variance) if variance > 0 else 1.0
-        
-        return mean, std
+    def _find_primary_cluster(self, values, eps):
+        """Find densest 1D cluster where max-min <= eps."""
+        ordered = sorted(values)
+        best_l, best_r = 0, -1
+        l = 0
+        for r in range(len(ordered)):
+            while ordered[r] - ordered[l] > eps:
+                l += 1
+            if (r - l) > (best_r - best_l):
+                best_l, best_r = l, r
+        return ordered[best_l : best_r + 1]
 
-    def _median_filter_window3(self, values):
-        """Edge-padded length-3 median filter for fluctuating series."""
-        if len(values) < 2:
-            return list(values)
-        padded = [values[0]] + list(values) + [values[-1]]
-        out = []
-        for i in range(len(values)):
-            w = padded[i : i + 3]
-            sw = sorted(w)
-            out.append(sw[len(sw) // 2])
-        return out
+    def _compute_baseline_from_samples(self, samples):
+        """主簇 + EMA：异常占比过高则失败，主簇中位值经 EMA 更新基准。"""
+        if len(samples) != self.baseline_sample_count:
+            return None, f"expected {self.baseline_sample_count} samples, got {len(samples)}", None
+        if any(v is None for v in samples):
+            return None, "sample read failed", None
+        abnormal = [v for v in samples if abs(v) > self.max_normal_value]
+        abnormal_ratio = len(abnormal) / float(len(samples))
+        if abnormal_ratio > 0.7:
+            return None, (
+                f"abnormal ratio too high: {len(abnormal)}/{len(samples)} "
+                f"({abnormal_ratio*100:.0f}%)"
+            ), None
+        valid = [v for v in samples if abs(v) <= self.max_normal_value]
+        if not valid:
+            return None, "no valid samples after abnormal filter", None
 
-    def _window15_filtered_mean_std(self):
-        """最旧 15 点中值滤波后求 mean/std。"""
-        buf = list(self.detection_buffer)
-        if len(buf) < self.detection_buffer_size:
-            return None, None
-        oldest_15 = buf[: self.threshold_sample_count]
-        filtered = self._median_filter_window3(oldest_15)
-        mean_f, std_f = self.calculate_stats(filtered)
-        if std_f is not None and std_f <= 0:
-            std_f = 1.0
-        return mean_f, std_f
+        primary = self._find_primary_cluster(valid, self.baseline_cluster_eps)
+        if len(primary) < self.baseline_cluster_min_points:
+            return None, (
+                f"primary cluster too small: {len(primary)} < {self.baseline_cluster_min_points} "
+                f"(eps={self.baseline_cluster_eps})"
+            ), None
+
+        center = int(round(sorted(primary)[len(primary) // 2]))
+        old_baseline = self.force_baseline
+        if old_baseline is None:
+            baseline = center
+        else:
+            baseline = int(round(
+                self.baseline_ema_alpha * center
+                + (1.0 - self.baseline_ema_alpha) * old_baseline
+            ))
+        details = {
+            "cluster_size": len(primary),
+            "cluster_center": center,
+            "old_baseline": old_baseline,
+            "valid_count": len(valid),
+            "abnormal_count": len(abnormal),
+            "cluster_values": primary,
+        }
+        return baseline, None, details
 
     def get_trigger_median(self):
         """Median of the newest 3 samples (indices -3..-1)."""
@@ -156,44 +190,35 @@ class MySerial:
         return newest_3[len(newest_3) // 2]
 
     def detect_jamming(self, current_value):
-        if len(self.detection_buffer) < self.detection_buffer_size:
-            return False, "Collecting"
-        
-        mean_f, _std_f = self._window15_filtered_mean_std()
-        if mean_f is None:
-            return False, "Collecting"
+        baseline = self.force_baseline
+        if baseline is None:
+            return False, "Collecting(no baseline)"
         
         smoothed = self.get_trigger_median()
         if smoothed is None:
             return False, "Collecting"
         
         limit = self.jam_deviation_limit
-        # 对称允许带 [mean_f±limit]；|Δ|>limit 等价于在闭区间外（mean_f 为负时区间整体平移）
-        in_band = (mean_f - limit) <= smoothed <= (mean_f + limit)
-        is_jamming = not in_band
+        delta_fast = smoothed - baseline
+        # 统一判向：仅认“往负方向”偏移为堵料（smoothed < baseline）。
+        fast_deviation = max(0.0, -delta_fast)
+        fast_jamming = fast_deviation > limit
+        is_jamming = fast_jamming
         
         if abs(smoothed) > self.max_normal_value:
             is_jamming = True
         
-        delta = smoothed - mean_f
-        deviation = abs(delta)
         reason = (
-            f"dev={deviation:.0f}/{limit:.0f} delta={delta:+.0f}, val={smoothed:.0f}, mean_f={mean_f:.0f}"
+            f"fast_dev={fast_deviation:.0f}/{limit:.0f} delta_fast={delta_fast:+.0f}, "
+            f"val={smoothed:.0f}, baseline={baseline:.0f}"
         )
         
         return is_jamming, reason
 
     def _record_jamming_snapshot(self, reason):
-        """堵料锁定时将当前窗口数据逐行写入 klipper.log，避免单条过长。"""
+        """堵料锁定时将当前缓冲写入 klipper.log。"""
         try:
-            mf, sf = self._window15_filtered_mean_std()
             trig = self.get_trigger_median()
-            oldest_15_raw = list(self.detection_buffer)[: self.threshold_sample_count]
-            filtered_15 = (
-                self._median_filter_window3(oldest_15_raw)
-                if len(oldest_15_raw) == self.threshold_sample_count
-                else []
-            )
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             logging.error(
                 "tension_sensor jamming snapshot begin time=%s reason=%s",
@@ -201,15 +226,15 @@ class MySerial:
                 reason,
             )
             logging.error(
-                "tension_sensor jamming meta interval_s=%.3f consecutive_frames=%d jam_limit=%s",
+                "tension_sensor jamming meta interval_s=%.3f consecutive_frames=%d "
+                "jam_deviation_limit=%s baseline=%s",
                 self.sample_interval,
                 self.jam_consecutive_frames,
                 self.jam_deviation_limit,
+                self.force_baseline,
             )
             logging.error(
-                "tension_sensor jamming window15 mean_f=%s std_f=%s trig_median3=%s",
-                mf,
-                sf,
+                "tension_sensor jamming trig_median3=%s",
                 trig,
             )
             buf = list(self.detection_buffer)
@@ -219,20 +244,6 @@ class MySerial:
             )
             for i, v in enumerate(buf):
                 logging.error("tension_sensor jamming detection_buffer[%d]=%s", i, v)
-            logging.error(
-                "tension_sensor jamming window15_raw len=%d (idx 0=oldest of 15)",
-                len(oldest_15_raw),
-            )
-            for i, v in enumerate(oldest_15_raw):
-                logging.error("tension_sensor jamming window15_raw[%d]=%s", i, v)
-            logging.error(
-                "tension_sensor jamming window15_median_filtered len=%d",
-                len(filtered_15),
-            )
-            for i, v in enumerate(filtered_15):
-                logging.error(
-                    "tension_sensor jamming window15_median_filtered[%d]=%s", i, v
-                )
             logging.error("tension_sensor jamming snapshot end")
         except Exception as e:
             logging.error("tension_sensor failed to record jamming snapshot: %s", e)
@@ -245,8 +256,16 @@ class MySerial:
         
         self.detection_buffer.append(current_value)
         
-        if len(self.detection_buffer) < self.detection_buffer_size:
-            return False, "COLLECTING", f"{len(self.detection_buffer)}/{self.detection_buffer_size}"
+        if self._skip_jam_detection:
+            return False, "NORMAL", "baseline capture (jam check skipped)"
+        
+        if self.force_baseline is None:
+            return False, "COLLECTING", "no baseline (run TENSION_UPDATE_BASELINE)"
+        
+        if len(self.detection_buffer) < self.trigger_sample_count:
+            return False, "COLLECTING", (
+                f"{len(self.detection_buffer)}/{self.trigger_sample_count} for median"
+            )
         
         is_jamming, reason = self.detect_jamming(current_value)
         
@@ -277,18 +296,25 @@ class MySerial:
         except Exception as e:
             logging.error(f"Failed to send warning: {e}")
 
+    def _notify_info(self, msg):
+        """Send async-safe user-facing info."""
+        logging.info("tension_sensor: %s", msg)
+        try:
+            self.gcode.run_script_from_command(f"M118 {msg}")
+        except Exception as e:
+            logging.error("Failed to notify message '%s': %s", msg, e)
+
     def cmd_RESET_ALARM(self, gcmd):
         was_jammed = self.jamming_triggered
         self.jamming_triggered = False
         self.consecutive_jam_frames = 0
         self.current_state = "NORMAL"
-        # 清空窗口，避免堵料期间的旧样仍留在 30 帧里导致复位后立即再判堵/误报
         self.detection_buffer.clear()
         self.value_history.clear()
         gcmd.respond_info(f"Alarm reset. Previous state: {'JAMMED' if was_jammed else 'NORMAL'}")
         gcmd.respond_info(
-            f"Detection buffer cleared; need {self.detection_buffer_size} new samples "
-            f"({self.detection_buffer_size * self.sample_interval:.1f}s) before jam detection."
+            "Detection buffer cleared; jam detection uses existing baseline and "
+            f"{self.trigger_sample_count} new samples for median."
         )
 
     def cmd_GET_RAW_FORCE_DATA(self, gcmd):
@@ -336,7 +362,6 @@ class MySerial:
             )
             return
         self.jam_consecutive_frames = frames
-        # 修改阈值后清除当前累计，避免沿用旧条件下的计数。
         self.consecutive_jam_frames = 0
         gcmd.respond_info(
             f"Updated jam_consecutive_frames={self.jam_consecutive_frames}"
@@ -345,31 +370,114 @@ class MySerial:
     def cmd_SHOW_CONFIG(self, gcmd):
         gcmd.respond_info("=== TENSION SENSOR CONFIG ===")
         gcmd.respond_info(f"sample_interval: {self.sample_interval:.3f}s")
-        gcmd.respond_info(f"detection_buffer_size: {self.detection_buffer_size}")
-        gcmd.respond_info(f"threshold_sample_count: {self.threshold_sample_count}")
+        gcmd.respond_info(f"baseline_sample_count: {self.baseline_sample_count}")
+        gcmd.respond_info(f"baseline_cluster_eps: {self.baseline_cluster_eps}")
+        gcmd.respond_info(
+            f"baseline_cluster_min_points: {self.baseline_cluster_min_points}"
+        )
+        gcmd.respond_info(f"baseline_ema_alpha: {self.baseline_ema_alpha:.3f}")
         gcmd.respond_info(f"trigger_sample_count: {self.trigger_sample_count}")
         gcmd.respond_info(f"jam_deviation_limit: {self.jam_deviation_limit}")
         gcmd.respond_info(f"jam_consecutive_frames: {self.jam_consecutive_frames}")
         gcmd.respond_info(f"max_normal_value: {self.max_normal_value}")
+        gcmd.respond_info(f"force_baseline: {self.force_baseline}")
+
+    def _baseline_update_worker(self):
+        self._skip_jam_detection = True
+        warmup = []
+        samples = []
+        try:
+            for i in range(self.baseline_sample_count):
+                v = self.read_spi_once()
+                if v is None:
+                    self._notify_info(
+                        f"TENSION_UPDATE_BASELINE ERROR: warmup read failed at "
+                        f"{i + 1}/{self.baseline_sample_count}"
+                    )
+                    return
+                warmup.append(v)
+                if i + 1 < self.baseline_sample_count:
+                    time.sleep(self.sample_interval)
+
+            for i in range(self.baseline_sample_count):
+                v = self.read_spi_once()
+                if v is None:
+                    self._notify_info(
+                        f"TENSION_UPDATE_BASELINE ERROR: read failed at "
+                        f"{i + 1}/{self.baseline_sample_count}"
+                    )
+                    return
+                samples.append(v)
+                if i + 1 < self.baseline_sample_count:
+                    time.sleep(self.sample_interval)
+
+            baseline, err, details = self._compute_baseline_from_samples(samples)
+            if baseline is None:
+                self._notify_info(f"TENSION_UPDATE_BASELINE ERROR: {err}")
+                self._notify_info(f"warmup_samples={warmup}")
+                self._notify_info(f"raw_samples={samples}")
+                return
+
+            self.force_baseline = baseline
+            self.consecutive_jam_frames = 0
+            if details is None:
+                self._notify_info(f"Baseline updated to {baseline}")
+            else:
+                self._notify_info(
+                    f"Baseline updated to {baseline} (center={details['cluster_center']}, "
+                    f"cluster_size={details['cluster_size']}, old={details['old_baseline']}, "
+                    f"ema_alpha={self.baseline_ema_alpha:.3f})"
+                )
+            self._notify_info(f"warmup_samples={warmup}")
+            self._notify_info(f"raw_samples={samples}")
+            if details is not None:
+                self._notify_info(
+                    f"cluster_values={details['cluster_values']} "
+                    f"valid={details['valid_count']} abnormal={details['abnormal_count']}"
+                )
+        except Exception as e:
+            logging.exception("TENSION_UPDATE_BASELINE worker error: %s", e)
+            self._notify_info(f"TENSION_UPDATE_BASELINE ERROR: {e}")
+        finally:
+            self._skip_jam_detection = False
+            with self._baseline_lock:
+                self._baseline_update_running = False
+
+    def cmd_TENSION_UPDATE_BASELINE(self, gcmd):
+        with self._baseline_lock:
+            if self._baseline_update_running:
+                gcmd.respond_info(
+                    "TENSION_UPDATE_BASELINE ignored: previous update still running"
+                )
+                return
+            self._baseline_update_running = True
+            self._baseline_update_thread = threading.Thread(
+                target=self._baseline_update_worker,
+                daemon=True,
+            )
+            self._baseline_update_thread.start()
+        gcmd.respond_info(
+            "TENSION_UPDATE_BASELINE started in background thread; "
+            "result will be reported via M118"
+        )
 
     def cmd_TENSION_DEBUG(self, gcmd):
         gcmd.respond_info("=== TENSION SENSOR DEBUG ===")
         gcmd.respond_info(f"State: {self.current_state}")
         gcmd.respond_info(f"Jamming Triggered: {self.jamming_triggered}")
         gcmd.respond_info(f"Jam deviation limit: {self.jam_deviation_limit}")
+        gcmd.respond_info(f"force_baseline: {self.force_baseline}")
         
-        if len(self.detection_buffer) >= self.detection_buffer_size:
-            mf, sf = self._window15_filtered_mean_std()
-            if mf is not None:
+        if self.force_baseline is not None and len(self.detection_buffer) >= self.trigger_sample_count:
+            trig = self.get_trigger_median()
+            if trig is not None:
+                bl = self.force_baseline
+                delta = trig - bl
+                fast_dev = max(0.0, -delta)
                 gcmd.respond_info(
-                    f"Window15 (filtered): mean={mf:.0f} std={sf:.0f}"
+                    f"Trig median3={trig:.0f} fast_dev={fast_dev:.0f} "
+                    f"(limit={self.jam_deviation_limit})"
                 )
-                trig = self.get_trigger_median()
-                if trig is not None:
-                    dev = abs(trig - mf)
-                    gcmd.respond_info(
-                        f"Trig median3={trig:.0f} dev={dev:.0f} (limit {self.jam_deviation_limit})"
-                    )
         
         gcmd.respond_info(
             f"Consecutive jam frames: {self.consecutive_jam_frames}/{self.jam_consecutive_frames}"
@@ -379,11 +487,17 @@ class MySerial:
             recent = list(self.detection_buffer)[-min(10, len(self.detection_buffer)) :]
             gcmd.respond_info(f"Recent values: min={min(recent)}, max={max(recent)}, avg={sum(recent)/len(recent):.0f}")
 
-    def cmd_SHOW_BASELINE_DEPRECATED(self, gcmd):
-        gcmd.respond_info("Saved baseline: not used (learning removed).")
+    def cmd_SHOW_BASELINE(self, gcmd):
+        if self.force_baseline is None:
+            gcmd.respond_info("force_baseline: not set (run TENSION_UPDATE_BASELINE)")
+        else:
+            gcmd.respond_info(f"force_baseline: {self.force_baseline}")
 
     def cmd_REFERENCE_DEPRECATED(self, gcmd):
-        gcmd.respond_info("Reference/learning commands: not used (learning removed).")
+        gcmd.respond_info(
+            "Use TENSION_UPDATE_BASELINE to set force_baseline; "
+            "TENSION_SHOW_BASELINE to query."
+        )
 
     def cmd_RESET_DETECTION_BUFFERS(self, gcmd):
         self.detection_buffer.clear()
@@ -391,46 +505,9 @@ class MySerial:
         self.jamming_triggered = False
         self.current_state = "NORMAL"
         gcmd.respond_info(
-            f"Detection buffers reset. Need {self.detection_buffer_size} samples "
-            f"({self.detection_buffer_size * self.sample_interval:.1f}s) before jam detection."
+            "Detection buffers reset. Baseline unchanged. "
+            f"Need {self.trigger_sample_count} samples for trigger median."
         )
-
-    def cmd_CLEAR_POLLING_LOG(self, gcmd):
-        try:
-            self.detection_buffer.clear()
-            self.value_history.clear()
-            
-            self.calibration_log.clear()
-            self.polling_log.clear()
-            
-            self.current_state = "NORMAL"
-            self.jamming_triggered = False
-            self.consecutive_jam_frames = 0
-            
-            gcmd.respond_info("=" * 50)
-            gcmd.respond_info("日志与检测缓存已清除")
-            gcmd.respond_info(
-                f"需重新采集 {self.detection_buffer_size} 个样本后方可判堵"
-            )
-            gcmd.respond_info("=" * 50)
-            
-        except Exception as e:
-            gcmd.respond_info(f"错误: 清除失败 - {e}")
-
-    def cmd_SHOW_POLLING_LOG(self, gcmd):
-        count = gcmd.get_int('COUNT', 10)
-        if not self.polling_log:
-            gcmd.respond_info("Log empty")
-            return
-        
-        start = max(0, len(self.polling_log) - count)
-        for i, e in enumerate(self.polling_log[start:], start+1):
-            ts = e.get('timestamp', 'N/A')
-            val = e.get('value', 'N/A')
-            volt = e.get('voltage', 0)
-            gcmd.respond_info(f"{i:4d}. {ts} | {val:8d} | {volt:.6f}V")
-        
-        gcmd.respond_info(f"Total: {len(self.polling_log)}")
 
     def cmd_FORCE_SENSOR_STATUS(self, gcmd):
         val = self.read_spi_once()
@@ -441,33 +518,40 @@ class MySerial:
         volt = self.adc_to_voltage(val)
         gcmd.respond_info(f"Current: {val} ({volt:.6f}V)")
         gcmd.respond_info(f"State: {self.current_state} | Jamming Locked: {self.jamming_triggered}")
+        gcmd.respond_info(f"Jam detection enabled: {self.jam_detection_enabled}")
         gcmd.respond_info(f"Jam deviation limit: {self.jam_deviation_limit}")
+        gcmd.respond_info(f"force_baseline: {self.force_baseline}")
         
-        if len(self.detection_buffer) >= self.detection_buffer_size:
-            mf, _ = self._window15_filtered_mean_std()
+        if self.force_baseline is not None and len(self.detection_buffer) >= self.trigger_sample_count:
             trig = self.get_trigger_median()
-            if mf is not None and trig is not None:
-                dev = abs(trig - mf)
+            if trig is not None:
+                bl = self.force_baseline
+                delta = trig - bl
+                fast_dev = max(0.0, -delta)
                 gcmd.respond_info(
-                    f"Window mean_f={mf:.0f} | trig_median3={trig:.0f} | dev={dev:.0f}"
+                    f"baseline={bl:.0f} | trig_median3={trig:.0f} | fast_dev={fast_dev:.0f}"
                 )
 
     def cmd_FORCE_SENSOR_POLL(self, gcmd):
         enable = gcmd.get_int('ENABLE', None)
         logging_enable = gcmd.get_int('LOGGING', 0)
+        detect_enable = gcmd.get_int('DETECT', 1)
         
         if enable is None:
-            gcmd.respond_info("Usage: TENSION_SENSOR_POLL ENABLE=<0|1> [LOGGING=<0|1>]")
+            gcmd.respond_info("Usage: TENSION_SENSOR_POLL ENABLE=<0|1> [LOGGING=<0|1>] [DETECT=<0|1>]")
             return
         
         if enable:
+            self.jam_detection_enabled = (detect_enable == 1)
             self.polling_log_enabled = (logging_enable == 1)
-            if self.polling_log_enabled:
-                self.polling_log.clear()
             
             self.start_polling()
-            gcmd.respond_info(f"Polling ON ({self.sample_interval*1000:.0f}ms) "
-                            f"logging={'ON' if self.polling_log_enabled else 'OFF'}")
+            mode = "DETECTION" if self.jam_detection_enabled else "LOG_ONLY"
+            gcmd.respond_info(
+                f"Polling ON ({self.sample_interval*1000:.0f}ms) "
+                f"klipper.log={'ON' if self.polling_log_enabled else 'OFF'} "
+                f"mode={mode}"
+            )
         else:
             self.stop_polling()
             gcmd.respond_info("Polling OFF")
@@ -487,8 +571,8 @@ class MySerial:
         self.polling_thread.start()
         
         logging.info(
-            f"Polling started: {self.sample_interval*1000:.0f}ms, "
-            f"need {self.detection_buffer_size} samples before jam detection"
+            f"Polling started: {self.sample_interval*1000:.0f}ms; "
+            "set baseline with TENSION_UPDATE_BASELINE before jam detection applies"
         )
 
     def stop_polling(self):
@@ -513,16 +597,21 @@ class MySerial:
                     continue
                 
                 if self.polling_log_enabled:
-                    self.polling_log.append({
-                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-                        'value': val,
-                        'voltage': self.adc_to_voltage(val)
-                    })
-                
-                changed, state, details = self.update_detection_state(val)
-                
-                if changed and state == "JAMMED":
-                    self.reactor.register_callback(lambda e: self._send_jamming_warning(details))
+                    logging.info(
+                        "TENSION_SAMPLE value=%s voltage=%.6f detect=%s state=%s",
+                        val,
+                        self.adc_to_voltage(val),
+                        1 if self.jam_detection_enabled else 0,
+                        self.current_state,
+                    )
+
+                if self.jam_detection_enabled:
+                    changed, state, details = self.update_detection_state(val)
+                    if changed and state == "JAMMED":
+                        self.reactor.register_callback(lambda e: self._send_jamming_warning(details))
+                else:
+                    self.value_history.append(val)
+                    changed, state, details = False, "LOG_ONLY", "jam detection disabled"
                 
                 if len(self.value_history) % 60 == 0:
                     logging.info(f"Status: {state} | {details}")
