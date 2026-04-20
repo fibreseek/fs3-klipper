@@ -1210,6 +1210,7 @@ class VirtualSD:
                     self.powerloss_init_info = None
                     self.powerloss_progress.clear_record()
                     logging.info("Finished SD card print")
+                    self.gcode.run_script("M400")
                     self.gcode.run_script("PRINT_COMPLETED")
                     self.gcode.respond_raw("Done printing file")
                     break
@@ -1280,6 +1281,15 @@ class VirtualSD:
                     raw_len = None
             else:
                 line, is_injected, raw_len = item, False, None
+
+            stripped_line = line.strip()
+            if stripped_line.lower().startswith("; end printer end gcode"):
+                # Treat explicit end marker as EOF to skip trailing metadata
+                # comments (for example "; SESSION" and thumbnails).
+                end_of_file = True
+                current_buffer = []
+                self._stop_prefetch_thread()
+                prefetch_started = False
 
             if not self.extruder_switch_detected and ("switch extruder type to" in line or "; switch extruder type to:" in line):
                 self.extruder_switch_detected = True
