@@ -36,7 +36,7 @@ class MySerial:
             'jam_deviation_limit', 45000, minval=1000, maxval=10000000
         )
         # 幅值饱和：|力值| 超过此值视为异常（正负对称）
-        self.max_normal_value = 500000
+        self.max_normal_value = 0x400000
         
         self.jam_consecutive_frames = config.getint(
             'jam_consecutive_frames', 3, minval=1, maxval=10

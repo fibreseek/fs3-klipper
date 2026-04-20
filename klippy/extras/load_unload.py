@@ -284,7 +284,7 @@ class LoadUnloadHandler:
         6. 启动温度等待定时器
         """
         # 检查打印机是否空闲
-        logger.debug(f"[LOAD_FILAMENT] Starting, operation_mode={self.operation_mode}")
+        logger.info(f"[LOAD_FILAMENT] Starting, operation_mode={self.operation_mode}")
         if self.operation_mode != OperationMode.IDLE:
             channel_name = self._get_channel_name()
             gcmd.respond_info(f"[{channel_name} LOAD] ERROR: Printer is busy")
@@ -296,19 +296,19 @@ class LoadUnloadHandler:
         target = gcmd.get_int('S', 0)          # 目标温度
         was_loaded = gcmd.get_int('L', 0)      # 是否已加载
 
-        logger.debug(f"[LOAD_FILAMENT] Parameters: I={index}, T={nozzle}, S={target}, L={was_loaded}")
+        logger.info(f"[LOAD_FILAMENT] Parameters: I={index}, T={nozzle}, S={target}, L={was_loaded}")
         channel_name = self._get_channel_name(index)
 
         # 验证目标温度是否合法（根据nozzle参数获取对应挤出机）
         extruder_name = 'extruder' if nozzle == 0 else 'extruder1'
-        logger.debug(f"[LOAD_FILAMENT] Looking up extruder: {extruder_name}")
+        logger.info(f"[LOAD_FILAMENT] Looking up extruder: {extruder_name}")
         extruder = self.printer.lookup_object(extruder_name, None)
         if extruder is None:
             logger.error(f"[LOAD_FILAMENT] Extruder '{extruder_name}' not found")
             gcmd.respond_info(f"[{channel_name} LOAD] ERROR: Extruder '{extruder_name}' not found")
             return
         min_temp = extruder.heater.min_extrude_temp
-        logger.debug(f"[LOAD_FILAMENT] Extruder min_temp={min_temp}, target={target}")
+        logger.info(f"[LOAD_FILAMENT] Extruder min_temp={min_temp}, target={target}")
         if target <= min_temp:
             gcmd.respond_info(f"[{channel_name} LOAD] ERROR: Temperature {target}C too low")
             return
@@ -344,7 +344,7 @@ class LoadUnloadHandler:
         self.printer.send_event("filament_clog:check_stop")
         self.gcode.respond_info("filament_clog:check_stop")
 
-        logger.debug(f"[LOAD_FILAMENT] Calling _prepare_load()")
+        logger.info(f"[LOAD_FILAMENT] Calling _prepare_load()")
         # 扩展 idle_timeout（在准备进料之前）
         self._extend_idle_timeout()
         # 准备进料（移动到废料站、切换喷嘴等）
@@ -353,11 +353,11 @@ class LoadUnloadHandler:
         # 只有非 P1 的情况下才设置目标温度
         # P1通道（L=0或L=1）: 初始化时不设置温度，保持当前温度，在阶段2(CLOG_DETECTION)设置50°C
         if index != Channel.P1:
-            logger.debug(f"[LOAD_FILAMENT] Setting heater temperature: M104 T{nozzle} S{target}")
+            logger.info(f"[LOAD_FILAMENT] Setting heater temperature: M104 T{nozzle} S{target}")
             self.gcode.run_script_from_command(f"M104 T{nozzle} S{target}")
         else:
             # P1通道：初始化时不设置温度，保持当前温度
-            logger.debug(f"[LOAD_FILAMENT] P1: Not setting initial temperature, keeping current temperature")
+            logger.info(f"[LOAD_FILAMENT] P1: Not setting initial temperature, keeping current temperature")
 
         # ============================================================
         # 根据通道决定初始状态
@@ -382,7 +382,7 @@ class LoadUnloadHandler:
             # 启动温度等待定时器
             self._start_temp_timer(1.0)
 
-        logger.debug(f"[LOAD_FILAMENT] Command completed successfully")
+        logger.info(f"[LOAD_FILAMENT] Command completed successfully")
 
     cmd_UNLOAD_FILAMENT_help = "退料命令: UNLOAD_FILAMENT I=<0-2> T=<0-1> S=<temperature>"
     def cmd_UNLOAD_FILAMENT(self, gcmd):
@@ -663,7 +663,7 @@ class LoadUnloadHandler:
 
         这个映射确保每个通道使用正确的挤出机轴
         """
-        logger.debug("[PREPARE_LOAD_UNLOAD_NOZZLE] Starting")
+        logger.info("[PREPARE_LOAD_UNLOAD_NOZZLE] Starting")
         index = self.load_unload_index
         extruder_map = {
             Channel.F: 'extruder2',
@@ -671,7 +671,7 @@ class LoadUnloadHandler:
             Channel.P2: 'extruder1'
         }
         extruder_name = extruder_map.get(index, 'extruder')
-        logger.debug(f"[PREPARE_LOAD_UNLOAD_NOZZLE] Channel index={index}, extruder_name={extruder_name}")
+        logger.info(f"[PREPARE_LOAD_UNLOAD_NOZZLE] Channel index={index}, extruder_name={extruder_name}")
 
         # 检查挤出机是否存在
         extruder = self.printer.lookup_object(extruder_name, None)
@@ -679,21 +679,21 @@ class LoadUnloadHandler:
             logger.error(f"[PREPARE_LOAD_UNLOAD_NOZZLE] Extruder '{extruder_name}' not found")
             gcmd.respond_info(f"ERROR: Extruder '{extruder_name}' not configured")
             return
-        logger.debug(f"[PREPARE_LOAD_UNLOAD_NOZZLE] Found extruder '{extruder_name}'")
+        logger.info(f"[PREPARE_LOAD_UNLOAD_NOZZLE] Found extruder '{extruder_name}'")
 
         # 使用 toolhead 直接设置挤出机，避免调用可能失败的 G-code 命令
         toolhead = self.printer.lookup_object('toolhead')
         current_extruder = toolhead.get_extruder()
-        logger.debug(f"[PREPARE_LOAD_UNLOAD_NOZZLE] Current extruder: {current_extruder.name if current_extruder else 'None'}")
+        logger.info(f"[PREPARE_LOAD_UNLOAD_NOZZLE] Current extruder: {current_extruder.name if current_extruder else 'None'}")
         if current_extruder is not extruder:
-            logger.debug(f"[PREPARE_LOAD_UNLOAD_NOZZLE] Switching from {current_extruder.name if current_extruder else 'None'} to {extruder_name}")
+            logger.info(f"[PREPARE_LOAD_UNLOAD_NOZZLE] Switching from {current_extruder.name if current_extruder else 'None'} to {extruder_name}")
             toolhead.flush_step_generation()
             toolhead.set_extruder(extruder, extruder.last_position)
             self.printer.send_event("extruder:activate_extruder")
             gcmd.respond_info(f"Activating extruder {extruder_name}")
         else:
-            logger.debug(f"[PREPARE_LOAD_UNLOAD_NOZZLE] Extruder {extruder_name} already active")
-        logger.debug("[PREPARE_LOAD_UNLOAD_NOZZLE] Completed")
+            logger.info(f"[PREPARE_LOAD_UNLOAD_NOZZLE] Extruder {extruder_name} already active")
+        logger.info("[PREPARE_LOAD_UNLOAD_NOZZLE] Completed")
 
     cmd_FINISH_LOADUNLOAD_help = "手动完成进出料流程"
     def cmd_FINISH_LOADUNLOAD(self, gcmd):
@@ -831,9 +831,9 @@ class LoadUnloadHandler:
         进料模式温度达标后启动核心处理定时器
         退料模式温度达标后启动核心处理定时器（P1/P2需要预回抽）
         """
-        logger.debug("[_temp_timer_handler] Called")
+        logger.info("[_temp_timer_handler] Called")
         if self.operation_mode == OperationMode.IDLE:
-            logger.debug("[_temp_timer_handler] Operation mode is IDLE, stopping timer")
+            logger.info("[_temp_timer_handler] Operation mode is IDLE, stopping timer")
             return self.reactor.NEVER
 
         target = self.load_unload_temperature
@@ -842,7 +842,7 @@ class LoadUnloadHandler:
         channel_name = self._get_channel_name(index)
         action = 'LOAD' if self.operation_mode == OperationMode.LOADING else 'UNLOAD'
 
-        logger.debug(f"[_temp_timer_handler] {channel_name} {action}: target={target}, nozzle={nozzle}, index={index}")
+        logger.info(f"[_temp_timer_handler] {channel_name} {action}: target={target}, nozzle={nozzle}, index={index}")
 
         # F通道：在加热阶段持续检测并咬住耗材
         if (self.operation_mode == OperationMode.LOADING
@@ -851,7 +851,7 @@ class LoadUnloadHandler:
 
         # 获取当前温度
         extruder_name = 'extruder' if nozzle == 0 else 'extruder1'
-        logger.debug(f"[_temp_timer_handler] Looking up extruder: {extruder_name}")
+        logger.info(f"[_temp_timer_handler] Looking up extruder: {extruder_name}")
         extruder = self.printer.lookup_object(extruder_name, None)
         if extruder is None:
             logger.error(f"[_temp_timer_handler] Extruder '{extruder_name}' not found")
@@ -863,12 +863,12 @@ class LoadUnloadHandler:
         # 温度未达标或需要冷却，继续等待
         if temperature < target - 5:
             # 温度过低，需要加热
-            logger.debug(f"[_temp_timer_handler] Temperature {temperature:.0f}/{target}C, continuing to wait")
+            logger.info(f"[_temp_timer_handler] Temperature {temperature:.0f}/{target}C, continuing to wait")
             self.gcode.respond_info(f"[{channel_name} {action}] HEATING {temperature:.0f}/{target}C")
             return eventtime + 1.0
         elif temperature > target + 5:
             # 温度过高，需要冷却
-            logger.debug(f"[_temp_timer_handler] Temperature {temperature:.0f}/{target}C, cooling down")
+            logger.info(f"[_temp_timer_handler] Temperature {temperature:.0f}/{target}C, cooling down")
             self.gcode.respond_info(f"[{channel_name} {action}] COOLING {temperature:.0f}/{target}C")
             return eventtime + 1.0
         # 温度在目标温度±5°C范围内，认为达标
@@ -935,7 +935,7 @@ class LoadUnloadHandler:
 
         # 新增：检查是否已经完成或错误，避免重复执行
         if self.operation_mode == OperationMode.IDLE or self.load_step in [State.FINISHED, State.ERROR, State.CLOG_RETRACTED]:
-            logger.debug(f"[TIMEOUT] Already in terminal state {self.load_step}, skipping")
+            logger.info(f"[TIMEOUT] Already in terminal state {self.load_step}, skipping")
             return self.reactor.NEVER
 
         # 新增：先设置堵料检测标志，阻止 CLOG_RETRACTED 执行
@@ -1005,25 +1005,25 @@ class LoadUnloadHandler:
             if end_state == "load_unload":
                 if print_stats.state != "load_unload":
                     self._print_stats_state_before_load_unload = print_stats.state
-                logger.debug(
+                logger.info(
                     "[_sync_print_stats_load_unload] enter load_unload, restore_after=%s"
                     % (self._print_stats_state_before_load_unload,))
                 self.gcode.run_script_from_command("SET_PRINT_STATS_INFO STATE=load_unload")
             elif end_state in ("standby", "error"):
                 if end_state == "error" and error_message:
-                    logger.error(
+                    logger.info(
                         "[_sync_print_stats_load_unload] %s" % (error_message,))
                 restore = self._print_stats_state_before_load_unload
                 self._print_stats_state_before_load_unload = None
                 if restore not in ("standby", "paused"):
                     restore = "standby"
-                logger.debug(
+                logger.info(
                     "[_sync_print_stats_load_unload] restore print_stats -> %s (end=%s)"
                     % (restore, end_state))
                 self.gcode.run_script_from_command(
                     "SET_PRINT_STATS_INFO STATE=%s" % (restore,))
         except Exception as e:
-            logger.debug(f"[_sync_print_stats_load_unload] {e}")
+            logger.info(f"[_sync_print_stats_load_unload] {e}")
 
     def _send_state_code(self, state_code, state_name, channel_name=None, action='LOAD'):
         """
@@ -1087,22 +1087,22 @@ class LoadUnloadHandler:
 
         # 只处理P1通道的堵料事件
         if index != Channel.P1:
-            logger.debug(f"[_handle_filament_clog] Ignoring clog event for channel {channel_name}")
+            logger.info(f"[_handle_filament_clog] Ignoring clog event for channel {channel_name}")
             return
 
         # 只在慢速挤出阶段才检测堵料
         if load_step != State.SLOW_EXTRUSION_CHECK_CLOG:
-            logger.debug(f"[_handle_filament_clog] Not in slow extrusion state, current state={load_step}")
+            logger.info(f"[_handle_filament_clog] Not in slow extrusion state, current state={load_step}")
             return
         
         # 做一个最小长度限制
         if self.p1_slow_extrusion_distance < self.p1_clog_detection_min_length:
-            logger.debug(f"[_handle_filament_clog] Extruded distance {self.p1_slow_extrusion_distance:.1f}mm is less than minimum threshold, ignoring clog event")
+            logger.info(f"[_handle_filament_clog] Extruded distance {self.p1_slow_extrusion_distance:.1f}mm is less than minimum threshold, ignoring clog event")
             return
 
         # 新增：检查是否已经超时或完成，避免在超时后继续执行
         if self.operation_mode == OperationMode.IDLE or self.load_step in [State.FINISHED, State.ERROR, State.CLOG_RETRACTED]:
-            logger.debug(f"[_handle_filament_clog] Already in terminal state, skipping. mode={self.operation_mode}, step={self.load_step}")
+            logger.info(f"[_handle_filament_clog] Already in terminal state, skipping. mode={self.operation_mode}, step={self.load_step}")
             return
 
         logger.info(f"[_handle_filament_clog] Filament reached nozzle in {channel_name} channel, extruder={extruder_name}")
@@ -1498,7 +1498,7 @@ class LoadUnloadHandler:
         elif load_step == State.SLOW_EXTRUSION:
             # 检查是否已检测到堵料，如果是则跳过运动命令（防止电机继续转动）
             if self.p1_clog_detected:
-                logger.debug("[SLOW_EXTRUSION] Clog detected, skipping motion commands")
+                logger.info("[SLOW_EXTRUSION] Clog detected, skipping motion commands")
                 return self.reactor.NEVER
 
             self._send_state_code(21, 'SLOW_EXTRUSION', channel_name)
@@ -1527,7 +1527,7 @@ class LoadUnloadHandler:
         elif load_step == State.SLOW_EXTRUSION_CHECK_CLOG:
             # 检查是否已检测到堵料，如果是则跳过运动命令（防止电机继续转动）
             if self.p1_clog_detected:
-                logger.debug("[SLOW_EXTRUSION_CHECK_CLOG] Clog detected, skipping motion commands")
+                logger.info("[SLOW_EXTRUSION_CHECK_CLOG] Clog detected, skipping motion commands")
                 return self.reactor.NEVER
 
             self._send_state_code(27, 'SLOW_EXTRUSION_CHECK_CLOG', channel_name)
@@ -1556,7 +1556,7 @@ class LoadUnloadHandler:
                 return self.reactor.NEVER
             # 新增：检查是否已超时，如果是则不执行回退前进操作
             if self.load_step == State.ERROR:
-                logger.debug("[CLOG_RETRACTED] Already in ERROR state, skipping retract/advance")
+                logger.info("[CLOG_RETRACTED] Already in ERROR state, skipping retract/advance")
                 return self.reactor.NEVER
             # 立即停止定时器，防止在执行过程中再次触发
             self._stop_process_timer()
@@ -1824,7 +1824,7 @@ class LoadUnloadHandler:
         4. 根据喷嘴选择移动到预装载位置
         5. 调用PREPARE_LOAD_UNLOAD_NOZZLE激活对应挤出机
         """
-        logger.debug("[_prepare_load] Starting")
+        logger.info("[_prepare_load] Starting")
         self.operation_mode = OperationMode.LOADING
         self.load_step = State.IDLE
         self.user_confirmed = 0
@@ -1844,8 +1844,8 @@ class LoadUnloadHandler:
         toolhead = self.printer.lookup_object('toolhead')
         eventtime = self.reactor.monotonic()
 
-        logger.debug(f"[_prepare_load] print_stats.state={print_stats.state}")
-        logger.debug("[_prepare_load] In standby mode, checking homed axes")
+        logger.info(f"[_prepare_load] print_stats.state={print_stats.state}")
+        logger.info("[_prepare_load] In standby mode, checking homed axes")
         # 如果未归零，先归零
         if self._print_stats_state_before_load_unload == "standby":
             if "xyz" not in toolhead.get_status(eventtime)['homed_axes']:
@@ -1890,25 +1890,25 @@ class LoadUnloadHandler:
         
         # 根据喷嘴选择移动到预装载位置
         nozzle = self.load_unload_nozzle
-        logger.debug(f"[_prepare_load] nozzle={nozzle}, moving to preload position")
+        logger.info(f"[_prepare_load] nozzle={nozzle}, moving to preload position")
         if nozzle == 0:
             # T0左喷嘴
-            logger.debug("[_prepare_load] Running T0, MOVE_TO_WASTE_STATION, MOVE_LEFT_PRELOAD_POSITION")
+            logger.info("[_prepare_load] Running T0, MOVE_TO_WASTE_STATION, MOVE_LEFT_PRELOAD_POSITION")
             self.gcode.run_script_from_command("T0 MOVE_Z=0")
             self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
             self.gcode.run_script_from_command("MOVE_LEFT_PRELOAD_POSITION")
         else:
             # T1右喷嘴
-            logger.debug("[_prepare_load] Running T1, MOVE_TO_WASTE_STATION, MOVE_RIGHT_PRELOAD_POSITION")
+            logger.info("[_prepare_load] Running T1, MOVE_TO_WASTE_STATION, MOVE_RIGHT_PRELOAD_POSITION")
             self.gcode.run_script_from_command("T1 MOVE_Z=0")
             self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
             self.gcode.run_script_from_command("MOVE_RIGHT_PRELOAD_POSITION")
 
         # 激活对应的挤出机
-        logger.debug("[_prepare_load] Calling PREPARE_LOAD_UNLOAD_NOZZLE")
+        logger.info("[_prepare_load] Calling PREPARE_LOAD_UNLOAD_NOZZLE")
         self.gcode.run_script_from_command("PREPARE_LOAD_UNLOAD_NOZZLE")
         self._sync_print_stats_load_unload("load_unload")
-        logger.debug("[_prepare_load] Completed")
+        logger.info("[_prepare_load] Completed")
 
     def _prepare_unload(self):
         """
@@ -1936,7 +1936,7 @@ class LoadUnloadHandler:
                 v_sd = self.printer.lookup_object('virtual_sdcard', None)
                 init_info = getattr(v_sd, 'powerloss_init_info', None) if v_sd else None
                 if (init_info and getattr(v_sd, 'powerloss_file_exist', False)):
-                    logger.debug("[_prepare_unload] powerloss_init_info exists")
+                    logger.info("[_prepare_unload] powerloss_init_info exists")
                     left_nozzle_temp = init_info.get('left_nozzle_temp')
                     right_nozzle_temp = init_info.get('right_nozzle_temp')
                     if left_nozzle_temp is not None:

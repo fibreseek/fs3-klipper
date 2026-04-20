@@ -387,8 +387,10 @@ class PrintStats:
         state = gcmd.get("STATE", None)
         if state is not None:
             if state not in VALID_STATES:
+                logger.info(f"[_SET_PRINT_STATS_INFO] invalid state {state}")
                 raise gcmd.error("Invalid STATE='%s', must be one of: %s" % (
                     state, ", ".join(VALID_STATES)))
+            logger.info(f"[_SET_PRINT_STATS_INFO] set state to {state}")
             self._require_allowed_state_transition(state, gcmd)
             self.state = state
             self.error_message = ""

@@ -232,6 +232,12 @@ class PowerlossProgress():
                 logging.exception("Failed to read powerloss files.")
         return init_file_found and powerloss_file_found
     
+    def _decode_gcode_line_bytes(self, line_bytes):
+        """Decode a single line from raw file bytes (CRLF/LF). Used for byte-accurate scans."""
+        if not line_bytes:
+            return ''
+        return line_bytes.decode('utf-8', errors='replace').strip()
+
     def scan_print_file_info(self, stop_byte=None):
         """Scan the current print file and extract gcode information.
         
@@ -264,8 +270,10 @@ class PowerlossProgress():
                 elif stop_byte > file_size:
                     stop_byte = file_size
             
-            with open(self.current_print_file, 'r') as f:
-                buffer = ''
+            # Binary read: stop_byte matches Virtual SD file_position (disk bytes). Text mode
+            # would count characters and diverge from SEEKPOSITION on CRLF files.
+            with open(self.current_print_file, 'rb') as f:
+                buffer = b''
                 chunk_size = 8192
                 total_bytes_read = 0
                 
@@ -286,9 +294,9 @@ class PowerlossProgress():
                     buffer += chunk
                     
                     # Process complete lines in buffer
-                    while '\n' in buffer:
-                        line, buffer = buffer.split('\n', 1)
-                        line = line.strip()
+                    while b'\n' in buffer:
+                        line_bytes, buffer = buffer.split(b'\n', 1)
+                        line = self._decode_gcode_line_bytes(line_bytes)
                         
                         # Skip empty lines and comments
                         if not line or line.startswith(';'):
@@ -310,7 +318,7 @@ class PowerlossProgress():
                     # If we're at the end of file, process remaining buffer
                     if len(chunk) < bytes_to_read:
                         if buffer.strip():
-                            line = buffer.strip()
+                            line = self._decode_gcode_line_bytes(buffer)
                             if not line.startswith(';'):
                                 info['gcode_lines'] += 1
                                 self._parse_gcode_line(line, info)
@@ -597,8 +605,8 @@ class PowerlossProgress():
             file_size = os.path.getsize(self.current_print_file)
             if stop_byte > file_size:
                 stop_byte = file_size
-            with open(self.current_print_file, 'r') as f:
-                buffer = ''
+            with open(self.current_print_file, 'rb') as f:
+                buffer = b''
                 chunk_size = 8192
                 total_bytes_read = 0
                 
@@ -611,9 +619,9 @@ class PowerlossProgress():
                     total_bytes_read += len(chunk)
                     buffer += chunk
                     
-                    while '\n' in buffer:
-                        line, buffer = buffer.split('\n', 1)
-                        line = line.strip()
+                    while b'\n' in buffer:
+                        line_bytes, buffer = buffer.split(b'\n', 1)
+                        line = self._decode_gcode_line_bytes(line_bytes)
                         
                         if not line or line.startswith(';'):
                             continue
