@@ -999,6 +999,7 @@ class LoadUnloadHandler:
         进入 load_unload 前必须记下来源状态；结束时用 SET_PRINT_STATS_INFO 恢复。
         error 与正常结束相同：回到进入前状态，不把 print_stats 设为 error。
         若在已是 load_unload 时再调用 load_unload，不覆盖已保存的来源状态。
+        暂停状态下进退料不切换为 load_unload，保持 paused 状态。
         """
         try:
             print_stats = self.printer.lookup_object('print_stats')
@@ -1008,7 +1009,9 @@ class LoadUnloadHandler:
                 logger.info(
                     "[_sync_print_stats_load_unload] enter load_unload, restore_after=%s"
                     % (self._print_stats_state_before_load_unload,))
-                self.gcode.run_script_from_command("SET_PRINT_STATS_INFO STATE=load_unload")
+                # 暂停状态下保持 paused，不切换为 load_unload
+                if self._print_stats_state_before_load_unload != "paused":
+                    self.gcode.run_script_from_command("SET_PRINT_STATS_INFO STATE=load_unload")
             elif end_state in ("standby", "error"):
                 if end_state == "error" and error_message:
                     logger.info(
