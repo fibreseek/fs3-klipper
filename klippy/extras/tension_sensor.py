@@ -1,5 +1,4 @@
 import logging
-import threading
 import time
 import collections
 
@@ -13,6 +12,7 @@ class MySerial:
         self.ADC_MAX = 2**23 - 1  # 8388607 (24-bit signed)
         
         self.sample_interval = 0.2  # seconds (200ms)
+        self.auto_baseline_discard_frames = 10
         
         # 判堵：最新 3 点中位数与基准 force_baseline 比较；连续 jam_consecutive_frames 帧超阈锁定。
         # 基准仅由 TENSION_UPDATE_BASELINE 宏更新（主簇 + EMA），不再从滑动窗学习。
@@ -53,14 +53,22 @@ class MySerial:
         self.polling_enabled = False
         self.polling_log_enabled = False
         self.jam_detection_enabled = True
+        self._poll_sample_counter = 0
+        self._auto_baseline_requested = False
+        self._auto_baseline_pending_frames = 0
         self._skip_jam_detection = False
         self._baseline_update_running = False
-        self._baseline_update_thread = None
-        self._baseline_lock = threading.Lock()
+        self._baseline_phase = None
+        self._baseline_warmup = []
+        self._baseline_samples = []
         
         printer = config.get_printer()
         self.gcode = printer.lookup_object('gcode')
         self.reactor = printer.get_reactor()
+        self._polling_timer = self.reactor.register_timer(self._polling_event)
+        self._baseline_timer = self.reactor.register_timer(
+            self._baseline_update_event
+        )
         
         self._register_commands()
 
@@ -382,44 +390,56 @@ class MySerial:
         gcmd.respond_info(f"max_normal_value: {self.max_normal_value}")
         gcmd.respond_info(f"force_baseline: {self.force_baseline}")
 
-    def _baseline_update_worker(self):
-        self._skip_jam_detection = True
-        warmup = []
-        samples = []
+    def _finish_baseline_update(self):
+        self._skip_jam_detection = False
+        self._baseline_update_running = False
+        self._baseline_phase = None
+        self.reactor.update_timer(self._baseline_timer, self.reactor.NEVER)
+
+    def _baseline_update_event(self, eventtime):
+        if not self._baseline_update_running:
+            return self.reactor.NEVER
         try:
-            for i in range(self.baseline_sample_count):
-                v = self.read_spi_once()
-                if v is None:
+            val = self.read_spi_once()
+            if val is None:
+                if self._baseline_phase == "warmup":
+                    step = len(self._baseline_warmup) + 1
                     self._notify_info(
                         f"TENSION_UPDATE_BASELINE ERROR: warmup read failed at "
-                        f"{i + 1}/{self.baseline_sample_count}"
+                        f"{step}/{self.baseline_sample_count}"
                     )
-                    return
-                warmup.append(v)
-                if i + 1 < self.baseline_sample_count:
-                    time.sleep(self.sample_interval)
-
-            for i in range(self.baseline_sample_count):
-                v = self.read_spi_once()
-                if v is None:
+                else:
+                    step = len(self._baseline_samples) + 1
                     self._notify_info(
                         f"TENSION_UPDATE_BASELINE ERROR: read failed at "
-                        f"{i + 1}/{self.baseline_sample_count}"
+                        f"{step}/{self.baseline_sample_count}"
                     )
-                    return
-                samples.append(v)
-                if i + 1 < self.baseline_sample_count:
-                    time.sleep(self.sample_interval)
+                self._finish_baseline_update()
+                return self.reactor.NEVER
 
+            if self._baseline_phase == "warmup":
+                self._baseline_warmup.append(val)
+                if len(self._baseline_warmup) >= self.baseline_sample_count:
+                    self._baseline_phase = "sample"
+                return eventtime + self.sample_interval
+
+            self._baseline_samples.append(val)
+            if len(self._baseline_samples) < self.baseline_sample_count:
+                return eventtime + self.sample_interval
+
+            warmup = list(self._baseline_warmup)
+            samples = list(self._baseline_samples)
             baseline, err, details = self._compute_baseline_from_samples(samples)
             if baseline is None:
                 self._notify_info(f"TENSION_UPDATE_BASELINE ERROR: {err}")
                 self._notify_info(f"warmup_samples={warmup}")
                 self._notify_info(f"raw_samples={samples}")
-                return
+                self._finish_baseline_update()
+                return self.reactor.NEVER
 
             self.force_baseline = baseline
             self.consecutive_jam_frames = 0
+            self.detection_buffer.clear()
             if details is None:
                 self._notify_info(f"Baseline updated to {baseline}")
             else:
@@ -436,28 +456,30 @@ class MySerial:
                     f"valid={details['valid_count']} abnormal={details['abnormal_count']}"
                 )
         except Exception as e:
-            logging.exception("TENSION_UPDATE_BASELINE worker error: %s", e)
+            logging.exception("TENSION_UPDATE_BASELINE event error: %s", e)
             self._notify_info(f"TENSION_UPDATE_BASELINE ERROR: {e}")
-        finally:
-            self._skip_jam_detection = False
-            with self._baseline_lock:
-                self._baseline_update_running = False
+        self._finish_baseline_update()
+        return self.reactor.NEVER
+
+    def _start_baseline_update(self):
+        if self._baseline_update_running:
+            return False
+        self._baseline_update_running = True
+        self._skip_jam_detection = True
+        self._baseline_phase = "warmup"
+        self._baseline_warmup = []
+        self._baseline_samples = []
+        self.reactor.update_timer(self._baseline_timer, self.reactor.NOW)
+        return True
 
     def cmd_TENSION_UPDATE_BASELINE(self, gcmd):
-        with self._baseline_lock:
-            if self._baseline_update_running:
-                gcmd.respond_info(
-                    "TENSION_UPDATE_BASELINE ignored: previous update still running"
-                )
-                return
-            self._baseline_update_running = True
-            self._baseline_update_thread = threading.Thread(
-                target=self._baseline_update_worker,
-                daemon=True,
+        if not self._start_baseline_update():
+            gcmd.respond_info(
+                "TENSION_UPDATE_BASELINE ignored: previous update still running"
             )
-            self._baseline_update_thread.start()
+            return
         gcmd.respond_info(
-            "TENSION_UPDATE_BASELINE started in background thread; "
+            "TENSION_UPDATE_BASELINE started in background timer; "
             "result will be reported via M118"
         )
 
@@ -546,11 +568,17 @@ class MySerial:
             self.polling_log_enabled = (logging_enable == 1)
             
             self.start_polling()
+            self._auto_baseline_requested = True
+            self._auto_baseline_pending_frames = self.auto_baseline_discard_frames
             mode = "DETECTION" if self.jam_detection_enabled else "LOG_ONLY"
             gcmd.respond_info(
                 f"Polling ON ({self.sample_interval*1000:.0f}ms) "
                 f"klipper.log={'ON' if self.polling_log_enabled else 'OFF'} "
                 f"mode={mode}"
+            )
+            gcmd.respond_info(
+                f"Auto baseline update scheduled after {self.auto_baseline_discard_frames} frames "
+                "(startup dirty-data discard)."
             )
         else:
             self.stop_polling()
@@ -567,8 +595,8 @@ class MySerial:
         self.current_state = "NORMAL"
         
         self.polling_enabled = True
-        self.polling_thread = threading.Thread(target=self._polling_loop, daemon=True)
-        self.polling_thread.start()
+        self._poll_sample_counter = 0
+        self.reactor.update_timer(self._polling_timer, self.reactor.NOW)
         
         logging.info(
             f"Polling started: {self.sample_interval*1000:.0f}ms; "
@@ -580,48 +608,62 @@ class MySerial:
             return
         
         self.polling_enabled = False
-        if hasattr(self, 'polling_thread'):
-            self.polling_thread.join(timeout=2)
+        self._auto_baseline_requested = False
+        self._auto_baseline_pending_frames = 0
+        self.reactor.update_timer(self._polling_timer, self.reactor.NEVER)
         
         logging.info("Polling stopped")
 
-    def _polling_loop(self):
-        logging.info("Polling loop started")
-        
+    def _polling_event(self, eventtime):
+        if not self.polling_enabled:
+            return self.reactor.NEVER
+        # Avoid concurrent SPI reads with baseline capture timer.
+        # During baseline update, SPI is sampled exclusively by _baseline_update_event.
+        if self._baseline_update_running:
+            return eventtime + self.sample_interval
         try:
-            while self.polling_enabled:
-                val = self.read_spi_once()
-                
-                if val is None:
-                    time.sleep(self.sample_interval)
-                    continue
-                
-                if self.polling_log_enabled:
-                    logging.info(
-                        "TENSION_SAMPLE value=%s voltage=%.6f detect=%s state=%s",
-                        val,
-                        self.adc_to_voltage(val),
-                        1 if self.jam_detection_enabled else 0,
-                        self.current_state,
-                    )
+            val = self.read_spi_once()
+            if val is None:
+                return eventtime + self.sample_interval
 
-                if self.jam_detection_enabled:
-                    changed, state, details = self.update_detection_state(val)
-                    if changed and state == "JAMMED":
-                        self.reactor.register_callback(lambda e: self._send_jamming_warning(details))
-                else:
-                    self.value_history.append(val)
-                    changed, state, details = False, "LOG_ONLY", "jam detection disabled"
-                
-                if len(self.value_history) % 60 == 0:
-                    logging.info(f"Status: {state} | {details}")
-                
-                time.sleep(self.sample_interval)
-                
+            if self.polling_log_enabled:
+                logging.info(
+                    "TENSION_SAMPLE value=%s voltage=%.6f detect=%s state=%s",
+                    val,
+                    self.adc_to_voltage(val),
+                    1 if self.jam_detection_enabled else 0,
+                    self.current_state,
+                )
+
+            if self.jam_detection_enabled:
+                changed, state, details = self.update_detection_state(val)
+                if changed and state == "JAMMED":
+                    self.reactor.register_callback(
+                        lambda e: self._send_jamming_warning(details)
+                    )
+            else:
+                self.value_history.append(val)
+                changed, state, details = False, "LOG_ONLY", "jam detection disabled"
+
+            self._poll_sample_counter += 1
+            # if self._poll_sample_counter % 60 == 0:
+            #     logging.info(f"Status: {state} | {details}")
+            if self._auto_baseline_requested:
+                self._auto_baseline_pending_frames -= 1
+                if self._auto_baseline_pending_frames <= 0:
+                    self._auto_baseline_requested = False
+                    if self._start_baseline_update():
+                        self._notify_info(
+                            f"Auto baseline update started after "
+                            f"{self.auto_baseline_discard_frames} startup frames"
+                        )
+                    else:
+                        logging.info(
+                            "Auto baseline update skipped: baseline update already running"
+                        )
         except Exception as e:
             logging.error(f"Polling error: {e}")
-        finally:
-            logging.info("Polling ended")
+        return eventtime + self.sample_interval
 
 def load_config(config):
     return MySerial(config)
