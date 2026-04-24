@@ -9,11 +9,6 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# 在 gcode.error 或 klippy shutdown 时自动切回 standby 的辅助状态（含 standby/busy 自动检测中的 busy）
-_FAULT_STANDBY_STATES = frozenset({
-    "load_unload", "calibration", "maintenance", "busy",
-})
-
 # 有效状态集合，与状态机设计保持一致
 VALID_STATES = (
     "standby", "precheck", "preprinting", "printing", "pausing", "paused",
@@ -107,11 +102,12 @@ class PrintStats:
                                        self._handle_fault_standby_aux)
 
     def _handle_fault_standby_aux(self, *args):
-        """G-code 命令错误或 Klippy shutdown 时，将辅助状态统一回到 standby。"""
-        if self.state not in _FAULT_STANDBY_STATES:
-            return
+        """G-code 命令错误或 Klippy shutdown 时，任意状态统一回到 standby。"""
         try:
-            self.note_standby()
+            # Fault path should not be blocked by normal transition rules.
+            self.state = "standby"
+            self.error_message = ""
+            self.prep_stage = None
             self._start_busy_timer()
         except Exception:
             logger.exception("print_stats: fault standby transition failed")
