@@ -220,10 +220,7 @@ class MySerial:
         fast_deviation = max(0.0, -delta_fast)
         fast_jamming = fast_deviation > limit
         is_jamming = fast_jamming
-        
-        if abs(smoothed) > self.max_normal_value:
-            is_jamming = True
-        
+
         reason = (
             f"fast_dev={fast_deviation:.0f}/{limit:.0f} delta_fast={delta_fast:+.0f}, "
             f"val={smoothed:.0f}, baseline={baseline:.0f}"
@@ -302,7 +299,15 @@ class MySerial:
         
         if self.jamming_triggered:
             return False, "JAMMED", "Permanently jammed"
-        
+
+        # 异常尖峰不参与 jam 判定窗口，避免污染 median/连续帧逻辑。
+        if abs(current_value) > self.max_normal_value:
+            self.consecutive_jam_frames = 0
+            return False, "NORMAL", (
+                f"abnormal sample ignored: val={current_value} "
+                f"limit={self.max_normal_value}"
+            )
+
         self.detection_buffer.append(current_value)
         
         if self._skip_jam_detection:
