@@ -42,6 +42,14 @@ class MySerial:
             'jam_consecutive_frames', 3, minval=1, maxval=10
         )
         self.consecutive_jam_frames = 0
+        # 趋势门控：当超阈后，最近 jam_consecutive_frames 帧需整体继续向更负方向推进。
+        # 允许轻微抖动（每步最多 increase_tolerance），但不允许持续回升。
+        self.jam_trend_step_tolerance = config.getint(
+            'jam_trend_step_tolerance', 200, minval=0, maxval=1000000
+        )
+        self.jam_trend_total_tolerance = config.getint(
+            'jam_trend_total_tolerance', 300, minval=0, maxval=1000000
+        )
         
         self.current_state = "NORMAL"
         self.jamming_triggered = False
@@ -223,6 +231,39 @@ class MySerial:
         
         return is_jamming, reason
 
+    def _recent_values_keep_getting_more_negative(self):
+        """最近 N 帧是否满足“整体向更负方向推进”。
+        返回 (ok, detail)。
+        """
+        n = self.jam_consecutive_frames
+        if n <= 1:
+            return True, f"trend bypass n={n}"
+        if len(self.detection_buffer) < n:
+            return False, f"trend collecting {len(self.detection_buffer)}/{n}"
+        recent = list(self.detection_buffer)[-n:]
+        step_tol = self.jam_trend_step_tolerance
+        total_tol = self.jam_trend_total_tolerance
+
+        # 单步不得明显回升：v[i] 不应比上一帧大超过 step_tol（大=更不负）
+        for i in range(1, len(recent)):
+            if recent[i] > recent[i - 1] + step_tol:
+                return False, (
+                    f"trend fail step i={i} prev={recent[i-1]} cur={recent[i]} "
+                    f"step_tol={step_tol}"
+                )
+
+        # 总体应更负：最后一帧不应高于首帧 + total_tol
+        if recent[-1] > recent[0] + total_tol:
+            return False, (
+                f"trend fail total first={recent[0]} last={recent[-1]} "
+                f"total_tol={total_tol}"
+            )
+
+        return True, (
+            f"trend ok first={recent[0]} last={recent[-1]} "
+            f"step_tol={step_tol} total_tol={total_tol}"
+        )
+
     def _record_jamming_snapshot(self, reason):
         """堵料锁定时将当前缓冲写入 klipper.log。"""
         try:
@@ -281,6 +322,14 @@ class MySerial:
             self.consecutive_jam_frames += 1
             
             if self.consecutive_jam_frames >= self.jam_consecutive_frames:
+                trend_ok, trend_reason = self._recent_values_keep_getting_more_negative()
+                if not trend_ok:
+                    # 超阈但趋势不满足，撤销本次累计，避免“先降后升”被锁死。
+                    self.consecutive_jam_frames = 0
+                    self.current_state = "NORMAL"
+                    return False, "NORMAL", (
+                        f"threshold met but trend rejected: {trend_reason}"
+                    )
                 self.jamming_triggered = True
                 self.current_state = "JAMMED"
                 logging.error(f"JAMMING DETECTED and LOCKED! {reason}")
@@ -387,6 +436,12 @@ class MySerial:
         gcmd.respond_info(f"trigger_sample_count: {self.trigger_sample_count}")
         gcmd.respond_info(f"jam_deviation_limit: {self.jam_deviation_limit}")
         gcmd.respond_info(f"jam_consecutive_frames: {self.jam_consecutive_frames}")
+        gcmd.respond_info(
+            f"jam_trend_step_tolerance: {self.jam_trend_step_tolerance}"
+        )
+        gcmd.respond_info(
+            f"jam_trend_total_tolerance: {self.jam_trend_total_tolerance}"
+        )
         gcmd.respond_info(f"max_normal_value: {self.max_normal_value}")
         gcmd.respond_info(f"force_baseline: {self.force_baseline}")
 
