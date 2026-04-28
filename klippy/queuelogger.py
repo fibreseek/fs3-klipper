@@ -13,8 +13,8 @@ class QueueHandler(logging.Handler):
         self.queue = queue
     def emit(self, record):
         try:
-            self.format(record)
-            record.msg = record.message  
+            # 保持原始消息，让QueueListener来格式化
+            record.msg = record.getMessage()
             record.args = None
             record.exc_info = None
             self.queue.put_nowait(record)
@@ -26,6 +26,9 @@ class QueueListener(logging.handlers.RotatingFileHandler):
     def __init__(self, filename):
         logging.handlers.RotatingFileHandler.__init__(
             self, filename, maxBytes=1024*1024*5, backupCount=5,)
+        # 设置包含日期的格式化器
+        formatter = logging.Formatter('%(asctime)s %(levelname)s %(filename)s %(funcName)s %(lineno)d %(threadName)s - %(message)s')
+        self.setFormatter(formatter)
         self.bg_queue = queue.Queue()
         self.bg_thread = threading.Thread(target=self._bg_thread)
         self.bg_thread.start()

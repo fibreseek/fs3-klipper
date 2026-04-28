@@ -3,9 +3,7 @@
 # Copyright (C) 2020 Eric Callahan <arksine.code@gmail.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license
-import hashlib
 import logging, socket, os, sys, errno, json, collections
-import uuid
 import gcode
 
 REQUEST_LOG_SIZE = 20
@@ -314,7 +312,21 @@ class WebHooks:
                                self._handle_rpc_registration)
         self.sconn = ServerSocket(self, printer)
 
-        self.machine_id = self._get_machine_id()
+        gcode = self.printer.lookup_object('gcode')
+        gcode.register_command('SET_PRINTER_SETTING', self.cmd_SET_PRINTER_SETTING, self.cmd_SET_PRINTER_SETTING_help)
+        self.machine_id = ""
+        self.machine_name = ""
+    
+    cmd_SET_PRINTER_SETTING_help = "Set a printer setting, e.g. SET_PRINTER_SETTING KEY VALUE"
+    def cmd_SET_PRINTER_SETTING(self, gcmd):
+        setting = gcmd.get('KEY')
+        value = gcmd.get('VALUE')
+        if setting is None or value is None:
+            raise gcmd.error("KEY and VALUE must be specified")
+        if setting == 'machine_id':
+            self.machine_id = value
+        elif setting == 'machine_name':
+            self.machine_name = value
 
     def register_endpoint(self, path, callback):
         if path in self._endpoints:
@@ -351,65 +363,6 @@ class WebHooks:
     def _handle_list_endpoints(self, web_request):
         web_request.send({'endpoints': list(self._endpoints.keys())})
 
-    @staticmethod
-    def _get_cpu_sn():
-        sn = None
-        try:
-            with open('/proc/cpuinfo', 'r') as f:
-                for line in f:
-                    if line.startswith('Serial'):
-                        sn = line.split(':')[1].strip()
-        except FileNotFoundError:
-            logging.error("/proc/cpuinfo not found. Are you on a Linux system and ARM architecture?")
-        except Exception as e:
-            logging.error(f"Error reading /proc/cpuinfo: {e}")
-        logging.debug(f'cpu sn: {sn}')
-        return sn
-
-    @staticmethod
-    def _to_base62(num: int) -> str:
-        BASE62_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        if num == 0:
-            return "0"
-        result = []
-        base = len(BASE62_ALPHABET)
-        while num > 0:
-            num, r = divmod(num, base)
-            result.append(BASE62_ALPHABET[r])
-        result.reverse()
-        return ''.join(result)
-
-    @staticmethod
-    def _get_machine_id():
-        cpu_sn = WebHooks._get_cpu_sn()
-
-        if cpu_sn is None:
-            cpu_sn = str(uuid.uuid4())
-            logging.warning(f"Cannot get CPU serial number, using random UUID: {cpu_sn}")
-
-        # SHA-256 哈希
-        sha256 = hashlib.sha256(cpu_sn.encode("utf-8")).digest()
-
-        # 取前 8 字节转为 uint64
-        hash_num = int.from_bytes(sha256[:8], byteorder="big", signed=False)
-
-        # Base62 编码
-        machine_id = WebHooks._to_base62(hash_num)
-
-        # 生成固定 6 位长度
-        if len(machine_id) > 6:
-            machine_id = machine_id[-6:]   # 取后6位
-        else:
-            machine_id = machine_id.rjust(6, "0")
-
-        logging.info(f"Generated machine ID: {machine_id}")
-
-        return machine_id
-
-    def get_machine_id(self) -> str:
-        """Get the machine ID."""
-        return self.machine_id
-
     def _handle_info_request(self, web_request):
         client_info = web_request.get_dict('client_info', None)
         if client_info is not None:
@@ -425,7 +378,9 @@ class WebHooks:
                     'process_id': os.getpid(),
                     'user_id': os.getuid(),
                     'group_id': os.getgid(),
-                    'machine_id': self.get_machine_id()}
+                    'machine_id': self.machine_id,
+                    'machine_name': self.machine_name,
+                    }
         start_args = self.printer.get_start_args()
         for sa in ['log_file', 'config_file', 'software_version', 'cpu_info']:
             response[sa] = start_args.get(sa)
