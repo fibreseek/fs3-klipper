@@ -67,10 +67,10 @@ class PauseResume:
         self.send_pause_command()
         self.gcode.run_script_from_command("SAVE_GCODE_STATE NAME=PAUSE_STATE")
         self.is_paused = True
-        # 与 print_stats 暂停计时对齐：仅在实际打印中记录 last_pause_time
-        ps = self.print_stats
-        if ps is not None and ps.print_start_time is not None:
-            ps.note_pause()
+        # # 与 print_stats 暂停计时对齐：仅在实际打印中记录 last_pause_time
+        # ps = self.print_stats
+        # if ps is not None and ps.print_start_time is not None:
+        #     ps.note_pause()
     def send_resume_command(self):
         if self.sd_paused:
             # Printing from virtual sd, run pause command
