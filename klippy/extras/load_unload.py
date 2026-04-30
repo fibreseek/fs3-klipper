@@ -515,6 +515,9 @@ class LoadUnloadHandler:
         index = self.load_unload_index
         channel_name = self._get_channel_name(index)
 
+        if index == Channel.P2:
+            self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
+
         # 进入补料重试阶段（移除状态检查，避免时序问题）
         self.load_step = State.RETRYING
         self.load_distance = 0.0
