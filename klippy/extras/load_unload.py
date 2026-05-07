@@ -515,6 +515,9 @@ class LoadUnloadHandler:
         index = self.load_unload_index
         channel_name = self._get_channel_name(index)
 
+        if index == Channel.P2:
+            self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
+
         # 进入补料重试阶段（移除状态检查，避免时序问题）
         self.load_step = State.RETRYING
         self.load_distance = 0.0
@@ -1270,15 +1273,16 @@ class LoadUnloadHandler:
                 self.gcode.respond_info(f"[{channel_name} LOAD] ABORTED - User cancelled")
                 return self.reactor.NEVER
 
-            speed_mm_s = self.retry_speed / 60.0
+            speed_mm_s = self._get_retry_melt_speed_mm_s()
+            retry_feedrate = speed_mm_s * 60.0
             remaining_distance = self.retry_distance - self.load_distance
             retry_step = min(speed_mm_s * self.load_step_time, remaining_distance)
-            self.gcode.run_script_from_command(f"G1 U{retry_step} F{self.retry_speed}")
+            self.gcode.run_script_from_command(f"G1 U{retry_step} F{retry_feedrate}")
             self.load_distance += retry_step
             current_distance = self.load_distance
 
             # 显示补料进度
-            self.gcode.respond_info(f"[{channel_name} LOAD] PROGRESS {current_distance:.0f}/{self.retry_distance:.0f}mm {self.retry_speed / 60:.1f}mm/s")
+            self.gcode.respond_info(f"[{channel_name} LOAD] PROGRESS {current_distance:.0f}/{self.retry_distance:.0f}mm {speed_mm_s:.1f}mm/s")
 
             if current_distance >= self.retry_distance:
                 # 补料完成，再次等待确认
@@ -1684,16 +1688,17 @@ class LoadUnloadHandler:
                 self.gcode.respond_info(f"[{channel_name} LOAD] ABORTED - User cancelled")
                 return self.reactor.NEVER
 
-            speed_mm_s = self.retry_speed / 60.0
+            speed_mm_s = self._get_retry_melt_speed_mm_s()
+            retry_feedrate = speed_mm_s * 60.0
             remaining_distance = self.retry_distance - self.load_distance
             retry_step = min(speed_mm_s * self.load_step_time, remaining_distance)
             self.gcode.run_script_from_command("M83")
-            self.gcode.run_script_from_command(f"G1 E{retry_step} F{self.retry_speed}")
+            self.gcode.run_script_from_command(f"G1 E{retry_step} F{retry_feedrate}")
             self.load_distance += retry_step
             current_distance = self.load_distance
 
             # 显示补料进度
-            self.gcode.respond_info(f"[{channel_name} LOAD] PROGRESS {current_distance:.0f}/{self.retry_distance:.0f}mm {self.retry_speed / 60:.1f}mm/s")
+            self.gcode.respond_info(f"[{channel_name} LOAD] PROGRESS {current_distance:.0f}/{self.retry_distance:.0f}mm {speed_mm_s:.1f}mm/s")
 
             if current_distance >= self.retry_distance:
                 # 补料完成，再次等待确认
@@ -1815,6 +1820,14 @@ class LoadUnloadHandler:
         if index is None:
             index = self.load_unload_index
         return 'F' if index == Channel.F else ('P1' if index == Channel.P1 else 'P2')
+
+    def _get_retry_melt_speed_mm_s(self):
+        """获取当前通道补料重试使用的熔融挤出速度(mm/s)。"""
+        if self.load_unload_index == Channel.F:
+            return self.f_melt_step_length
+        if self.load_unload_index == Channel.P1:
+            return self.p1_slow_move_speed / 60.0
+        return self.p2_step_length
 
     def _prepare_load(self):
         """
