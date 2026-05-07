@@ -14,8 +14,8 @@ class MySerial:
         self.sample_interval = 0.2  # seconds (200ms)
         self.auto_baseline_discard_frames = 10
         
-        # 判堵：最新 3 点中位数与基准 force_baseline 比较；连续 jam_consecutive_frames 帧超阈锁定。
-        # 基准仅由 TENSION_UPDATE_BASELINE 宏更新（主簇 + EMA），不再从滑动窗学习。
+        # 判堵：默认用当前单帧与 force_baseline 比较；trigger_sample_count>1 时用最近 N 点中位数。
+        # 连续 jam_consecutive_frames 帧超阈锁定。基准仅由 TENSION_UPDATE_BASELINE（主簇 + EMA）更新。
         self.baseline_sample_count = 10
         self.baseline_cluster_eps = config.getint(
             'baseline_cluster_eps', 1200, minval=50, maxval=200000
@@ -26,7 +26,9 @@ class MySerial:
         self.baseline_ema_alpha = config.getfloat(
             'baseline_ema_alpha', 0.2, minval=0.01, maxval=1.0
         )
-        self.trigger_sample_count = 3
+        self.trigger_sample_count = config.getint(
+            'trigger_sample_count', 1, minval=1, maxval=10
+        )
         self.detection_buffer = collections.deque(maxlen=30)
         
         self.force_baseline = None
@@ -197,33 +199,36 @@ class MySerial:
         }
         return baseline, None, details
 
-    def get_trigger_median(self):
-        """Median of the newest 3 samples (indices -3..-1)."""
-        if len(self.detection_buffer) < self.trigger_sample_count:
+    def get_jam_compare_value(self):
+        """堵料判据用采样：N=1 为当前帧；N>1 为最近 N 点中位数。"""
+        n = self.trigger_sample_count
+        if len(self.detection_buffer) < n:
             return None
-        newest_3 = list(self.detection_buffer)[-self.trigger_sample_count :]
-        newest_3.sort()
-        return newest_3[len(newest_3) // 2]
+        tail = list(self.detection_buffer)[-n:]
+        if n == 1:
+            return tail[0]
+        tail.sort()
+        return tail[len(tail) // 2]
 
     def detect_jamming(self, current_value):
         baseline = self.force_baseline
         if baseline is None:
             return False, "Collecting(no baseline)"
         
-        smoothed = self.get_trigger_median()
-        if smoothed is None:
+        sample = self.get_jam_compare_value()
+        if sample is None:
             return False, "Collecting"
         
         limit = self.jam_deviation_limit
-        delta_fast = smoothed - baseline
-        # 统一判向：仅认“往负方向”偏移为堵料（smoothed < baseline）。
+        delta_fast = sample - baseline
+        # 统一判向：仅认“往负方向”偏移为堵料（sample < baseline）。
         fast_deviation = max(0.0, -delta_fast)
         fast_jamming = fast_deviation > limit
         is_jamming = fast_jamming
 
         reason = (
             f"fast_dev={fast_deviation:.0f}/{limit:.0f} delta_fast={delta_fast:+.0f}, "
-            f"val={smoothed:.0f}, baseline={baseline:.0f}"
+            f"val={sample:.0f}, baseline={baseline:.0f}"
         )
         
         return is_jamming, reason
@@ -264,7 +269,7 @@ class MySerial:
     def _record_jamming_snapshot(self, reason):
         """堵料锁定时将当前缓冲写入 klipper.log。"""
         try:
-            trig = self.get_trigger_median()
+            trig = self.get_jam_compare_value()
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             logging.error(
                 "tension_sensor jamming snapshot begin time=%s reason=%s",
@@ -280,8 +285,9 @@ class MySerial:
                 self.force_baseline,
             )
             logging.error(
-                "tension_sensor jamming trig_median3=%s",
+                "tension_sensor jamming jam_sample=%s (trigger_sample_count=%s)",
                 trig,
+                self.trigger_sample_count,
             )
             buf = list(self.detection_buffer)
             logging.error(
@@ -300,7 +306,7 @@ class MySerial:
         if self.jamming_triggered:
             return False, "JAMMED", "Permanently jammed"
 
-        # 异常尖峰不参与 jam 判定窗口，避免污染 median/连续帧逻辑。
+        # 异常尖峰不参与 jam 判定窗口，避免污染比较值/连续帧逻辑。
         if abs(current_value) > self.max_normal_value:
             self.consecutive_jam_frames = 0
             return False, "NORMAL", (
@@ -318,7 +324,7 @@ class MySerial:
         
         if len(self.detection_buffer) < self.trigger_sample_count:
             return False, "COLLECTING", (
-                f"{len(self.detection_buffer)}/{self.trigger_sample_count} for median"
+                f"{len(self.detection_buffer)}/{self.trigger_sample_count} for jam compare"
             )
         
         is_jamming, reason = self.detect_jamming(current_value)
@@ -376,7 +382,7 @@ class MySerial:
         gcmd.respond_info(f"Alarm reset. Previous state: {'JAMMED' if was_jammed else 'NORMAL'}")
         gcmd.respond_info(
             "Detection buffer cleared; jam detection uses existing baseline and "
-            f"{self.trigger_sample_count} new samples for median."
+            f"{self.trigger_sample_count} new sample(s) for jam compare."
         )
 
     def cmd_GET_RAW_FORCE_DATA(self, gcmd):
@@ -551,14 +557,14 @@ class MySerial:
         gcmd.respond_info(f"force_baseline: {self.force_baseline}")
         
         if self.force_baseline is not None and len(self.detection_buffer) >= self.trigger_sample_count:
-            trig = self.get_trigger_median()
+            trig = self.get_jam_compare_value()
             if trig is not None:
                 bl = self.force_baseline
                 delta = trig - bl
                 fast_dev = max(0.0, -delta)
                 gcmd.respond_info(
-                    f"Trig median3={trig:.0f} fast_dev={fast_dev:.0f} "
-                    f"(limit={self.jam_deviation_limit})"
+                    f"jam_compare (N={self.trigger_sample_count})={trig:.0f} "
+                    f"fast_dev={fast_dev:.0f} (limit={self.jam_deviation_limit})"
                 )
         
         gcmd.respond_info(
@@ -588,7 +594,7 @@ class MySerial:
         self.current_state = "NORMAL"
         gcmd.respond_info(
             "Detection buffers reset. Baseline unchanged. "
-            f"Need {self.trigger_sample_count} samples for trigger median."
+            f"Need {self.trigger_sample_count} sample(s) for jam compare."
         )
 
     def cmd_FORCE_SENSOR_STATUS(self, gcmd):
@@ -605,13 +611,14 @@ class MySerial:
         gcmd.respond_info(f"force_baseline: {self.force_baseline}")
         
         if self.force_baseline is not None and len(self.detection_buffer) >= self.trigger_sample_count:
-            trig = self.get_trigger_median()
+            trig = self.get_jam_compare_value()
             if trig is not None:
                 bl = self.force_baseline
                 delta = trig - bl
                 fast_dev = max(0.0, -delta)
                 gcmd.respond_info(
-                    f"baseline={bl:.0f} | trig_median3={trig:.0f} | fast_dev={fast_dev:.0f}"
+                    f"baseline={bl:.0f} | jam_compare(N={self.trigger_sample_count})={trig:.0f} "
+                    f"| fast_dev={fast_dev:.0f}"
                 )
 
     def cmd_FORCE_SENSOR_POLL(self, gcmd):

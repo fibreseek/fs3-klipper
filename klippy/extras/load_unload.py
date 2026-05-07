@@ -161,7 +161,7 @@ class LoadUnloadHandler:
         self.p1_clog_retract_distance = 5.0  # P1堵料回退距离(mm)
 
         # P1慢速挤出超时相关
-        self.p1_slow_extrusion_timeout = 120.0  # 2分钟超时(秒)
+        self.p1_slow_extrusion_timeout = 300.0  # 5分钟超时(秒)
         self.p1_slow_extrusion_start_time = None  # 开始时间
         self.p1_timeout_timer = None  # 超时定时器
         self.p1_slow_extrusion_distance = 0.0  # 慢速挤出距离
@@ -953,7 +953,7 @@ class LoadUnloadHandler:
         self.load_step = State.ERROR
         self._sync_print_stats_load_unload("error",
             f"P1 slow extrusion timeout ({self.p1_slow_extrusion_timeout}s)")
-        self.gcode.respond_info(f"[{channel_name} LOAD] STATE:99 ERROR (Timeout: {self.p1_slow_extrusion_timeout}s)")
+        self.gcode.respond_info(f"[{channel_name} LOAD] STATE:98 ERROR (Timeout: {self.p1_slow_extrusion_timeout}s)")
 
         # P1 通道特有：关闭温度和风扇，取消注册堵料检测事件
         nozzle = self.load_unload_nozzle
