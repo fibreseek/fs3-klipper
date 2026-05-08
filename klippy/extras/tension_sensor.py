@@ -47,10 +47,10 @@ class MySerial:
         # 趋势门控：当超阈后，最近 jam_consecutive_frames 帧需整体继续向更负方向推进。
         # 允许轻微抖动（每步最多 increase_tolerance），但不允许持续回升。
         self.jam_trend_step_tolerance = config.getint(
-            'jam_trend_step_tolerance', 200, minval=0, maxval=1000000
+            'jam_trend_step_tolerance', 2000, minval=0, maxval=1000000
         )
         self.jam_trend_total_tolerance = config.getint(
-            'jam_trend_total_tolerance', 300, minval=0, maxval=1000000
+            'jam_trend_total_tolerance', 3000, minval=0, maxval=1000000
         )
         
         self.current_state = "NORMAL"

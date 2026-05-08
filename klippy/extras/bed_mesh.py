@@ -1496,17 +1496,6 @@ class MoveSplitter:
         self.fade_offset = 0.
         self.gcode = gcode
 
-        self.printer = config.get_printer()
-        # 使用klipper自有模块的接口方法，维护代码风格的一致性
-        pconfig = self.printer.lookup_object('configfile')
-        sconfig = config.getsection('save_variables')
-        filename = sconfig.get("filename", "~/printer_data/config/variables.cfg")
-        fconfig = pconfig.read_config(filename)
-        sconfig = fconfig.getsection('Variables')
-        self.xoffset = sconfig.getfloat('xoffset', 0.0)
-        self.yoffset = sconfig.getfloat('yoffset', 0.0)
-        logging.debug("offset:  X:%f, Y:%f"  % (self.xoffset, self.yoffset)) 
-
     def initialize(self, mesh, fade_offset):
         self.z_mesh = mesh
         self.fade_offset = fade_offset
@@ -1522,12 +1511,7 @@ class MoveSplitter:
         self.total_move_length = math.sqrt(sum([d*d for d in axes_d[:3]]))
         self.axis_move = [not isclose(d, 0., abs_tol=1e-10) for d in axes_d]
     def _calc_z_offset(self, pos):
-        x,y = pos[0], pos[1]
-        toolhead = self.printer.lookup_object('toolhead')
-        if(toolhead.get_extruder().get_name() == "extruder1"):
-            x -= self.xoffset
-            y -= self.yoffset
-        z = self.z_mesh.calc_z(x, y)
+        z = self.z_mesh.calc_z(pos[0], pos[1])
         offset = self.fade_offset
         return self.z_factor * (z - offset) + offset
     def _set_next_move(self, distance_from_prev):
