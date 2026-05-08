@@ -168,6 +168,8 @@ class LoadUnloadHandler:
         self.p1_clog_detection_initialized = False  # CLOG_DETECTION状态是否已初始化
         self.p1_slow_extrusion_entered = False  # 是否已进入SLOW_EXTRUSION状态（防止重复初始化）
         self.p1_clog_extruded = False  # CLOG_RETRACTED状态是否已处理（防止重复执行）
+        self.p1_wait_insert_seen_removed = False  # P1 L=0 等待插入前是否已看到传感器无料
+        self.p1_wait_insert_remove_prompt_sent = False  # P1 L=0 初始有料提示是否已发送
         self.last_reported_state = None  # 上次向上位机发送的状态码（防止重复发送）
         self.abort_requested = False  # 用户请求中止标志（用于立即停止挤出循环）
 
@@ -325,6 +327,8 @@ class LoadUnloadHandler:
         self.p1_clog_detection_initialized = False  # 重置CLOG_DETECTION初始化标志
         self.p1_slow_extrusion_entered = False  # 重置SLOW_EXTRUSION进入标志
         self.p1_clog_extruded = False  # 重置CLOG_RETRACTED处理标志
+        self.p1_wait_insert_seen_removed = was_loaded == 1  # L=0 需要先确认 P1 传感器释放
+        self.p1_wait_insert_remove_prompt_sent = False
         self.p1_slow_extrusion_distance = 0.0  # 重置慢速挤出距离
         self.p1_slow_extrusion_start_time = None  # 重置慢速挤出开始时间
         self.last_reported_state = None  # 重置上次报告状态，允许状态码重新发送
@@ -1334,7 +1338,22 @@ class LoadUnloadHandler:
         if load_step == State.WAIT_INSERT:
             filament_sensor = self.printer.lookup_object('filament_switch_sensor filament_sensor_1', None)
             sensor_status = filament_sensor.get_status(eventtime) if filament_sensor else {}
-            if filament_sensor and sensor_status.get('filament_detected', False):
+            filament_detected = sensor_status.get('filament_detected', False)
+
+            if (filament_sensor and self.was_loaded_parameter == 0 and
+                    not self.p1_wait_insert_seen_removed):
+                if filament_detected:
+                    if not self.p1_wait_insert_remove_prompt_sent:
+                        self.gcode.respond_info(
+                            f"[{channel_name} LOAD] WAIT_REMOVE_INSERT: Remove filament and insert again")
+                        self.p1_wait_insert_remove_prompt_sent = True
+                    return eventtime + 0.1
+                self.p1_wait_insert_seen_removed = True
+                self.p1_wait_insert_remove_prompt_sent = False
+                self.gcode.respond_info(f"[{channel_name} LOAD] FILAMENT_REMOVED - Waiting for reinsertion")
+                return eventtime + 0.1
+
+            if filament_sensor and filament_detected:
                 # 检测到耗材，等待2s再进料
                 self.load_step = State.WAIT_MOMENT_FOR_FAST_MOVE
                 # 启动核心处理定时器开始进料
