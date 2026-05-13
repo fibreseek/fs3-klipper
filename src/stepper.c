@@ -218,11 +218,19 @@ stepper_event(struct timer *t)
 }
 static uint32_t stepper_get_position(struct stepper *s);
 struct stepper *gp_x = NULL;
+struct stepper *gp_y = NULL;
 struct stepper *gp_z = NULL;
 int32_t get_step_count_x(void)
 {
     irq_disable();
     uint32_t position = stepper_get_position(gp_x);
+    irq_enable();
+    return position - POSITION_BIAS;
+}
+int32_t get_step_count_y(void)
+{
+    irq_disable();
+    uint32_t position = stepper_get_position(gp_y);
     irq_enable();
     return position - POSITION_BIAS;
 }
@@ -272,6 +280,10 @@ command_config_stepper(uint32_t *args)
     if(gp_x == NULL && index == 0)
     {
         gp_x = s;
+    }
+    else if(gp_y == NULL && index == 1)
+    {
+        gp_y = s;
     }
     else if(gp_z == NULL && index == 2)
     {
