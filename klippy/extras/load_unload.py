@@ -1928,16 +1928,14 @@ class LoadUnloadHandler:
         logger.info(f"[_prepare_load] nozzle={nozzle}, moving to preload position")
         if nozzle == 0:
             # T0左喷嘴
-            logger.info("[_prepare_load] Running T0, MOVE_TO_WASTE_STATION, MOVE_LEFT_PRELOAD_POSITION")
+            logger.info("[_prepare_load] Running T0, MOVE_TO_BRUSH_STATION, MOVE_LEFT_PRELOAD_POSITION")
             self.gcode.run_script_from_command("T0 MOVE_Z=0")
-            self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
-            self.gcode.run_script_from_command("MOVE_LEFT_PRELOAD_POSITION")
+            self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
         else:
             # T1右喷嘴
-            logger.info("[_prepare_load] Running T1, MOVE_TO_WASTE_STATION, MOVE_RIGHT_PRELOAD_POSITION")
+            logger.info("[_prepare_load] Running T1, MOVE_TO_BRUSH_STATION, MOVE_RIGHT_PRELOAD_POSITION")
             self.gcode.run_script_from_command("T1 MOVE_Z=0")
-            self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
-            self.gcode.run_script_from_command("MOVE_RIGHT_PRELOAD_POSITION")
+            self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
 
         # 激活对应的挤出机
         logger.info("[_prepare_load] Calling PREPARE_LOAD_UNLOAD_NOZZLE")
@@ -2010,12 +2008,12 @@ class LoadUnloadHandler:
             nozzle = self.load_unload_nozzle
             if nozzle == 0:
                 # T0左喷嘴
-                self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
-                self.gcode.run_script_from_command("MOVE_LEFT_PRELOAD_POSITION")
+                self.gcode.run_script_from_command("T0 MOVE_Z=0")
+                self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
             else:
                 # T1右喷嘴
-                self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
-                self.gcode.run_script_from_command("MOVE_RIGHT_PRELOAD_POSITION")
+                self.gcode.run_script_from_command("T1 MOVE_Z=0")
+                self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
 
         # 激活对应的挤出机
         self.gcode.run_script_from_command("PREPARE_LOAD_UNLOAD_NOZZLE")
@@ -2024,51 +2022,27 @@ class LoadUnloadHandler:
         """
         预挤出回抽耗材
 
-        功能：在进料/退料前进行预挤出和回抽操作
-
-        操作流程:
-        1. 根据操作模式选择对应的参数
-        2. G92 E0: 重置挤出机位置
-        3. 预挤出一小段耗材(20mm)
-        4. G92 E0: 再次重置挤出机位置
-        5. 回抽一段耗材(进料-8mm, 退料-40mm)
-        6. 退料模式额外等待3秒
-
-        参数:
-        - 进料模式: 预挤出20mm@300mm/min, 回抽-8mm@800mm/min
-        - 退料模式: 预挤出20mm@100mm/min, 回抽-40mm@300mm/min
+        功能：在退料前进行预挤出和回抽操作
         """
-        if self.operation_mode == OperationMode.LOADING:
-            # 进料模式参数
-            preloading_filament_e = self.load_preloading_filament_e
-            preloading_filament_speed = self.load_preloading_filament_speed
-            retract_speed = self.load_clean_retract_speed
-            retract_e = self.load_clean_retract_e
-        else:
-            # 退料模式参数，P1通道使用专门的参数
-            index = self.load_unload_index
-            if index == Channel.P1:
-                # P1通道退料：预加载挤出2mm, 回抽速度600mm/min
-                preloading_filament_e = self.p1_unload_preloading_filament_e
-                preloading_filament_speed = self.p1_unload_preloading_filament_speed
-                retract_speed = self.p1_unload_clean_retract_speed
-            else:
-                # F/P2通道退料：预加载挤出20mm, 回抽速度300mm/min
-                preloading_filament_e = self.unload_preloading_filament_e
-                preloading_filament_speed = self.unload_preloading_filament_speed
-                retract_speed = self.unload_clean_retract_speed
-            retract_e = self.unload_clean_retract_e
+        # 退料模式参数，P1通道使用专门的参数
+        index = self.load_unload_index
+        if index == Channel.P1:
+            self.gcode.run_script_from_command("M83")
+            self.gcode.run_script_from_command("LEFT_NOZZLE_V_PRELOADING_RETRACT")
+        elif index == Channel.P2:
+            self.gcode.run_script_from_command("M83")
+            self.gcode.run_script_from_command("RIGHT_NOZZLE_PRELOADING_RETRACT")
 
         # 预挤出耗材
         # self.gcode.run_script_from_command("G92 E0")
         # self.gcode.run_script_from_command(f"G1 E{preloading_filament_e} F{preloading_filament_speed}")
         # 回抽耗材
-        self.gcode.run_script_from_command("G92 E0")
-        self.gcode.run_script_from_command(f"G1 E{retract_e} F{retract_speed}")
+        # self.gcode.run_script_from_command("G92 E0")
+        # self.gcode.run_script_from_command(f"G1 E{retract_e} F{retract_speed}")
 
-        # 退料模式额外等待3秒
-        if self.operation_mode == OperationMode.UNLOADING:
-            self.gcode.run_script_from_command("G4 P3000")
+        # # 退料模式额外等待3秒
+        # if self.operation_mode == OperationMode.UNLOADING:
+        #     self.gcode.run_script_from_command("G4 P3000")
 
     def _clean_nozzle(self):
         """
@@ -2111,23 +2085,23 @@ class LoadUnloadHandler:
         if nozzle == 0:
             # T0左喷嘴清理流程
             self.gcode.run_script_from_command("M104 T1 S0")
-            self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
-            self.gcode.run_script_from_command("MOVE_LEFT_PRELOAD_POSITION")
+            self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
             self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
             self.gcode.run_script_from_command("MOVE_LEFT_COOLING_POSITION")
             self.gcode.run_script_from_command(f"M109 T0 S{cooling_temp:.0f}")
             self.gcode.run_script_from_command("MOVE_LEFT_BRUSH_POSITION")
-            self.gcode.run_script_from_command("BRUSH_NOZZLE2")
-            self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
+            self.gcode.run_script_from_command("BRUSH_NOZZLE")
+            self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
         else:
             # T1右喷嘴清理流程
             self.gcode.run_script_from_command("M104 T1 S0")
+            self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
             self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
             self.gcode.run_script_from_command("MOVE_RIGHT_COOLING_POSITION")
             self.gcode.run_script_from_command(f"M109 T1 S{cooling_temp:.0f}")
             self.gcode.run_script_from_command("MOVE_RIGHT_BRUSH_POSITION")
-            self.gcode.run_script_from_command("BRUSH_NOZZLE2")
-            self.gcode.run_script_from_command("MOVE_TO_WASTE_STATION")
+            self.gcode.run_script_from_command("BRUSH_NOZZLE")
+            self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
 
         # 关闭风扇
         self.gcode.run_script_from_command("M106 P1 S0")
@@ -2212,6 +2186,9 @@ class LoadUnloadHandler:
             # P2通道释放废料
             if index == Channel.P2:
                 self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
+            elif index == Channel.P1:
+                self.gcode.run_script_from_command("CLEAN_NOZZLE")
+                self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
 
 
 # ============================================================

@@ -863,7 +863,6 @@ class BedMeshCalibrate:
                 "BED_MESH_PROFILE SAVE=model_leveling\n"
                 "BED_MESH_PROFILE LOAD=model_leveling\n"
                 "G1 Z10 F600\n"# 下降Z轴到10mm, 移动到清洁位置
-                #MOVE_CLEAN_POSITION\n"
                 )
 
     def cmd_BED_MESH_TEMP(self, gcmd):

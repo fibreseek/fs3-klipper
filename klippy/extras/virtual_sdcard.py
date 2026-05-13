@@ -768,7 +768,7 @@ class VirtualSD:
             "G1 Z%.3f F300" % (new_powerloss_z + 4.0),
             "M118 [POWERLOSS] Prepare to home X and Y axes",
             "G28 X Y",
-            "MOVE_TO_WASTE_STATION",
+            "MOVE_TO_BRUSH_STATION",
             "M400",
             "M118 [POWERLOSS] Prepare to recover print finished, current_tool: %d"
             % current_tool,
@@ -900,20 +900,15 @@ class VirtualSD:
             gcode_script.append("M141 S%.1f" % chamber_temp)
         
         # Tool-specific cleaning procedures
-        gcode_script.append("M118 [POWERLOSS] Cleaning nozzle T%d before resuming print." % current_tool)
-        if current_tool == 0:
-            gcode_script.append("CLEAN_LEFT_NOZZLE")
-        elif current_tool == 1:
-            gcode_script.append("T1 NO_OFFSET=1")
-            gcode_script.append("MOVE_RIGHT_PRELOAD_POSITION")
-            gcode_script.append("PRELOADING_RETRACT_FILAMENT")
-            gcode_script.append("RELEASE_WASTE_FILAMENT")
-            gcode_script.append("MOVE_RIGHT_BRUSH_POSITION")
-            gcode_script.append("BRUSH_NOZZLE2")
-            gcode_script.append("MOVE_OUT_WASTE_STATION")
-        
         gcode_script.append("M118 [POWERLOSS] Recovering print with nozzle T%d" % current_tool)
         gcode_script.append("T%d" % current_tool)
+        gcode_script.append("MOVE_TO_BRUSH_STATION")
+
+        gcode_script.append("M118 [POWERLOSS] Cleaning nozzle T%d before resuming print." % current_tool)
+        if current_tool == 1:
+            gcode_script.append("RIGHT_NOZZLE_PRELOADING_RETRACT")
+        gcode_script.append("CLEAN_NOZZLE")
+        gcode_script.append("MOVE_OUT_BRUSH_STATION")
 
         # 与 PREPARE 阶段、换刀/清洗宏可能再次改变 M82/M83；必须在回到断点 XY 前与扫描一致。
         # 扫描中的 extrusion 在「断点字节之前」按 M82 累计 E 更新；若此处仍为 M83，
@@ -948,9 +943,9 @@ class VirtualSD:
         # 绝对挤出（M82）下为下一行执行前的累计 E，必须 G92；相对挤出（M83）下 E 为增量，勿用绝对 G92。
         saved_e = file_info.get('extrusion')
         if current_tool == 1:
-            # 相对挤出 2mm，避免在绝对模式下把 E 设为 2 破坏与切片文件的同步
+            # 相对挤出 12mm，避免在绝对模式下把 E 设为 12 破坏与切片文件的同步
             gcode_script.append("M83")
-            gcode_script.append("G1 E2 F600")
+            gcode_script.append("G1 E12 F600")
             if extrusion_mode != 'relative':
                 gcode_script.append("M82")
         if saved_e is not None and extrusion_mode != 'relative':
