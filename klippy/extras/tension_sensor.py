@@ -14,8 +14,9 @@ class MySerial:
         self.sample_interval = 0.2  # seconds (200ms)
         self.auto_baseline_discard_frames = 10
         
-        # 判堵：默认用当前单帧与 force_baseline 比较；trigger_sample_count>1 时用最近 N 点中位数。
-        # 连续 jam_consecutive_frames 帧超阈锁定。基准仅由 TENSION_UPDATE_BASELINE（主簇 + EMA）更新。
+        # 判堵：过滤异常幅值后，最近 trigger_sample_count 帧中，过半帧满足
+        # 仅“往负方向”相对 force_baseline 偏离超过 jam_deviation_limit 计为超阈；正方向不算。
+        # 基准仅由 TENSION_UPDATE_BASELINE（主簇 + EMA）更新。
         self.baseline_sample_count = 10
         self.baseline_cluster_eps = config.getint(
             'baseline_cluster_eps', 1200, minval=50, maxval=200000
@@ -27,31 +28,18 @@ class MySerial:
             'baseline_ema_alpha', 0.2, minval=0.01, maxval=1.0
         )
         self.trigger_sample_count = config.getint(
-            'trigger_sample_count', 1, minval=1, maxval=10
+            'trigger_sample_count', 6, minval=1, maxval=30
         )
         self.detection_buffer = collections.deque(maxlen=30)
         
         self.force_baseline = None
         
-        # 判堵：力值为有符号 ADC。以 force_baseline 为参考，单向偏离超过 jam_deviation_limit 视为堵料。
+        # 判堵：以 force_baseline 为参考，仅当力值相对基准更负且偏离超过 jam_deviation_limit 视为该帧超阈。
         self.jam_deviation_limit = config.getint(
             'jam_deviation_limit', 45000, minval=1000, maxval=10000000
         )
         # 幅值饱和：|力值| 超过此值视为异常（正负对称）
         self.max_normal_value = 0x400000
-        
-        self.jam_consecutive_frames = config.getint(
-            'jam_consecutive_frames', 3, minval=1, maxval=10
-        )
-        self.consecutive_jam_frames = 0
-        # 趋势门控：当超阈后，最近 jam_consecutive_frames 帧需整体继续向更负方向推进。
-        # 允许轻微抖动（每步最多 increase_tolerance），但不允许持续回升。
-        self.jam_trend_step_tolerance = config.getint(
-            'jam_trend_step_tolerance', 2000, minval=0, maxval=1000000
-        )
-        self.jam_trend_total_tolerance = config.getint(
-            'jam_trend_total_tolerance', 3000, minval=0, maxval=1000000
-        )
         
         self.current_state = "NORMAL"
         self.jamming_triggered = False
@@ -94,7 +82,7 @@ class MySerial:
         self.gcode.register_command(
             'TENSION_SET_CONSECUTIVE',
             self.cmd_SET_CONSECUTIVE,
-            desc="TENSION_SET_CONSECUTIVE FRAMES=<n>",
+            desc="TENSION_SET_CONSECUTIVE FRAMES=<n> (jam vote window, same as trigger_sample_count)",
         )
         self.gcode.register_command(
             'TENSION_SHOW_CONFIG',
@@ -199,77 +187,38 @@ class MySerial:
         }
         return baseline, None, details
 
-    def get_jam_compare_value(self):
-        """堵料判据用采样：N=1 为当前帧；N>1 为最近 N 点中位数。"""
+    def _jam_vote_stats(self):
+        """最近 N 帧中超阈帧数。超阈：仅往负方向 (force_baseline - v) > jam_deviation_limit。"""
+        baseline = self.force_baseline
+        if baseline is None:
+            return None
         n = self.trigger_sample_count
         if len(self.detection_buffer) < n:
             return None
-        tail = list(self.detection_buffer)[-n:]
-        if n == 1:
-            return tail[0]
-        tail.sort()
-        return tail[len(tail) // 2]
-
-    def detect_jamming(self, current_value):
-        baseline = self.force_baseline
-        if baseline is None:
-            return False, "Collecting(no baseline)"
-        
-        sample = self.get_jam_compare_value()
-        if sample is None:
-            return False, "Collecting"
-        
         limit = self.jam_deviation_limit
-        delta_fast = sample - baseline
-        # 统一判向：仅认“往负方向”偏移为堵料（sample < baseline）。
-        fast_deviation = max(0.0, -delta_fast)
-        fast_jamming = fast_deviation > limit
-        is_jamming = fast_jamming
+        tail = list(self.detection_buffer)[-n:]
+        over = sum(1 for v in tail if (baseline - v) > limit)
+        return tail, over, n, baseline, limit
 
+    def detect_jamming(self):
+        stats = self._jam_vote_stats()
+        if stats is None:
+            if self.force_baseline is None:
+                return False, "Collecting(no baseline)"
+            return False, "Collecting"
+        tail, over, n, baseline, limit = stats
+        # 过半：严格大于 n/2（例如 N=6 需至少 4 帧超阈）
+        is_jamming = over > (n // 2)
         reason = (
-            f"fast_dev={fast_deviation:.0f}/{limit:.0f} delta_fast={delta_fast:+.0f}, "
-            f"val={sample:.0f}, baseline={baseline:.0f}"
+            f"jam_vote over={over}/{n} (need>{n//2}) neg_dev_limit={limit:.0f} "
+            f"baseline={baseline:.0f} tail_min={min(tail):.0f} tail_max={max(tail):.0f}"
         )
-        
         return is_jamming, reason
-
-    def _recent_values_keep_getting_more_negative(self):
-        """最近 N 帧是否满足“整体向更负方向推进”。
-        返回 (ok, detail)。
-        """
-        n = self.jam_consecutive_frames
-        if n <= 1:
-            return True, f"trend bypass n={n}"
-        if len(self.detection_buffer) < n:
-            return False, f"trend collecting {len(self.detection_buffer)}/{n}"
-        recent = list(self.detection_buffer)[-n:]
-        step_tol = self.jam_trend_step_tolerance
-        total_tol = self.jam_trend_total_tolerance
-
-        # 单步不得明显回升：v[i] 不应比上一帧大超过 step_tol（大=更不负）
-        for i in range(1, len(recent)):
-            if recent[i] > recent[i - 1] + step_tol:
-                return False, (
-                    f"trend fail step i={i} prev={recent[i-1]} cur={recent[i]} "
-                    f"step_tol={step_tol}"
-                )
-
-        # 总体应更负：最后一帧不应高于首帧 + total_tol
-        if recent[-1] > recent[0] + total_tol:
-            return False, (
-                f"trend fail total first={recent[0]} last={recent[-1]} "
-                f"total_tol={total_tol}"
-            )
-
-        return True, (
-            f"trend ok first={recent[0]} last={recent[-1]} "
-            f"step_tol={step_tol} total_tol={total_tol}"
-        )
 
     def _record_jamming_snapshot(self, reason):
         """堵料锁定时将当前缓冲写入 klipper.log。"""
         try:
-            trig = self.get_jam_compare_value()
+            stats = self._jam_vote_stats()
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             logging.error(
                 "tension_sensor jamming snapshot begin time=%s reason=%s",
@@ -277,18 +226,22 @@ class MySerial:
                 reason,
             )
             logging.error(
-                "tension_sensor jamming meta interval_s=%.3f consecutive_frames=%d "
+                "tension_sensor jamming meta interval_s=%.3f jam_vote_N=%d "
                 "jam_deviation_limit=%s baseline=%s",
                 self.sample_interval,
-                self.jam_consecutive_frames,
+                self.trigger_sample_count,
                 self.jam_deviation_limit,
                 self.force_baseline,
             )
-            logging.error(
-                "tension_sensor jamming jam_sample=%s (trigger_sample_count=%s)",
-                trig,
-                self.trigger_sample_count,
-            )
+            if stats is not None:
+                tail, over, n, baseline, limit = stats
+                logging.error(
+                    "tension_sensor jamming jam_vote over=%d/%d limit=%s baseline=%s",
+                    over,
+                    n,
+                    limit,
+                    baseline,
+                )
             buf = list(self.detection_buffer)
             logging.error(
                 "tension_sensor jamming detection_buffer len=%d (idx 0=oldest)",
@@ -306,9 +259,8 @@ class MySerial:
         if self.jamming_triggered:
             return False, "JAMMED", "Permanently jammed"
 
-        # 异常尖峰不参与 jam 判定窗口，避免污染比较值/连续帧逻辑。
+        # 异常尖峰不参与 jam 判定窗口，避免污染投票窗口。
         if abs(current_value) > self.max_normal_value:
-            self.consecutive_jam_frames = 0
             return False, "NORMAL", (
                 f"abnormal sample ignored: val={current_value} "
                 f"limit={self.max_normal_value}"
@@ -324,37 +276,19 @@ class MySerial:
         
         if len(self.detection_buffer) < self.trigger_sample_count:
             return False, "COLLECTING", (
-                f"{len(self.detection_buffer)}/{self.trigger_sample_count} for jam compare"
+                f"{len(self.detection_buffer)}/{self.trigger_sample_count} for jam vote"
             )
         
-        is_jamming, reason = self.detect_jamming(current_value)
+        is_jamming, reason = self.detect_jamming()
         
         if is_jamming:
-            self.consecutive_jam_frames += 1
-            
-            if self.consecutive_jam_frames >= self.jam_consecutive_frames:
-                trend_ok, trend_reason = self._recent_values_keep_getting_more_negative()
-                if not trend_ok:
-                    # 超阈但趋势不满足，撤销本次累计，避免“先降后升”被锁死。
-                    self.consecutive_jam_frames = 0
-                    self.current_state = "NORMAL"
-                    return False, "NORMAL", (
-                        f"threshold met but trend rejected: {trend_reason}"
-                    )
-                self.jamming_triggered = True
-                self.current_state = "JAMMED"
-                logging.error(f"JAMMING DETECTED and LOCKED! {reason}")
-                self._record_jamming_snapshot(reason)
-                return True, "JAMMED", (
-                    f"Jamming after {self.consecutive_jam_frames} consecutive jam frames"
-                )
-            
-            return False, "CHECKING", (
-                f"jamming {self.consecutive_jam_frames}/{self.jam_consecutive_frames}"
-            )
-        else:
-            self.consecutive_jam_frames = 0
-            return False, "NORMAL", f"ok"
+            self.jamming_triggered = True
+            self.current_state = "JAMMED"
+            logging.error(f"JAMMING DETECTED and LOCKED! {reason}")
+            self._record_jamming_snapshot(reason)
+            return True, "JAMMED", reason
+        
+        return False, "NORMAL", reason
 
     def _send_jamming_warning(self, details):
         try:
@@ -375,14 +309,13 @@ class MySerial:
     def cmd_RESET_ALARM(self, gcmd):
         was_jammed = self.jamming_triggered
         self.jamming_triggered = False
-        self.consecutive_jam_frames = 0
         self.current_state = "NORMAL"
         self.detection_buffer.clear()
         self.value_history.clear()
         gcmd.respond_info(f"Alarm reset. Previous state: {'JAMMED' if was_jammed else 'NORMAL'}")
         gcmd.respond_info(
             "Detection buffer cleared; jam detection uses existing baseline and "
-            f"{self.trigger_sample_count} new sample(s) for jam compare."
+            f"{self.trigger_sample_count} new sample(s) for jam vote window."
         )
 
     def cmd_GET_RAW_FORCE_DATA(self, gcmd):
@@ -422,17 +355,16 @@ class MySerial:
         gcmd.respond_info(f"Updated: {', '.join(changed) if changed else 'None'}")
 
     def cmd_SET_CONSECUTIVE(self, gcmd):
-        frames = gcmd.get_int('FRAMES', None, minval=1, maxval=100)
+        frames = gcmd.get_int('FRAMES', None, minval=1, maxval=30)
         if frames is None:
             gcmd.respond_info(
-                f"Usage: TENSION_SET_CONSECUTIVE FRAMES=<1..100> "
-                f"(current={self.jam_consecutive_frames})"
+                f"Usage: TENSION_SET_CONSECUTIVE FRAMES=<1..30> "
+                f"(jam vote window, current={self.trigger_sample_count})"
             )
             return
-        self.jam_consecutive_frames = frames
-        self.consecutive_jam_frames = 0
+        self.trigger_sample_count = frames
         gcmd.respond_info(
-            f"Updated jam_consecutive_frames={self.jam_consecutive_frames}"
+            f"Updated trigger_sample_count (jam vote window)={self.trigger_sample_count}"
         )
 
     def cmd_SHOW_CONFIG(self, gcmd):
@@ -444,15 +376,10 @@ class MySerial:
             f"baseline_cluster_min_points: {self.baseline_cluster_min_points}"
         )
         gcmd.respond_info(f"baseline_ema_alpha: {self.baseline_ema_alpha:.3f}")
-        gcmd.respond_info(f"trigger_sample_count: {self.trigger_sample_count}")
+        gcmd.respond_info(
+            f"trigger_sample_count (jam vote window N): {self.trigger_sample_count}"
+        )
         gcmd.respond_info(f"jam_deviation_limit: {self.jam_deviation_limit}")
-        gcmd.respond_info(f"jam_consecutive_frames: {self.jam_consecutive_frames}")
-        gcmd.respond_info(
-            f"jam_trend_step_tolerance: {self.jam_trend_step_tolerance}"
-        )
-        gcmd.respond_info(
-            f"jam_trend_total_tolerance: {self.jam_trend_total_tolerance}"
-        )
         gcmd.respond_info(f"max_normal_value: {self.max_normal_value}")
         gcmd.respond_info(f"force_baseline: {self.force_baseline}")
 
@@ -504,7 +431,6 @@ class MySerial:
                 return self.reactor.NEVER
 
             self.force_baseline = baseline
-            self.consecutive_jam_frames = 0
             self.detection_buffer.clear()
             if details is None:
                 self._notify_info(f"Baseline updated to {baseline}")
@@ -556,20 +482,20 @@ class MySerial:
         gcmd.respond_info(f"Jam deviation limit: {self.jam_deviation_limit}")
         gcmd.respond_info(f"force_baseline: {self.force_baseline}")
         
-        if self.force_baseline is not None and len(self.detection_buffer) >= self.trigger_sample_count:
-            trig = self.get_jam_compare_value()
-            if trig is not None:
-                bl = self.force_baseline
-                delta = trig - bl
-                fast_dev = max(0.0, -delta)
-                gcmd.respond_info(
-                    f"jam_compare (N={self.trigger_sample_count})={trig:.0f} "
-                    f"fast_dev={fast_dev:.0f} (limit={self.jam_deviation_limit})"
-                )
-        
-        gcmd.respond_info(
-            f"Consecutive jam frames: {self.consecutive_jam_frames}/{self.jam_consecutive_frames}"
-        )
+        stats = self._jam_vote_stats()
+        if stats is not None:
+            tail, over, n, baseline, limit = stats
+            need = (n // 2) + 1
+            gcmd.respond_info(
+                f"jam_vote: over={over}/{n} (majority need>={need}) "
+                f"limit={limit:.0f} baseline={baseline:.0f}"
+            )
+            gcmd.respond_info(
+                f"Recent tail neg_dev max: "
+                f"{max(max(0, baseline - v) for v in tail):.0f}"
+            )
+        else:
+            gcmd.respond_info("jam_vote: collecting")
         
         if len(self.detection_buffer) > 0:
             recent = list(self.detection_buffer)[-min(10, len(self.detection_buffer)) :]
@@ -589,12 +515,11 @@ class MySerial:
 
     def cmd_RESET_DETECTION_BUFFERS(self, gcmd):
         self.detection_buffer.clear()
-        self.consecutive_jam_frames = 0
         self.jamming_triggered = False
         self.current_state = "NORMAL"
         gcmd.respond_info(
             "Detection buffers reset. Baseline unchanged. "
-            f"Need {self.trigger_sample_count} sample(s) for jam compare."
+            f"Need {self.trigger_sample_count} sample(s) for jam vote."
         )
 
     def cmd_FORCE_SENSOR_STATUS(self, gcmd):
@@ -610,16 +535,15 @@ class MySerial:
         gcmd.respond_info(f"Jam deviation limit: {self.jam_deviation_limit}")
         gcmd.respond_info(f"force_baseline: {self.force_baseline}")
         
-        if self.force_baseline is not None and len(self.detection_buffer) >= self.trigger_sample_count:
-            trig = self.get_jam_compare_value()
-            if trig is not None:
-                bl = self.force_baseline
-                delta = trig - bl
-                fast_dev = max(0.0, -delta)
-                gcmd.respond_info(
-                    f"baseline={bl:.0f} | jam_compare(N={self.trigger_sample_count})={trig:.0f} "
-                    f"| fast_dev={fast_dev:.0f}"
-                )
+        stats = self._jam_vote_stats()
+        if stats is not None:
+            tail, over, n, baseline, limit = stats
+            need = (n // 2) + 1
+            gcmd.respond_info(
+                f"baseline={baseline:.0f} | jam_vote over={over}/{n} (need>={need}) "
+                f"| neg_dev_max={max(max(0, baseline - v) for v in tail):.0f} "
+                f"(limit={limit:.0f})"
+            )
 
     def cmd_FORCE_SENSOR_POLL(self, gcmd):
         enable = gcmd.get_int('ENABLE', None)
@@ -657,7 +581,6 @@ class MySerial:
         
         self.detection_buffer.clear()
         self.value_history.clear()
-        self.consecutive_jam_frames = 0
         self.jamming_triggered = False
         self.current_state = "NORMAL"
         
