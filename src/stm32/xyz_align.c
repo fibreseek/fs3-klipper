@@ -22,6 +22,7 @@ static int32_t offset_z[10] = {0};
 static int32_t offset_xy[10][5] = {0};
 static uint8_t offset_index = 0;
 extern int32_t get_step_count_x(void);
+extern int32_t get_step_count_y(void);
 extern int32_t get_step_count_z(void);
 #define BUTTON_VALUE (GPIOG->IDR & (1 << BUTTON_PIN_INDEX)) ? 1 : 0
 #define ABS(x) ((x) < 0 ? -(x) : (x))
@@ -118,8 +119,6 @@ void command_align_start(uint32_t *args)
 
 void EXTI15_10_IRQHandler(void)
 {
-    int32_t x,z;
-    int32_t index;
     if (EXTI->PR1 & (1UL << BUTTON_PIN_INDEX))  // 检查是否是 EXTI10 触发
     {
         EXTI->PR1 = (1UL << BUTTON_PIN_INDEX);  // 清除挂起标志（写 1 清除）
@@ -130,11 +129,9 @@ void EXTI15_10_IRQHandler(void)
         }
         debounce = DEBOUNCE_CYCLES;
 
-        x = get_step_count_x();
-        z = get_step_count_z();
-        step_x = x;
-        step_y = x;
-        step_z = z;
+        step_x = get_step_count_x();
+        step_y = get_step_count_y();
+        step_z = get_step_count_z();
 
         // if(offset_index %5==0)
         // {
