@@ -15,6 +15,7 @@ class xyz_align:
         self.t1_offset_y = config.getfloat('t1_offset_y')
         self.left_move_offset = config.getfloat('left_move_offset', 12.0)
         self.right_move_offset = config.getfloat('right_move_offset', 10.0)
+        self.z_press_offset = config.getfloat('z_press_offset', 0.7)
         self.speed = config.getfloat('speed', 3000)
         self.align_trigger_timeout = config.getfloat(
             'align_trigger_timeout', 3.0)
@@ -176,7 +177,7 @@ class xyz_align:
 
         self.gcode.run_script_from_command("G90\n")
         self.gcode.run_script_from_command("M114\n")
-        self.offset_z_press = trigger_pos[2] - 0.3
+        self.offset_z_press = trigger_pos[2] - self.z_press_offset
         self.gcode.respond_info(
             "cmd_XYZ_ALIGN: offset_z_press = %f, self.offset_z = %f, move_distance = %f"
             % (self.offset_z_press, self.offset_z, move_distance))
