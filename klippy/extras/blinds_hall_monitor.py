@@ -467,6 +467,15 @@ class BlindsHallMonitor:
         
         return params
     
+    def _is_chamber_cooling_s_param(self, params):
+        # M141/M191 S0、S0.0、S.0 等均视为腔温目标为 0，走 _execute_cooling_procedure
+        if 'S' not in params:
+            return False
+        try:
+            return float(params['S']) == 0.0
+        except (TypeError, ValueError):
+            return False
+    
     def _start_cooling_fan_delay(self, gcmd):
         """启动风扇延迟关闭定时器"""
         if self.cooling_fan_timer is not None:
@@ -521,7 +530,7 @@ class BlindsHallMonitor:
         try:
             params = self._parse_gcode_parameters(gcmd)
             
-            if 'S' in params and params['S'] == '0':
+            if self._is_chamber_cooling_s_param(params):
                 self._execute_cooling_procedure(gcmd, wait_for_temp=False)
                 return
             
@@ -569,7 +578,7 @@ class BlindsHallMonitor:
         try:
             params = self._parse_gcode_parameters(gcmd)
             
-            if 'S' in params and params['S'] == '0':
+            if self._is_chamber_cooling_s_param(params):
                 self._execute_cooling_procedure(gcmd, wait_for_temp=True)
                 return
             
