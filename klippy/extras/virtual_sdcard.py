@@ -907,6 +907,7 @@ class VirtualSD:
         gcode_script.append("M118 [POWERLOSS] Cleaning nozzle T%d before resuming print." % current_tool)
         if current_tool == 1:
             gcode_script.append("RIGHT_NOZZLE_PRELOADING_RETRACT")
+            gcode_script.append("COOLLING_WASTE_FILAMENT")
         gcode_script.append("CLEAN_NOZZLE")
         gcode_script.append("MOVE_OUT_BRUSH_STATION")
 

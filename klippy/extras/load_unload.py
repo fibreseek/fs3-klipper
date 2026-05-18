@@ -519,15 +519,17 @@ class LoadUnloadHandler:
         index = self.load_unload_index
         channel_name = self._get_channel_name(index)
 
-        if index == Channel.P2:
-            self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
-
         # 进入补料重试阶段（移除状态检查，避免时序问题）
         self.load_step = State.RETRYING
         self.load_distance = 0.0
         gcmd.respond_info(f"[{channel_name} LOAD] STATE:31 RETRYING")
-        self._start_process_timer(0.1)
 
+        # P2通道需要冷却废料
+        if index == Channel.P2:
+            self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT")
+            self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
+        self._start_process_timer(0.1)
+        
     cmd_CONFIRM_CLEANED_help = "确认已清理完成（F/P1通道）"
     def cmd_CONFIRM_CLEANED(self, gcmd):
         """
@@ -553,8 +555,6 @@ class LoadUnloadHandler:
                 nozzle = self.load_unload_nozzle
                 target = self.load_unload_temperature
                 cooling_temp = target - self.temperature_offset
-                self.gcode.run_script_from_command("M106 P1 S255")
-                self.gcode.run_script_from_command("M106 P2 S255")
                 self.gcode.run_script_from_command(f"M104 T{nozzle} S{cooling_temp}")
             self._finish_loadunload()
         else:
@@ -965,7 +965,6 @@ class LoadUnloadHandler:
         # P1 通道特有：关闭温度和风扇，取消注册堵料检测事件
         nozzle = self.load_unload_nozzle
         self.gcode.run_script_from_command(f"M104 T{nozzle} S0")  # 关闭对应喷嘴温度
-        self.gcode.run_script_from_command("M106 P1 S0")  # 关闭侧吹/喉管风扇
         self.gcode.run_script_from_command("M106 P2 S0")
 
         return self.reactor.NEVER
@@ -1391,15 +1390,12 @@ class LoadUnloadHandler:
 
                 # 检查当前温度，输出提示信息（但不阻塞快速进料）
                 if current_temp > 55:  # 需要冷却
-                    self.gcode.run_script_from_command("M106 P1 S255")
                     self.gcode.run_script_from_command("M106 P2 S255")
                     self.gcode.respond_info(f"[{channel_name} LOAD] Cooling to 50°C... {current_temp:.0f}C (Fans ON)")
                 elif current_temp < 45:  # 需要加热
-                    self.gcode.run_script_from_command("M106 P1 S0")
                     self.gcode.run_script_from_command("M106 P2 S0")
                     self.gcode.respond_info(f"[{channel_name} LOAD] Heating to 50°C... {current_temp:.0f}C")
                 else:  # 温度在45-55°C范围内
-                    self.gcode.run_script_from_command("M106 P1 S0")
                     self.gcode.run_script_from_command("M106 P2 S0")
                     self.gcode.respond_info(f"[{channel_name} LOAD] PREHEAT_LOW (50°C)")
 
@@ -1607,7 +1603,6 @@ class LoadUnloadHandler:
             # P1 通道特有：关闭温度和风扇，取消注册堵料检测事件
             nozzle = self.load_unload_nozzle
             self.gcode.run_script_from_command(f"M104 T{nozzle} S0")  # 关闭对应喷嘴温度
-            self.gcode.run_script_from_command("M106 P1 S0")  # 关闭侧吹/喉管风扇
             self.gcode.run_script_from_command("M106 P2 S0")
             self._restore_idle_timeout()
 
@@ -1643,10 +1638,6 @@ class LoadUnloadHandler:
             if filament_sensor and sensor_status.get('filament_detected', False):
                 # 检测到耗材，直接进入熔融挤出阶段（P2无快速进料）
                 self.gcode.respond_info(f"[{channel_name} LOAD] STATE:12 DETECTED")
-                
-                # 开启冷却风扇
-                self.gcode.run_script_from_command("M106 P1 S255")
-                self.gcode.run_script_from_command("M106 P2 S255")
                 
                 self.load_step = State.MELT_EXTRUDING
                 self.load_distance = 0.0
@@ -2078,34 +2069,32 @@ class LoadUnloadHandler:
         target = self.load_unload_temperature
         cooling_temp = target - self.temperature_offset
 
-        # 开启风扇
-        self.gcode.run_script_from_command("M106 P1 S255")
-        self.gcode.run_script_from_command("M106 P2 S255")
-
         if nozzle == 0:
             # T0左喷嘴清理流程
-            self.gcode.run_script_from_command("M104 T1 S0")
             self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
+            self.gcode.run_script_from_command(f"M104 T0 S{cooling_temp:.0f}")
+            self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT")
             self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
             self.gcode.run_script_from_command("MOVE_LEFT_COOLING_POSITION")
+            self.gcode.run_script_from_command("M106 P2 S255")
             self.gcode.run_script_from_command(f"M109 T0 S{cooling_temp:.0f}")
+            self.gcode.run_script_from_command("M106 P2 S0")
             self.gcode.run_script_from_command("MOVE_LEFT_BRUSH_POSITION")
             self.gcode.run_script_from_command("BRUSH_NOZZLE")
             self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
         else:
             # T1右喷嘴清理流程
-            self.gcode.run_script_from_command("M104 T1 S0")
-            self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
+            # self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
+            self.gcode.run_script_from_command(f"M104 T1 S{cooling_temp:.0f}")
+            self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT")
             self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
             self.gcode.run_script_from_command("MOVE_RIGHT_COOLING_POSITION")
+            self.gcode.run_script_from_command("M106 P1 S255")
             self.gcode.run_script_from_command(f"M109 T1 S{cooling_temp:.0f}")
+            self.gcode.run_script_from_command("M106 P1 S0")
             self.gcode.run_script_from_command("MOVE_RIGHT_BRUSH_POSITION")
             self.gcode.run_script_from_command("BRUSH_NOZZLE")
             self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
-
-        # 关闭风扇
-        self.gcode.run_script_from_command("M106 P1 S0")
-        self.gcode.run_script_from_command("M106 P2 S0")
 
     def _finish_loadunload(self):
         """
@@ -2185,6 +2174,7 @@ class LoadUnloadHandler:
 
             # P2通道释放废料
             if index == Channel.P2:
+                self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT")
                 self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
             elif index == Channel.P1:
                 self.gcode.run_script_from_command("CLEAN_NOZZLE")
