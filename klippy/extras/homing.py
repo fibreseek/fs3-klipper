@@ -8,6 +8,8 @@ import logging, math
 HOMING_START_DELAY = 0.001
 ENDSTOP_SAMPLE_TIME = .000015
 ENDSTOP_SAMPLE_COUNT = 4
+# Z归位后探针校验：探点结果相对 z_offset 的最大允许偏差(mm)
+HOMING_PROBE_DEVIATION_MAX = 0.03
 
 # Return a completion that completes when all completions in a list complete
 def multi_complete(printer, completions):
@@ -92,19 +94,19 @@ class HomingMove:
             rest_time = self._calc_endstop_rate(mcu_endstop, movepos, speed)
             sample_time = ENDSTOP_SAMPLE_TIME #sample_time默认值
             sample_count = ENDSTOP_SAMPLE_COUNT #sample_count默认值
-            if name=='z' or name=='probe': #仅针对z轴，一定要在home_start之前发送
-                acc_dist = speed**2/2/self.toolhead.get_kinematics().max_z_accel #加速段位移 v^2=2as
-                acc_step = (acc_dist / mcu_endstop.get_steppers()[0].get_step_dist()) #加速段微步数
-                aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 2, math.ceil(acc_step)])
-                sample_time = rest_time #z轴传感器开启有均匀时间的采样滤波器
-                sample_count = 1 #z轴传感器采样次数为1
-                # logging.info(f"_aniso freq {(1/rest_time):.3f}")
+            if name=='z' or name=='probe': #压电采样须在home_start与运动开始前启动
+                acc_dist = speed**2/2/self.toolhead.get_kinematics().max_z_accel
+                acc_step = (acc_dist / mcu_endstop.get_steppers()[0].get_step_dist())
+                aniso_bed_mesh.update_uart_cmd.send(
+                    [aniso_bed_mesh.oid, 2, math.ceil(acc_step)])
+                aniso_bed_mesh.update_uart_cmd.send(
+                    [aniso_bed_mesh.oid, 1, 0])
+                sample_time = rest_time
+                sample_count = 1
             wait = mcu_endstop.home_start(print_time, sample_time,
                                           sample_count, rest_time,
                                           triggered=triggered)
             endstop_triggers.append(wait)
-            if name == 'z' or name == 'probe':
-                aniso_bed_mesh.update_uart_cmd.send([aniso_bed_mesh.oid, 1, 0]) #开始进行压电陶瓷采样
         all_endstop_trigger = multi_complete(self.printer, endstop_triggers)
         self.toolhead.dwell(HOMING_START_DELAY)
         # Issue move
@@ -224,7 +226,7 @@ class Homing:
         # Perform second home
         if hi.retract_dist:
             is_z_homing = 2 in force_axes
-            homing_cycles = 2 if is_z_homing else 1
+            homing_cycles = 1 if is_z_homing else 1
             for cycle in range(homing_cycles):
                 # Retract
                 startpos = self._fill_coord(forcepos)
@@ -304,6 +306,46 @@ class PrinterHoming:
             raise self.printer.command_error(
                 "The homing sensor was triggered before the Z-axis moved.")
         return epos
+    def _z_homing_probe_check(self, gcode):
+        probe = self.printer.lookup_object('probe')
+        toolhead = self.printer.lookup_object('toolhead')
+        params = probe.get_probe_params()
+        lift_z = params['sample_retract_dist'] + 1.0
+        gcode.run_script_from_command(
+            "G1 Z%.3f F600\nM400\nG4 P200\n" % (lift_z,))
+        print_time = toolhead.get_last_move_time()
+        if probe.mcu_probe.query_endstop(print_time):
+            gcode.respond_info(
+                "Probe still triggered after Z homing, lifting further")
+            lift_z = max(lift_z + 4.0, 8.0)
+            gcode.run_script_from_command(
+                "G1 Z%.3f F600\nM400\nG4 P200\n" % (lift_z,))
+        probe_gcmd = gcode.create_gcode_command(
+            "PROBE", "PROBE SAMPLES=4 SAMPLES_TOLERANCE_RETRIES=0",
+            {'SAMPLES': '4', 'SAMPLES_TOLERANCE_RETRIES': '0'})
+        probe_session = probe.start_probe_session(probe_gcmd)
+        try:
+            probe_session.run_probe(probe_gcmd)
+            results = probe_session.pull_probed_results()
+        finally:
+            probe_session.end_probe_session()
+        if not results:
+            raise self.printer.command_error(
+                "Homing probe check failed: no probe result")
+        probe_result = results[0][2]
+        probe.cmd_helper.last_z_result = probe_result
+        z_offset = probe.get_offsets()[2]
+        probe_delta = probe_result - z_offset
+        gcode.respond_info(
+            "Z homing probe check: result=%.4f mm, z_offset=%.4f mm,"
+            " delta=%.4f mm (limit ±%.2f mm)"
+            % (probe_result, z_offset, probe_delta, HOMING_PROBE_DEVIATION_MAX))
+        if abs(probe_delta) > HOMING_PROBE_DEVIATION_MAX:
+            raise self.printer.command_error(
+                "Z homing check failed: probe result %.2f mm, expected %.2f"
+                " ±%.2f mm (delta %.2f mm)"
+                % (probe_result, z_offset, HOMING_PROBE_DEVIATION_MAX,
+                   probe_delta))
     def cmd_G28(self, gcmd):
         # Move to origin
         axes = []
@@ -316,41 +358,10 @@ class PrinterHoming:
         homing_state.set_axes(axes)
         kin = self.printer.lookup_object('toolhead').get_kinematics()
         try:
-            is_z_homing = 2 in axes
-            homing_cycles = 1 if is_z_homing else 1  #z轴仅需一次, 如果要求两次，请改这里
-            for cycle_now in range(homing_cycles):
-                kin.home(homing_state)
-
-                if not is_z_homing:
-                    break
-
-                # # z_homing_info = kin.rails[2].get_homing_info()
-                # gcode = self.printer.lookup_object('gcode')
-                # gcode.run_script_from_command(
-                #     "G1 Z3 F600\n" # 令Z轴回退安全裕量
-                #     "G4 P100\n" # 等待100ms，确保稳定
-                #     "PROBE SAMPLES=4 SAMPLES_TOLERANCE_RETRIES=0\n" # 探点寻位
-                #     )
-
-                # probe = self.printer.lookup_object('probe')
-                # status = probe.get_status(0)
-                # trigger_pos = status['last_z_result'] # 获取触发坐标
-                # # trigger_offset = status['trigger_offset'] # 获取位置偏差（停止-触发）
-                # z_offset = probe.get_offsets()[2]
-                # z_tolerance = probe.get_probe_params()['samples_tolerance']
-
-                # if abs(trigger_pos - z_offset) <= z_tolerance:
-                #     break
-                # if cycle_now==homing_cycles-1: # 最后一次尝试且超限，拉起异常报错
-                #     raise self.printer.command_error(
-                #         "Homing failed due to bad result precision")
-
-                # gcode.run_script_from_command(
-                #     f"SET_KINEMATIC_POSITION Z={trigger_pos + trigger_offset}\n" #重置Z轴停止坐标
-                #     "G4 P10\n" #等待10ms，确保稳定
-                #     )
-                # gcode.respond_info(f"aniso_result is z={(trigger_pos + trigger_offset):.4f}")
-                
+            kin.home(homing_state)
+            if 2 in axes:
+                self._z_homing_probe_check(
+                    self.printer.lookup_object('gcode'))
         except self.printer.command_error:
             if self.printer.is_shutdown():
                 raise self.printer.command_error(

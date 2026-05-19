@@ -958,6 +958,7 @@ class VirtualSD:
             gcode_script.append("G1 F%.1f" % feedrate)
         
         gcode_script.append("M400")
+        gcode_script.append("TENSION_SENSOR_START")
         gcode_script.append("M118 [POWERLOSS] Recover print finished.")
         
         # Execute all gcode commands

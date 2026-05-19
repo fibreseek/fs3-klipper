@@ -1,17 +1,26 @@
 import logging
+import re
 import time
 import collections
 
+try:
+    import spidev
+except ImportError:
+    spidev = None
+
 class MySerial:
     def __init__(self, config):
-        self.spi_device = "/dev/spidev0.0"
+        self.spi_device = config.get('spi_device', '/dev/spidev0.0')
+        self._spi_bus, self._spi_dev = self._parse_spi_device(self.spi_device)
+        self.spi_mode = config.getint('spi_mode', 0, minval=0, maxval=3)
+        self.spi_speed_hz = config.getint('spi_speed_hz', 1000000, minval=10000)
         
         # Voltage conversion parameters
         self.VREF = 3.3
         self.GAIN = 128
         self.ADC_MAX = 2**23 - 1  # 8388607 (24-bit signed)
         
-        self.sample_interval = 0.2  # seconds (200ms)
+        self.sample_interval = 0.3  # seconds (200ms)
         self.auto_baseline_discard_frames = 10
         
         # 判堵：过滤异常幅值后，最近 trigger_sample_count 帧中，过半帧满足
@@ -48,6 +57,9 @@ class MySerial:
         
         self.calibration_log = []
 
+        self.enabled = config.getboolean('enable', True)
+        self._temp_paused = False
+        self.poll_armed = False
         self.polling_enabled = False
         self.polling_log_enabled = False
         self.jam_detection_enabled = True
@@ -63,16 +75,45 @@ class MySerial:
         printer = config.get_printer()
         self.gcode = printer.lookup_object('gcode')
         self.reactor = printer.get_reactor()
+        self._spi = None
         self._polling_timer = self.reactor.register_timer(self._polling_event)
         self._baseline_timer = self.reactor.register_timer(
             self._baseline_update_event
         )
+        printer.register_event_handler('klippy:disconnect', self._handle_disconnect)
         
         self._register_commands()
 
+    @staticmethod
+    def _parse_spi_device(path):
+        match = re.match(r'.*/spidev(\d+)\.(\d+)$', path)
+        if not match:
+            logging.warning(
+                "tension_sensor: cannot parse spi_device %s, use bus=0 dev=0",
+                path,
+            )
+            return 0, 0
+        return int(match.group(1)), int(match.group(2))
+
     def _register_commands(self):
-        self.gcode.register_command('TENSION_SENSOR_POLL', self.cmd_FORCE_SENSOR_POLL,
-                                    desc="TENSION_SENSOR_POLL ENABLE=<0|1> [LOGGING=<0|1>] [DETECT=<0|1>]")
+        self.gcode.register_command(
+            'TENSION_SENSOR_POLL', self.cmd_FORCE_SENSOR_POLL,
+            desc="TENSION_SENSOR_POLL ENABLE=<0|1>: arm/disarm only (no sampling)",
+        )
+        self.gcode.register_command(
+            'TENSION_SENSOR_START', self.cmd_TENSION_SENSOR_START,
+            desc="TENSION_SENSOR_START [LOGGING=<0|1>] [DETECT=<0|1>]: start polling/detection",
+        )
+        self.gcode.register_command(
+            'TENSION_SENSOR_PAUSE',
+            self.cmd_TENSION_SENSOR_PAUSE,
+            desc='TENSION_SENSOR_PAUSE: temporarily stop polling (requires enable=true)',
+        )
+        self.gcode.register_command(
+            'TENSION_SENSOR_RESUME',
+            self.cmd_TENSION_SENSOR_RESUME,
+            desc='TENSION_SENSOR_RESUME: resume after TENSION_SENSOR_PAUSE (requires enable=true)',
+        )
         self.gcode.register_command('TENSION_SENSOR_STATUS', self.cmd_FORCE_SENSOR_STATUS)
         self.gcode.register_command('SHOW_CALIBRATION', self.cmd_SHOW_CALIBRATION)
         self.gcode.register_command('GET_FORCE_VALUE', self.cmd_GET_FORCE_VALUE)
@@ -115,22 +156,96 @@ class MySerial:
         else:
             return value
 
-    def read_spi_once(self):
+    def _open_spi(self):
+        if self._spi is not None:
+            return True
+        if spidev is None:
+            return True
+        try:
+            spi = spidev.SpiDev()
+            spi.open(self._spi_bus, self._spi_dev)
+            spi.mode = self.spi_mode
+            spi.max_speed_hz = self.spi_speed_hz
+            self._spi = spi
+            logging.info(
+                "tension_sensor: SPI opened spidev%d.%d mode=%d speed=%dHz",
+                self._spi_bus, self._spi_dev, self.spi_mode, self.spi_speed_hz,
+            )
+            return True
+        except Exception as e:
+            logging.error("tension_sensor: SPI open failed: %s", e)
+            self._spi = None
+            return False
+
+    def _close_spi(self):
+        if self._spi is None:
+            return
+        try:
+            self._spi.close()
+        except Exception as e:
+            logging.error("tension_sensor: SPI close failed: %s", e)
+        self._spi = None
+        logging.info("tension_sensor: SPI closed")
+
+    def _close_spi_if_idle(self):
+        if not self.polling_enabled and not self._baseline_update_running:
+            self._close_spi()
+
+    def _handle_disconnect(self):
+        self._close_spi()
+
+    def _read_spi_bytes(self):
+        """Read 3 raw bytes. spidev: one xfer per sample (CS cycle); else open/read/close."""
+        if self._spi is not None:
+            # Full-duplex clocking; each xfer2 is an independent SPI transaction.
+            rx = self._spi.xfer2([0xFF, 0xFF, 0xFF])
+            if len(rx) != 3:
+                return None
+            return bytes(rx)
         try:
             with open(self.spi_device, 'rb') as f:
                 data = f.read(3)
-                return self.parse_spi_data(data) if len(data) == 3 else None
+            return data if len(data) == 3 else None
         except Exception as e:
-            logging.error(f"SPI read failed: {e}")
+            logging.error("tension_sensor: SPI read failed: %s", e)
             return None
 
-    def read_raw_spi_bytes(self):
-        try:
-            with open(self.spi_device, 'rb') as f:
-                return f.read(3)
-        except Exception as e:
-            logging.error(f"SPI read failed: {e}")
+    def read_spi_once(self):
+        need_open = self._spi is None and spidev is not None
+        idle_close = (
+            not self.polling_enabled and not self._baseline_update_running
+        )
+        if need_open and not self._open_spi():
             return None
+        try:
+            data = self._read_spi_bytes()
+            if data is None:
+                return None
+            return self.parse_spi_data(data)
+        except Exception as e:
+            logging.error("tension_sensor: SPI read failed: %s", e)
+            self._close_spi()
+            return None
+        finally:
+            if idle_close:
+                self._close_spi()
+
+    def read_raw_spi_bytes(self):
+        need_open = self._spi is None and spidev is not None
+        idle_close = (
+            not self.polling_enabled and not self._baseline_update_running
+        )
+        if need_open and not self._open_spi():
+            return None
+        try:
+            return self._read_spi_bytes()
+        except Exception as e:
+            logging.error("tension_sensor: SPI read failed: %s", e)
+            self._close_spi()
+            return None
+        finally:
+            if idle_close:
+                self._close_spi()
 
     def _find_primary_cluster(self, values, eps):
         """Find densest 1D cluster where max-min <= eps."""
@@ -301,10 +416,6 @@ class MySerial:
     def _notify_info(self, msg):
         """Send async-safe user-facing info."""
         logging.info("tension_sensor: %s", msg)
-        try:
-            self.gcode.run_script_from_command(f"M118 {msg}")
-        except Exception as e:
-            logging.error("Failed to notify message '%s': %s", msg, e)
 
     def cmd_RESET_ALARM(self, gcmd):
         was_jammed = self.jamming_triggered
@@ -369,6 +480,10 @@ class MySerial:
 
     def cmd_SHOW_CONFIG(self, gcmd):
         gcmd.respond_info("=== TENSION SENSOR CONFIG ===")
+        gcmd.respond_info(f"enable: {self.enabled}")
+        gcmd.respond_info(f"poll_armed: {self.poll_armed}")
+        gcmd.respond_info(f"polling: {self.polling_enabled}")
+        gcmd.respond_info(f"temp_paused: {self._temp_paused}")
         gcmd.respond_info(f"sample_interval: {self.sample_interval:.3f}s")
         gcmd.respond_info(f"baseline_sample_count: {self.baseline_sample_count}")
         gcmd.respond_info(f"baseline_cluster_eps: {self.baseline_cluster_eps}")
@@ -388,6 +503,7 @@ class MySerial:
         self._baseline_update_running = False
         self._baseline_phase = None
         self.reactor.update_timer(self._baseline_timer, self.reactor.NEVER)
+        self._close_spi_if_idle()
 
     def _baseline_update_event(self, eventtime):
         if not self._baseline_update_running:
@@ -455,6 +571,8 @@ class MySerial:
 
     def _start_baseline_update(self):
         if self._baseline_update_running:
+            return False
+        if spidev is not None and not self._open_spi():
             return False
         self._baseline_update_running = True
         self._skip_jam_detection = True
@@ -530,6 +648,10 @@ class MySerial:
         
         volt = self.adc_to_voltage(val)
         gcmd.respond_info(f"Current: {val} ({volt:.6f}V)")
+        gcmd.respond_info(
+            f"Config enable: {self.enabled} | Armed: {self.poll_armed} | "
+            f"Polling: {self.polling_enabled} | Temp paused: {self._temp_paused}"
+        )
         gcmd.respond_info(f"State: {self.current_state} | Jamming Locked: {self.jamming_triggered}")
         gcmd.respond_info(f"Jam detection enabled: {self.jam_detection_enabled}")
         gcmd.respond_info(f"Jam deviation limit: {self.jam_deviation_limit}")
@@ -545,67 +667,129 @@ class MySerial:
                 f"(limit={limit:.0f})"
             )
 
-    def cmd_FORCE_SENSOR_POLL(self, gcmd):
-        enable = gcmd.get_int('ENABLE', None)
+    def cmd_TENSION_SENSOR_PAUSE(self, gcmd):
+        if not self.enabled:
+            gcmd.respond_info("ignored: tension_sensor enable=false")
+            return
+        if not self.polling_enabled:
+            gcmd.respond_info("ignored: polling not active")
+            return
+        if self._temp_paused:
+            gcmd.respond_info("already temporarily paused")
+            return
+        self._temp_paused = True
+        self.reactor.update_timer(self._polling_timer, self.reactor.NEVER)
+        gcmd.respond_info("Polling temporarily paused")
+        logging.info("tension_sensor: polling temporarily paused")
+
+    def cmd_TENSION_SENSOR_RESUME(self, gcmd):
+        if not self.enabled:
+            gcmd.respond_info("ignored: tension_sensor enable=false")
+            return
+        if not self._temp_paused:
+            gcmd.respond_info("ignored: not temporarily paused")
+            return
+        self._temp_paused = False
+        if self.polling_enabled:
+            self.reactor.update_timer(self._polling_timer, self.reactor.NOW)
+        gcmd.respond_info("Polling resumed")
+        logging.info("tension_sensor: polling resumed after temporary pause")
+
+    def _start_detection(self, gcmd):
+        """Start polling; logic formerly tied to TENSION_SENSOR_POLL ENABLE=1."""
         logging_enable = gcmd.get_int('LOGGING', 0)
         detect_enable = gcmd.get_int('DETECT', 1)
-        
-        if enable is None:
-            gcmd.respond_info("Usage: TENSION_SENSOR_POLL ENABLE=<0|1> [LOGGING=<0|1>] [DETECT=<0|1>]")
+        self.jam_detection_enabled = (detect_enable == 1)
+        self.polling_log_enabled = (logging_enable == 1)
+        if not self.start_polling():
+            gcmd.respond_info("ERROR: SPI open failed, polling not started")
             return
-        
-        if enable:
-            self.jam_detection_enabled = (detect_enable == 1)
-            self.polling_log_enabled = (logging_enable == 1)
-            
-            self.start_polling()
-            self._auto_baseline_requested = True
-            self._auto_baseline_pending_frames = self.auto_baseline_discard_frames
-            mode = "DETECTION" if self.jam_detection_enabled else "LOG_ONLY"
+        self._auto_baseline_requested = True
+        self._auto_baseline_pending_frames = self.auto_baseline_discard_frames
+        mode = "DETECTION" if self.jam_detection_enabled else "LOG_ONLY"
+        gcmd.respond_info(
+            f"Polling ON ({self.sample_interval*1000:.0f}ms) "
+            f"klipper.log={'ON' if self.polling_log_enabled else 'OFF'} "
+            f"mode={mode}"
+        )
+        gcmd.respond_info(
+            f"Auto baseline update scheduled after "
+            f"{self.auto_baseline_discard_frames} frames "
+            "(startup dirty-data discard)."
+        )
+
+    def cmd_TENSION_SENSOR_START(self, gcmd):
+        if not self.enabled:
+            gcmd.respond_info("ignored: tension_sensor enable=false")
+            return
+        if not self.poll_armed:
             gcmd.respond_info(
-                f"Polling ON ({self.sample_interval*1000:.0f}ms) "
-                f"klipper.log={'ON' if self.polling_log_enabled else 'OFF'} "
-                f"mode={mode}"
+                "ignored: not armed (run TENSION_SENSOR_POLL ENABLE=1 first)"
             )
+            return
+        self._start_detection(gcmd)
+
+    def cmd_FORCE_SENSOR_POLL(self, gcmd):
+        if not self.enabled:
+            gcmd.respond_info("ignored: tension_sensor enable=false")
+            return
+        enable = gcmd.get_int('ENABLE', None)
+
+        if enable is None:
             gcmd.respond_info(
-                f"Auto baseline update scheduled after {self.auto_baseline_discard_frames} frames "
-                "(startup dirty-data discard)."
+                "Usage: TENSION_SENSOR_POLL ENABLE=<0|1> "
+                "(arm only; use TENSION_SENSOR_START to begin sampling)"
+            )
+            return
+
+        if enable:
+            self.poll_armed = True
+            gcmd.respond_info(
+                "Tension sensor armed. Run TENSION_SENSOR_START to begin "
+                "polling/detection."
             )
         else:
+            self.poll_armed = False
             self.stop_polling()
-            gcmd.respond_info("Polling OFF")
+            gcmd.respond_info("Tension sensor disarmed; polling stopped")
 
     def start_polling(self):
-        if self.polling_enabled:
-            return
-        
+        if self._baseline_update_running:
+            self._finish_baseline_update()
+        if spidev is not None and not self._open_spi():
+            logging.error("tension_sensor: cannot start polling, SPI open failed")
+            return False
         self.detection_buffer.clear()
         self.value_history.clear()
         self.jamming_triggered = False
         self.current_state = "NORMAL"
-        
+        self._temp_paused = False
+        self._auto_baseline_requested = False
+        self._auto_baseline_pending_frames = 0
         self.polling_enabled = True
         self._poll_sample_counter = 0
         self.reactor.update_timer(self._polling_timer, self.reactor.NOW)
-        
         logging.info(
-            f"Polling started: {self.sample_interval*1000:.0f}ms; "
-            "set baseline with TENSION_UPDATE_BASELINE before jam detection applies"
+            "Polling started: %.0fms; baseline via TENSION_UPDATE_BASELINE "
+            "or auto baseline after TENSION_SENSOR_START",
+            self.sample_interval * 1000,
         )
+        return True
 
     def stop_polling(self):
         if not self.polling_enabled:
             return
         
         self.polling_enabled = False
+        self._temp_paused = False
         self._auto_baseline_requested = False
         self._auto_baseline_pending_frames = 0
         self.reactor.update_timer(self._polling_timer, self.reactor.NEVER)
-        
+        self._close_spi_if_idle()
         logging.info("Polling stopped")
 
     def _polling_event(self, eventtime):
-        if not self.polling_enabled:
+        if not self.polling_enabled or self._temp_paused:
             return self.reactor.NEVER
         # Avoid concurrent SPI reads with baseline capture timer.
         # During baseline update, SPI is sampled exclusively by _baseline_update_event.

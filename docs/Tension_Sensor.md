@@ -114,7 +114,8 @@ V = \frac{\mathrm{adc}}{\mathrm{ADC\_MAX}} \times \frac{\mathrm{VREF}}{\mathrm{G
 | `TENSION_SHOW_BASELINE` / `TENSION_SHOW_CONFIG` | 查看基准与配置 |
 | `TENSION_SET_THRESHOLD MIN_DEV=<n>` | 设置堵料偏差阈值 |
 | `TENSION_SET_CONSECUTIVE FRAMES=<n>` | 设置连续帧数 |
-| `TENSION_SENSOR_POLL ENABLE=<0\|1> ...` | 开启/关闭轮询与检测 |
+| `TENSION_SENSOR_POLL ENABLE=<0\|1>` | 武装/解除（不开始采样） |
+| `TENSION_SENSOR_START [LOGGING=…] [DETECT=…]` | 开始轮询与堵料检测 |
 | `GET_FORCE_VALUE` / `GET_RAW_FORCE_DATA` | 单次读数与原始字节 |
 | `TENSION_DEBUG` | 调试信息与近期统计 |
 | `TENSION_RESET_ALARM` | 解除堵料锁定并清空部分缓冲 |
