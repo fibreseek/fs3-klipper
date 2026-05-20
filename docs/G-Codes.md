@@ -525,6 +525,12 @@ will be disabled, if set to 1 it is enabled.
 Sets the debounce delay for a filament switch sensor at runtime. DELAY
 must be greater than or equal to zero.
 
+#### SET_FILAMENT_MOTION_DETECTION_LENGTH
+`SET_FILAMENT_MOTION_DETECTION_LENGTH SENSOR=<sensor_name> LENGTH=<mm>`:
+Sets the motion sensor `detection_length` at runtime (smaller values are
+more sensitive). Takes effect immediately and updates the runout
+position threshold.
+
 ### [firmware_retraction]
 
 The following standard G-Code commands are available when the
