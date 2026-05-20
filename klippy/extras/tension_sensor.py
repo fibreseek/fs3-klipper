@@ -23,8 +23,9 @@ class MySerial:
         self.sample_interval = 0.3  # seconds (200ms)
         self.auto_baseline_discard_frames = 10
         
-        # 判堵：过滤异常幅值后，最近 trigger_sample_count 帧中，过半帧满足
-        # 仅“往负方向”相对 force_baseline 偏离超过 jam_deviation_limit 计为超阈；正方向不算。
+        # 判堵/缠料：过滤异常幅值后，最近 trigger_sample_count 帧中，过半帧满足超阈即触发。
+        # 判堵：仅“往负方向”相对 force_baseline 偏离超过 jam_deviation_limit。
+        # 缠料：仅“往正方向”相对 force_baseline 偏离超过 tangling_deviation_limit。
         # 基准仅由 TENSION_UPDATE_BASELINE（主簇 + EMA）更新。
         self.baseline_sample_count = 10
         self.baseline_cluster_eps = config.getint(
@@ -47,11 +48,16 @@ class MySerial:
         self.jam_deviation_limit = config.getint(
             'jam_deviation_limit', 45000, minval=1000, maxval=10000000
         )
+        # 缠料：判堵镜像逻辑，仅“往正方向”相对 force_baseline 偏离超过 tangling_deviation_limit 计为超阈。
+        self.tangling_deviation_limit = config.getint(
+            'tangling_deviation_limit', 40000, minval=1000, maxval=10000000
+        )
         # 幅值饱和：|力值| 超过此值视为异常（正负对称）
         self.max_normal_value = 0x400000
         
         self.current_state = "NORMAL"
         self.jamming_triggered = False
+        self.tangling_triggered = False
         
         self.value_history = collections.deque(maxlen=500)
         
@@ -118,8 +124,11 @@ class MySerial:
         self.gcode.register_command('SHOW_CALIBRATION', self.cmd_SHOW_CALIBRATION)
         self.gcode.register_command('GET_FORCE_VALUE', self.cmd_GET_FORCE_VALUE)
         self.gcode.register_command('GET_RAW_FORCE_DATA', self.cmd_GET_RAW_FORCE_DATA)
-        self.gcode.register_command('TENSION_SET_THRESHOLD', self.cmd_SET_THRESHOLD,
-                                    desc="TENSION_SET_THRESHOLD MIN_DEV=<n>")
+        self.gcode.register_command(
+            'TENSION_SET_THRESHOLD',
+            self.cmd_SET_THRESHOLD,
+            desc="TENSION_SET_THRESHOLD MIN_DEV=<n> [TANGLING_DEV=<n>]",
+        )
         self.gcode.register_command(
             'TENSION_SET_CONSECUTIVE',
             self.cmd_SET_CONSECUTIVE,
@@ -315,6 +324,19 @@ class MySerial:
         over = sum(1 for v in tail if (baseline - v) > limit)
         return tail, over, n, baseline, limit
 
+    def _tangling_vote_stats(self):
+        """最近 N 帧中超阈帧数。超阈：仅往正方向 (v - force_baseline) > tangling_deviation_limit。"""
+        baseline = self.force_baseline
+        if baseline is None:
+            return None
+        n = self.trigger_sample_count
+        if len(self.detection_buffer) < n:
+            return None
+        limit = self.tangling_deviation_limit
+        tail = list(self.detection_buffer)[-n:]
+        over = sum(1 for v in tail if (v - baseline) > limit)
+        return tail, over, n, baseline, limit
+
     def detect_jamming(self):
         stats = self._jam_vote_stats()
         if stats is None:
@@ -329,6 +351,20 @@ class MySerial:
             f"baseline={baseline:.0f} tail_min={min(tail):.0f} tail_max={max(tail):.0f}"
         )
         return is_jamming, reason
+
+    def detect_tangling(self):
+        stats = self._tangling_vote_stats()
+        if stats is None:
+            if self.force_baseline is None:
+                return False, "Collecting(no baseline)"
+            return False, "Collecting"
+        tail, over, n, baseline, limit = stats
+        is_tangling = over > (n // 2)
+        reason = (
+            f"tangling_vote over={over}/{n} (need>{n//2}) pos_dev_limit={limit:.0f} "
+            f"baseline={baseline:.0f} tail_min={min(tail):.0f} tail_max={max(tail):.0f}"
+        )
+        return is_tangling, reason
 
     def _record_jamming_snapshot(self, reason):
         """堵料锁定时将当前缓冲写入 klipper.log。"""
@@ -368,11 +404,51 @@ class MySerial:
         except Exception as e:
             logging.error("tension_sensor failed to record jamming snapshot: %s", e)
 
+    def _record_tangling_snapshot(self, reason):
+        """缠料锁定时将当前缓冲写入 klipper.log。"""
+        try:
+            stats = self._tangling_vote_stats()
+            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            logging.error(
+                "tension_sensor tangling snapshot begin time=%s reason=%s",
+                ts,
+                reason,
+            )
+            logging.error(
+                "tension_sensor tangling meta interval_s=%.3f tangling_vote_N=%d "
+                "tangling_deviation_limit=%s baseline=%s",
+                self.sample_interval,
+                self.trigger_sample_count,
+                self.tangling_deviation_limit,
+                self.force_baseline,
+            )
+            if stats is not None:
+                tail, over, n, baseline, limit = stats
+                logging.error(
+                    "tension_sensor tangling tangling_vote over=%d/%d limit=%s baseline=%s",
+                    over,
+                    n,
+                    limit,
+                    baseline,
+                )
+            buf = list(self.detection_buffer)
+            logging.error(
+                "tension_sensor tangling detection_buffer len=%d (idx 0=oldest)",
+                len(buf),
+            )
+            for i, v in enumerate(buf):
+                logging.error("tension_sensor tangling detection_buffer[%d]=%s", i, v)
+            logging.error("tension_sensor tangling snapshot end")
+        except Exception as e:
+            logging.error("tension_sensor failed to record tangling snapshot: %s", e)
+
     def update_detection_state(self, current_value):
         self.value_history.append(current_value)
         
         if self.jamming_triggered:
             return False, "JAMMED", "Permanently jammed"
+        if self.tangling_triggered:
+            return False, "TANGLING", "Permanently tangled"
 
         # 异常尖峰不参与 jam 判定窗口，避免污染投票窗口。
         if abs(current_value) > self.max_normal_value:
@@ -402,16 +478,34 @@ class MySerial:
             logging.error(f"JAMMING DETECTED and LOCKED! {reason}")
             self._record_jamming_snapshot(reason)
             return True, "JAMMED", reason
+
+        is_tangling, tangling_reason = self.detect_tangling()
+        if is_tangling:
+            self.tangling_triggered = True
+            self.current_state = "TANGLING"
+            logging.error(f"TANGLING DETECTED and LOCKED! {tangling_reason}")
+            self._record_tangling_snapshot(tangling_reason)
+            return True, "TANGLING", tangling_reason
         
         return False, "NORMAL", reason
 
     def _send_jamming_warning(self, details):
         try:
             self.gcode.run_script_from_command(f"M118 FIBER JAMMING DETECTED and LOCKED: {details}")
-            self.gcode.run_script_from_command("FIBER_FILAMENT_TRIGGER")
+            self.gcode.run_script_from_command("FIBER_FILAMENT_JAMMED")
             logging.error(f"JAMMING WARNING SENT: {details}")
         except Exception as e:
             logging.error(f"Failed to send warning: {e}")
+
+    def _send_tangling_warning(self, details):
+        try:
+            self.gcode.run_script_from_command(
+                f"M118 FIBER TANGLING DETECTED and LOCKED: {details}"
+            )
+            self.gcode.run_script_from_command("FIBER_FILAMENT_TANGLINGED")
+            logging.error(f"TANGLING WARNING SENT: {details}")
+        except Exception as e:
+            logging.error(f"Failed to send tangling warning: {e}")
 
     def _notify_info(self, msg):
         """Send async-safe user-facing info."""
@@ -419,11 +513,18 @@ class MySerial:
 
     def cmd_RESET_ALARM(self, gcmd):
         was_jammed = self.jamming_triggered
+        was_tangled = self.tangling_triggered
         self.jamming_triggered = False
+        self.tangling_triggered = False
         self.current_state = "NORMAL"
         self.detection_buffer.clear()
         self.value_history.clear()
-        gcmd.respond_info(f"Alarm reset. Previous state: {'JAMMED' if was_jammed else 'NORMAL'}")
+        prev = "NORMAL"
+        if was_jammed:
+            prev = "JAMMED"
+        elif was_tangled:
+            prev = "TANGLING"
+        gcmd.respond_info(f"Alarm reset. Previous state: {prev}")
         gcmd.respond_info(
             "Detection buffer cleared; jam detection uses existing baseline and "
             f"{self.trigger_sample_count} new sample(s) for jam vote window."
@@ -462,6 +563,11 @@ class MySerial:
         if min_dev is not None and min_dev >= 1000:
             self.jam_deviation_limit = min_dev
             changed.append(f"MIN_DEV={min_dev}")
+
+        tangling_dev = gcmd.get_int('TANGLING_DEV', None)
+        if tangling_dev is not None and tangling_dev >= 1000:
+            self.tangling_deviation_limit = tangling_dev
+            changed.append(f"TANGLING_DEV={tangling_dev}")
         
         gcmd.respond_info(f"Updated: {', '.join(changed) if changed else 'None'}")
 
@@ -495,6 +601,7 @@ class MySerial:
             f"trigger_sample_count (jam vote window N): {self.trigger_sample_count}"
         )
         gcmd.respond_info(f"jam_deviation_limit: {self.jam_deviation_limit}")
+        gcmd.respond_info(f"tangling_deviation_limit: {self.tangling_deviation_limit}")
         gcmd.respond_info(f"max_normal_value: {self.max_normal_value}")
         gcmd.respond_info(f"force_baseline: {self.force_baseline}")
 
@@ -597,7 +704,9 @@ class MySerial:
         gcmd.respond_info("=== TENSION SENSOR DEBUG ===")
         gcmd.respond_info(f"State: {self.current_state}")
         gcmd.respond_info(f"Jamming Triggered: {self.jamming_triggered}")
+        gcmd.respond_info(f"Tangling Triggered: {self.tangling_triggered}")
         gcmd.respond_info(f"Jam deviation limit: {self.jam_deviation_limit}")
+        gcmd.respond_info(f"Tangling deviation limit: {self.tangling_deviation_limit}")
         gcmd.respond_info(f"force_baseline: {self.force_baseline}")
         
         stats = self._jam_vote_stats()
@@ -614,6 +723,21 @@ class MySerial:
             )
         else:
             gcmd.respond_info("jam_vote: collecting")
+
+        tstats = self._tangling_vote_stats()
+        if tstats is not None:
+            tail, over, n, baseline, limit = tstats
+            need = (n // 2) + 1
+            gcmd.respond_info(
+                f"tangling_vote: over={over}/{n} (majority need>={need}) "
+                f"limit={limit:.0f} baseline={baseline:.0f}"
+            )
+            gcmd.respond_info(
+                f"Recent tail pos_dev max: "
+                f"{max(max(0, v - baseline) for v in tail):.0f}"
+            )
+        else:
+            gcmd.respond_info("tangling_vote: collecting")
         
         if len(self.detection_buffer) > 0:
             recent = list(self.detection_buffer)[-min(10, len(self.detection_buffer)) :]
@@ -634,10 +758,11 @@ class MySerial:
     def cmd_RESET_DETECTION_BUFFERS(self, gcmd):
         self.detection_buffer.clear()
         self.jamming_triggered = False
+        self.tangling_triggered = False
         self.current_state = "NORMAL"
         gcmd.respond_info(
             "Detection buffers reset. Baseline unchanged. "
-            f"Need {self.trigger_sample_count} sample(s) for jam vote."
+            f"Need {self.trigger_sample_count} sample(s) for jam/tangling vote."
         )
 
     def cmd_FORCE_SENSOR_STATUS(self, gcmd):
@@ -652,9 +777,13 @@ class MySerial:
             f"Config enable: {self.enabled} | Armed: {self.poll_armed} | "
             f"Polling: {self.polling_enabled} | Temp paused: {self._temp_paused}"
         )
-        gcmd.respond_info(f"State: {self.current_state} | Jamming Locked: {self.jamming_triggered}")
+        gcmd.respond_info(
+            f"State: {self.current_state} | Jamming Locked: {self.jamming_triggered} "
+            f"| Tangling Locked: {self.tangling_triggered}"
+        )
         gcmd.respond_info(f"Jam detection enabled: {self.jam_detection_enabled}")
         gcmd.respond_info(f"Jam deviation limit: {self.jam_deviation_limit}")
+        gcmd.respond_info(f"Tangling deviation limit: {self.tangling_deviation_limit}")
         gcmd.respond_info(f"force_baseline: {self.force_baseline}")
         
         stats = self._jam_vote_stats()
@@ -664,6 +793,15 @@ class MySerial:
             gcmd.respond_info(
                 f"baseline={baseline:.0f} | jam_vote over={over}/{n} (need>={need}) "
                 f"| neg_dev_max={max(max(0, baseline - v) for v in tail):.0f} "
+                f"(limit={limit:.0f})"
+            )
+        tstats = self._tangling_vote_stats()
+        if tstats is not None:
+            tail, over, n, baseline, limit = tstats
+            need = (n // 2) + 1
+            gcmd.respond_info(
+                f"baseline={baseline:.0f} | tangling_vote over={over}/{n} (need>={need}) "
+                f"| pos_dev_max={max(max(0, v - baseline) for v in tail):.0f} "
                 f"(limit={limit:.0f})"
             )
 
@@ -762,6 +900,7 @@ class MySerial:
         self.detection_buffer.clear()
         self.value_history.clear()
         self.jamming_triggered = False
+        self.tangling_triggered = False
         self.current_state = "NORMAL"
         self._temp_paused = False
         self._auto_baseline_requested = False
@@ -814,6 +953,10 @@ class MySerial:
                 if changed and state == "JAMMED":
                     self.reactor.register_callback(
                         lambda e: self._send_jamming_warning(details)
+                    )
+                elif changed and state == "TANGLING":
+                    self.reactor.register_callback(
+                        lambda e: self._send_tangling_warning(details)
                     )
             else:
                 self.value_history.append(val)
