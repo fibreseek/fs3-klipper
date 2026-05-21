@@ -1023,6 +1023,11 @@ class LoadUnloadHandler:
                     logger.info(
                         "[_sync_print_stats_load_unload] %s" % (error_message,))
                 restore = self._print_stats_state_before_load_unload
+                if restore is None:
+                    logger.info(
+                        "[_sync_print_stats_load_unload] no saved print_stats state, "
+                        "skip restore (end=%s)" % (end_state,))
+                    return
                 self._print_stats_state_before_load_unload = None
                 if restore not in ("standby", "paused"):
                     restore = "standby"
