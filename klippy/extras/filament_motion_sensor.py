@@ -22,7 +22,7 @@ class EncoderSensor:
         # Get printer objects
         self.reactor = self.printer.get_reactor()
         self.runout_helper = filament_switch_sensor.RunoutHelper(config)
-        self.get_status = self.runout_helper.get_status
+        self.sensor_name = self.runout_helper.name
         self.extruder = None
         self.estimated_print_time = None
         # Initialise internal state
@@ -36,6 +36,24 @@ class EncoderSensor:
                 self._handle_not_printing)
         self.printer.register_event_handler('idle_timeout:idle',
                 self._handle_not_printing)
+        gcode = self.printer.lookup_object('gcode')
+        gcode.register_mux_command(
+            "SET_FILAMENT_MOTION_DETECTION_LENGTH", "SENSOR",
+            self.sensor_name, self.cmd_SET_FILAMENT_MOTION_DETECTION_LENGTH,
+            desc=self.cmd_SET_FILAMENT_MOTION_DETECTION_LENGTH_help)
+    def get_status(self, eventtime):
+        status = self.runout_helper.get_status(eventtime)
+        status['detection_length'] = self.detection_length
+        return status
+    cmd_SET_FILAMENT_MOTION_DETECTION_LENGTH_help = (
+        "Set filament motion sensor detection_length at runtime")
+    def cmd_SET_FILAMENT_MOTION_DETECTION_LENGTH(self, gcmd):
+        length = gcmd.get_float('LENGTH', above=0.)
+        self.detection_length = length
+        self._update_filament_runout_pos()
+        gcmd.respond_info(
+            "Filament motion sensor %s: detection_length set to %.3f mm"
+            % (self.sensor_name, length))
     def _update_filament_runout_pos(self, eventtime=None):
         if eventtime is None:
             eventtime = self.reactor.monotonic()

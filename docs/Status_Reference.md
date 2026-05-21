@@ -179,6 +179,8 @@ objects:
 - `enabled`: Returns True if the motion sensor is currently enabled.
 - `filament_detected`: Returns True if the sensor is in a triggered
   state.
+- `detection_length`: The current detection length in mm (may differ
+  from the config file if changed at runtime).
 
 ## firmware_retraction
 

@@ -176,7 +176,7 @@ class MySerial:
         try:
             message = f"M118 DU TOU LA! Weight dropped from {weight_before_drop} to {current_weight}"
             self.gcode.run_script_from_command(message)
-            self.gcode.run_script_from_command("FIBER_FILAMENT_TRIGGER")
+            self.gcode.run_script_from_command("FIBER_FILAMENT_JAMMED")
             logging.info(f"Block warning sent: {message}")
         except Exception as e:
             logging.error(f"Failed to send block warning: {e}")
