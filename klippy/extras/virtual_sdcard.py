@@ -1373,8 +1373,12 @@ class VirtualSD:
             self.print_stats.note_error(error_message)
             self.print_stats.note_standby()
         elif self.current_file is not None:
+            self.uv_mode = 0
+            self.uv_p_value = 0.0
             logging.info("SD card print paused")
         else:
+            self.uv_mode = 0
+            self.uv_p_value = 0.0
             self.print_stats.note_complete()
             logging.info("SD card print completed")
         return self.reactor.NEVER
