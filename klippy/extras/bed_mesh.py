@@ -227,6 +227,9 @@ class BedMesh:
         self.gcode.register_command(
             'BED_MESH_OFFSET', self.cmd_BED_MESH_OFFSET,
             desc=self.cmd_BED_MESH_OFFSET_help)
+        self.gcode.register_command(
+            'BED_MESH_CHECK_RANGE', self.cmd_BED_MESH_CHECK_RANGE,
+            desc=self.cmd_BED_MESH_CHECK_RANGE_help)
         # Register dump webhooks
         webhooks = self.printer.lookup_object('webhooks')
         webhooks.register_endpoint(
@@ -380,6 +383,25 @@ class BedMesh:
     cmd_BED_MESH_CLEAR_help = "Clear the Mesh so no z-adjustment is made"
     def cmd_BED_MESH_CLEAR(self, gcmd):
         self.set_mesh(None)
+    cmd_BED_MESH_CHECK_RANGE_help = (
+        "Check probed mesh z range; error if range exceeds MAX (mm)")
+    def cmd_BED_MESH_CHECK_RANGE(self, gcmd):
+        if self.z_mesh is None:
+            raise gcmd.error("bed_mesh: no mesh loaded for range check")
+        max_range = gcmd.get_float('MAX', 1.5, above=0.)
+        matrix = self.z_mesh.get_probed_matrix()
+        if not matrix or not matrix[0]:
+            raise gcmd.error("bed_mesh: probed matrix is empty")
+        z_min = min([min(row) for row in matrix])
+        z_max = max([max(row) for row in matrix])
+        mesh_range = z_max - z_min
+        gcmd.respond_info(
+            "bed_mesh range check: min=%.4f max=%.4f range=%.4f (limit=%.4f)"
+            % (z_min, z_max, mesh_range, max_range))
+        if mesh_range > max_range:
+            raise gcmd.error(
+                "bed_mesh: platform not flat, range %.2f mm > %.2f mm."
+                % (mesh_range, max_range))
     cmd_BED_MESH_OFFSET_help = "Add X/Y offsets to the mesh lookup"
     def cmd_BED_MESH_OFFSET(self, gcmd):
         if self.z_mesh is not None:
