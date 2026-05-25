@@ -1880,7 +1880,7 @@ class LoadUnloadHandler:
         # 如果未归零，先归零
         if self._print_stats_state_before_load_unload == "standby":
             if "xyz" not in toolhead.get_status(eventtime)['homed_axes']:
-                self.gcode.run_script_from_command("G28")
+                self.gcode.run_script_from_command("G28 S1")
         elif self._print_stats_state_before_load_unload == "paused":
             v_sd = self.printer.lookup_object('virtual_sdcard', None)
             init_info = getattr(v_sd, 'powerloss_init_info', None) if v_sd else None
@@ -1960,7 +1960,7 @@ class LoadUnloadHandler:
             # 如果未归零，先归零
             if self._print_stats_state_before_load_unload == "standby":
                 if "xyz" not in toolhead.get_status(eventtime)['homed_axes']:
-                    self.gcode.run_script_from_command("G28")
+                    self.gcode.run_script_from_command("G28 S1")
             elif self._print_stats_state_before_load_unload == "paused":
                 v_sd = self.printer.lookup_object('virtual_sdcard', None)
                 init_info = getattr(v_sd, 'powerloss_init_info', None) if v_sd else None
