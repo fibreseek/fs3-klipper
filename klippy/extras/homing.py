@@ -9,7 +9,7 @@ HOMING_START_DELAY = 0.001
 ENDSTOP_SAMPLE_TIME = .000015
 ENDSTOP_SAMPLE_COUNT = 4
 # Z归位后探针校验：探点结果相对 z_offset 的最大允许偏差(mm)
-HOMING_PROBE_DEVIATION_MAX = 0.03
+HOMING_PROBE_DEVIATION_MAX = 0.05
 
 # Return a completion that completes when all completions in a list complete
 def multi_complete(printer, completions):
@@ -280,7 +280,7 @@ class PrinterHoming:
         self.printer = config.get_printer()
         # Register g-code commands
         gcode = self.printer.lookup_object('gcode')
-        gcode.register_command('G28', self.cmd_G28)
+        gcode.register_command('G28', self.cmd_G28, desc=self.cmd_G28_help)
     def manual_home(self, toolhead, endstops, pos, speed,
                     triggered, check_triggered):
         hmove = HomingMove(self.printer, endstops, toolhead)
@@ -340,12 +340,13 @@ class PrinterHoming:
             "Z homing probe check: result=%.4f mm, z_offset=%.4f mm,"
             " delta=%.4f mm (limit ±%.2f mm)"
             % (probe_result, z_offset, probe_delta, HOMING_PROBE_DEVIATION_MAX))
-        if abs(probe_delta) > HOMING_PROBE_DEVIATION_MAX:
+        if round(abs(probe_delta), 2) > round(HOMING_PROBE_DEVIATION_MAX, 2):
             raise self.printer.command_error(
                 "Z homing check failed: probe result %.2f mm, expected %.2f"
                 " ±%.2f mm (delta %.2f mm)"
                 % (probe_result, z_offset, HOMING_PROBE_DEVIATION_MAX,
                    probe_delta))
+    cmd_G28_help = "Home axes. S1 skips Z homing probe check."
     def cmd_G28(self, gcmd):
         # Move to origin
         axes = []
@@ -354,12 +355,13 @@ class PrinterHoming:
                 axes.append(pos)
         if not axes:
             axes = [0, 1, 2]
+        skip_z_probe_check = gcmd.get_int('S', 0, minval=0, maxval=1)
         homing_state = Homing(self.printer)
         homing_state.set_axes(axes)
         kin = self.printer.lookup_object('toolhead').get_kinematics()
         try:
             kin.home(homing_state)
-            if 2 in axes:
+            if 2 in axes and not skip_z_probe_check:
                 self._z_homing_probe_check(
                     self.printer.lookup_object('gcode'))
         except self.printer.command_error:

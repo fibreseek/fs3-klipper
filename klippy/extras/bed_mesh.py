@@ -384,7 +384,8 @@ class BedMesh:
     def cmd_BED_MESH_CLEAR(self, gcmd):
         self.set_mesh(None)
     cmd_BED_MESH_CHECK_RANGE_help = (
-        "Check probed mesh z range; error if range exceeds MAX (mm)")
+        "Check probed mesh z range; error if range, |min|, or |max| "
+        "exceeds MAX (mm)")
     def cmd_BED_MESH_CHECK_RANGE(self, gcmd):
         if self.z_mesh is None:
             raise gcmd.error("bed_mesh: no mesh loaded for range check")
@@ -402,6 +403,11 @@ class BedMesh:
             raise gcmd.error(
                 "bed_mesh: platform not flat, range %.2f mm > %.2f mm."
                 % (mesh_range, max_range))
+        if abs(z_min) > max_range or abs(z_max) > max_range:
+            raise gcmd.error(
+                "bed_mesh: mesh z out of range, |min|=%.2f |max|=%.2f "
+                "> %.2f mm."
+                % (abs(z_min), abs(z_max), max_range))
     cmd_BED_MESH_OFFSET_help = "Add X/Y offsets to the mesh lookup"
     def cmd_BED_MESH_OFFSET(self, gcmd):
         if self.z_mesh is not None:
