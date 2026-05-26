@@ -190,6 +190,7 @@ class VirtualSD:
             'is_active': self.is_active(),
             'file_position': self.file_position,
             'file_size': self.file_size,
+            'is_start_move': self.is_start_move,
         }
     def file_path(self):
         if self.current_file:
