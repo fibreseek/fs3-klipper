@@ -285,6 +285,14 @@ void command_setup_aniso_bed_mesh(uint32_t *args)
 {
     switch (args[1]) // 功能码
     {
+    case 0: // 强制停止采样，恢复待机
+        gpio_out_write_now(triggerPF, 1);
+        state_machine_flag = ANISO_STATE_IDLE;
+        sched_del_timer(&sample_timer);
+        trigger1_window_count = 0;
+        trigger1_window_bits = 0;
+        break;
+
     case 1: // 设置工作模式
         // uint8_t goid = (uint8_t)args[0];
         // printf_("setup_aniso_bed_mesh oid=%u\r\n", goid);

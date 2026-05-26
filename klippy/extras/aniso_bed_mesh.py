@@ -18,11 +18,39 @@ class aniso_bed_mesh:
         self.gcode = config.get_printer().lookup_object('gcode')
         self.gcode.register_command('PROBE_ALIGN', self.cmd_probe_align)
         self.printer.add_object("aniso_bed_mesh", self)
+        self.printer.register_event_handler("gcode:command_error",
+                                            self._handle_command_error)
+        self.printer.register_event_handler("homing:homing_move_end",
+                                            self._handle_homing_move_end)
 
     def build_config(self):
         self.mcu.add_config_cmd("config_aniso_bed_mesh oid=%d adc_pin=%s trigger_pin=%s" % (self.oid, self.adc_pin, self.trigger_pin)) #设置adc引脚
         self.update_uart_cmd = self.mcu.lookup_command("setup_aniso_bed_mesh oid=%u op=%u val=%u", cq=self.cmd_queue)
-        
+
+    def stop_sampling(self):
+        """Stop toolhead ADC sampling timer (op=0) to free MCU for PWM/servo."""
+        if not hasattr(self, 'update_uart_cmd'):
+            return
+        self.update_uart_cmd.send([self.oid, 0, 0])
+
+    def _handle_command_error(self):
+        self.stop_sampling()
+        self.restore_servo_switch()
+
+    def restore_servo_switch(self):
+        """G28/BED_MESH 失败时宏可能未执行到 SET_PIN=servo_switch VALUE=1。"""
+        try:
+            self.printer.lookup_object('output_pin servo_switch')
+        except self.printer.config_error:
+            return
+        self.gcode.run_script_from_command("SET_PIN PIN=servo_switch VALUE=1.0")
+
+    def _handle_homing_move_end(self, hmove):
+        for mcu_endstop, name in hmove.endstops:
+            if name in ('z', 'probe'):
+                self.stop_sampling()
+                return
+
     def cmd_probe_align(self, gcmd):
         commands = [
             "G90",
