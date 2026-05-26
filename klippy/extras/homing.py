@@ -324,10 +324,12 @@ class PrinterHoming:
             "PROBE", "PROBE SAMPLES=4 SAMPLES_TOLERANCE_RETRIES=0",
             {'SAMPLES': '4', 'SAMPLES_TOLERANCE_RETRIES': '0'})
         probe_session = probe.start_probe_session(probe_gcmd)
+        aniso_bed_mesh = self.printer.lookup_object('aniso_bed_mesh')
         try:
             probe_session.run_probe(probe_gcmd)
             results = probe_session.pull_probed_results()
         finally:
+            aniso_bed_mesh.stop_sampling()
             probe_session.end_probe_session()
         if not results:
             raise self.printer.command_error(
@@ -368,6 +370,9 @@ class PrinterHoming:
             if self.printer.is_shutdown():
                 raise self.printer.command_error(
                     "Homing failed due to printer shutdown")
+            aniso = self.printer.lookup_object('aniso_bed_mesh')
+            aniso.stop_sampling()
+            aniso.restore_servo_switch()
             self.printer.lookup_object('stepper_enable').motor_off()
             raise
 
