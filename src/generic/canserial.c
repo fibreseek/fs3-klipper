@@ -348,8 +348,14 @@ DECL_COMMAND_FLAGS(command_get_canbus_id, HF_IN_SHUTDOWN, "get_canbus_id");
 void
 canserial_set_uuid(uint8_t *raw_uuid, uint32_t raw_uuid_len)
 {
-    uint64_t hash = fasthash64(raw_uuid, raw_uuid_len, 0xA16231A7);
-    memcpy(CanData.uuid, &hash, sizeof(CanData.uuid));
+    // 原始方式（使用芯片 UID 哈希）:
+    // uint64_t hash = fasthash64(raw_uuid, raw_uuid_len, 0xA16231A7);
+    // memcpy(CanData.uuid, &hash, sizeof(CanData.uuid));
+
+    // 固定 CAN UUID（需与 Katapult / flashtool -u / printer.cfg 一致）
+    uint8_t custom_can_uuid[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x11};
+    memcpy(CanData.uuid, custom_can_uuid, sizeof(CanData.uuid));
+
     canserial_notify_rx();
 }
 

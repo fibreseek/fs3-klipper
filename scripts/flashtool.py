@@ -24,11 +24,20 @@ import shlex
 import contextlib
 from typing import Dict, List, Optional, Union, Any
 HAS_SERIAL = True
+_SERIAL_ERR_MSG: Optional[str] = None
 try:
     from serial import Serial, SerialException
 except ModuleNotFoundError:
     HAS_SERIAL = False
     SerialException = Exception
+    _SERIAL_ERR_MSG = "The pyserial python package was not found."
+except ImportError:
+    HAS_SERIAL = False
+    SerialException = Exception
+    _SERIAL_ERR_MSG = (
+        "Wrong Python 'serial' package detected (not pyserial). "
+        "Run: sudo pip3 uninstall serial -y && sudo apt install python3-serial"
+    )
 
 def output_line(msg: str) -> None:
     sys.stdout.write(msg + "\n")
@@ -864,12 +873,12 @@ class SerialSocket(BaseSocket):
         self._device = args.device
         self._baud = args.baud
         if not HAS_SERIAL:
-            ser_inst_cmd = "pip3 install serial"
-            if shutil.which("apt") is not None:
-                ser_inst_cmd = "sudo apt install python3-serial"
+            ser_inst_cmd = "sudo pip3 uninstall serial -y && sudo apt install python3-serial"
+            if shutil.which("apt") is None:
+                ser_inst_cmd = "pip3 uninstall serial -y && pip3 install pyserial"
             raise FlashError(
-                "The pyserial python package was not found.  To install "
-                "run the following command in a terminal: \n\n"
+                (_SERIAL_ERR_MSG or "The pyserial python package was not found.")
+                + " To install run the following command in a terminal: \n\n"
                 f"   {ser_inst_cmd}\n\n"
             )
         if self._device is None:

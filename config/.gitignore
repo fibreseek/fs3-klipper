@@ -1,0 +1,8 @@
+# Symlinks to anisotouch-config are managed externally; only track local klipper configs.
+*
+!bootloader_motherboard_config
+!bootloader_toolhead_config
+!klipper_config_motherboard
+!klipper_config_toolhead
+!klipper_config_toolhead_can
+!.gitignore
