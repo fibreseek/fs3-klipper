@@ -531,7 +531,7 @@ class BlindsHallMonitor:
             params = self._parse_gcode_parameters(gcmd)
             
             if self._is_chamber_cooling_s_param(params):
-                self._execute_cooling_procedure(gcmd, wait_for_temp=False)
+                self._execute_cooling_procedure(gcmd)
                 return
             
             temperature = float(params.get('S', 70.0))
@@ -573,13 +573,13 @@ class BlindsHallMonitor:
             logging.error("M141 command error: %s" % str(e))
             gcmd.respond_info("ERROR: M141 command failed - %s" % str(e))
     
-    cmd_M191_help = "Close blinds, fan full speed, set chamber temperature and wait or S0 to open blinds and cool down (wait)"
+    cmd_M191_help = "Close blinds, fan full speed, set chamber temperature and wait or S0 to open blinds and cool down"
     def cmd_M191(self, gcmd):
         try:
             params = self._parse_gcode_parameters(gcmd)
             
             if self._is_chamber_cooling_s_param(params):
-                self._execute_cooling_procedure(gcmd, wait_for_temp=True)
+                self._execute_cooling_procedure(gcmd)
                 return
             
             temperature = float(params.get('S', 70.0)) 
@@ -662,7 +662,7 @@ class BlindsHallMonitor:
             # 温度达到后，不自动停止门检测，让 _check_heater_status 根据目标温度决定
             pass
     
-    def _execute_cooling_procedure(self, gcmd, wait_for_temp=False):
+    def _execute_cooling_procedure(self, gcmd):
         try:
             # 冷却模式 - 不检查门传感器
             self._stop_monitoring()
@@ -681,18 +681,9 @@ class BlindsHallMonitor:
             heater_command = "SET_HEATER_TEMPERATURE HEATER=chamber TARGET=0.0"
             self.gcode.run_script_from_command(heater_command)
             
-            if wait_for_temp:
-                gcmd.respond_info("M191 S0: Waiting for temperature to cool down to 30°C (tolerance: ±%.1f°C)..." % 
-                                self.temperature_tolerance)
-                self._wait_for_temperature(30.0, timeout=600)
-                gcmd.respond_info("M191 S0: Temperature cooled down to 30°C")
-                
-                self._start_cooling_fan_delay(gcmd)
-                
-                gcmd.respond_info("M191 S0 executed: Blinds opened, Fan running for cooling")
-            else:
-                self._start_cooling_fan_delay(gcmd)
-                gcmd.respond_info("M141 S0 executed: Blinds opened, Fan running for cooling")
+            self._start_cooling_fan_delay(gcmd)
+            cmd = gcmd.get_command()
+            gcmd.respond_info("%s S0 executed: Blinds opened, Fan running for cooling" % cmd)
                 
         except Exception as e:
             logging.error("Cooling procedure error: %s" % str(e))
