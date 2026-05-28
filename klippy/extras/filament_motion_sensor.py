@@ -30,7 +30,7 @@ class EncoderSensor:
         # Register commands and event handlers
         self.printer.register_event_handler('klippy:ready',
                 self._handle_ready)
-        self.printer.register_event_handler('idle_timeout:printing',
+        self.printer.register_event_handler('virtual_sdcard:move_start',
                 self._handle_printing)
         self.printer.register_event_handler('idle_timeout:ready',
                 self._handle_not_printing)
@@ -72,7 +72,7 @@ class EncoderSensor:
         self.runout_helper.note_filament_present(self.reactor.NOW, True)
         self.reactor.update_timer(self._extruder_pos_update_timer,
                 self.reactor.NOW)
-        logging.info(f"{self.extruder_name}: Printing, Filament runout position: {self.filament_runout_pos}, Extruder position: {self._get_extruder_pos()}")
+        logging.info(f"{self.extruder_name}: Printing move start, Filament runout position: {self.filament_runout_pos}, Extruder position: {self._get_extruder_pos()}")
     def _handle_not_printing(self, print_time):
         self.reactor.update_timer(self._extruder_pos_update_timer,
                 self.reactor.NEVER)

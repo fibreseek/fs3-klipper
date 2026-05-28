@@ -207,6 +207,7 @@ class VirtualSD:
     def do_pause(self):
         if self.work_timer is not None:
             self.must_pause_work = True
+            self.is_start_move = False
             while self.work_timer is not None and not self.cmd_from_sd:
                 self.reactor.pause(self.reactor.monotonic() + .001)
                 self.powerloss_record_time = self.reactor.monotonic()
@@ -1320,6 +1321,7 @@ class VirtualSD:
                     self.reactor.pause(self.reactor.monotonic() + 0.0001)  # 0.1ms delay
                 if not self.is_start_move and (line.startswith('G1') or line.startswith('G0')) :
                     self.gcode.respond_raw("Print move start: %s"%(line))
+                    self.printer.send_event("virtual_sdcard:move_start", line)
                     self.is_start_move = True
             except self.gcode.error as e:
                 error_message = str(e)
@@ -1376,10 +1378,12 @@ class VirtualSD:
         elif self.current_file is not None:
             self.uv_mode = 0
             self.uv_p_value = 0.0
+            self.is_start_move = False
             logging.info("SD card print paused")
         else:
             self.uv_mode = 0
             self.uv_p_value = 0.0
+            self.is_start_move = False
             self.print_stats.note_complete()
             logging.info("SD card print completed")
         return self.reactor.NEVER
