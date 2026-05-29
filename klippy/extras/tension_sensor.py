@@ -26,16 +26,13 @@ class MySerial:
         # 判堵/缠料：过滤异常幅值后，最近 trigger_sample_count 帧中，过半帧满足超阈即触发。
         # 判堵：仅“往负方向”相对 force_baseline 偏离超过 jam_deviation_limit。
         # 缠料：仅“往正方向”相对 force_baseline 偏离超过 tangling_deviation_limit。
-        # 基准仅由 TENSION_UPDATE_BASELINE（主簇 + EMA）更新。
+        # 基准仅由 TENSION_UPDATE_BASELINE（主簇中位值）更新。
         self.baseline_sample_count = 10
         self.baseline_cluster_eps = config.getint(
             'baseline_cluster_eps', 1200, minval=50, maxval=200000
         )
         self.baseline_cluster_min_points = config.getint(
-            'baseline_cluster_min_points', 4, minval=2, maxval=50
-        )
-        self.baseline_ema_alpha = config.getfloat(
-            'baseline_ema_alpha', 0.2, minval=0.01, maxval=1.0
+            'baseline_cluster_min_points', 6, minval=2, maxval=50
         )
         self.trigger_sample_count = config.getint(
             'trigger_sample_count', 6, minval=1, maxval=30
@@ -273,7 +270,7 @@ class MySerial:
         return ordered[best_l : best_r + 1]
 
     def _compute_baseline_from_samples(self, samples):
-        """主簇 + EMA：异常占比过高则失败，主簇中位值经 EMA 更新基准。"""
+        """主簇中位值：异常占比过高则失败，直接取主簇中位值为基准。"""
         if len(samples) != self.baseline_sample_count:
             return None, f"expected {self.baseline_sample_count} samples, got {len(samples)}", None
         if any(v is None for v in samples):
@@ -298,13 +295,7 @@ class MySerial:
 
         center = int(round(sorted(primary)[len(primary) // 2]))
         old_baseline = self.force_baseline
-        if old_baseline is None:
-            baseline = center
-        else:
-            baseline = int(round(
-                self.baseline_ema_alpha * center
-                + (1.0 - self.baseline_ema_alpha) * old_baseline
-            ))
+        baseline = center
         details = {
             "cluster_size": len(primary),
             "cluster_center": center,
@@ -601,7 +592,6 @@ class MySerial:
         gcmd.respond_info(
             f"baseline_cluster_min_points: {self.baseline_cluster_min_points}"
         )
-        gcmd.respond_info(f"baseline_ema_alpha: {self.baseline_ema_alpha:.3f}")
         gcmd.respond_info(
             f"trigger_sample_count (jam vote window N): {self.trigger_sample_count}"
         )
@@ -669,8 +659,7 @@ class MySerial:
             else:
                 self._notify_info(
                     f"Baseline updated to {baseline} (center={details['cluster_center']}, "
-                    f"cluster_size={details['cluster_size']}, old={details['old_baseline']}, "
-                    f"ema_alpha={self.baseline_ema_alpha:.3f})"
+                    f"cluster_size={details['cluster_size']}, old={details['old_baseline']})"
                 )
             self._notify_info(f"warmup_samples={warmup}")
             self._notify_info(f"raw_samples={samples}")
