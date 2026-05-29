@@ -524,10 +524,6 @@ class LoadUnloadHandler:
         self.load_distance = 0.0
         gcmd.respond_info(f"[{channel_name} LOAD] STATE:31 RETRYING")
 
-        # P2通道需要冷却废料
-        if index == Channel.P2:
-            self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT")
-            self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
         self._start_process_timer(0.1)
         
     cmd_CONFIRM_CLEANED_help = "确认已清理完成（F/P1通道）"
@@ -1687,6 +1683,9 @@ class LoadUnloadHandler:
             self.gcode.respond_info(f"[{channel_name} LOAD] PROGRESS {current_distance:.0f}/{self.p2_long_distance:.0f}mm {step_length:.1f}mm/s")
 
             if current_distance >= self.p2_long_distance:
+                # P2通道需要冷却废料
+                self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT")
+                self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
                 # 熔融挤出完成，等待用户确认
                 self.load_step = State.CONFIRM_EXTRUSION
                 self.gcode.respond_info(f"[{channel_name} LOAD] STATE:30 CONFIRM_EXTRUSION")
@@ -1716,6 +1715,9 @@ class LoadUnloadHandler:
             self.gcode.respond_info(f"[{channel_name} LOAD] PROGRESS {current_distance:.0f}/{self.retry_distance:.0f}mm {speed_mm_s:.1f}mm/s")
 
             if current_distance >= self.retry_distance:
+                # P2通道需要冷却废料
+                self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT")
+                self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
                 # 补料完成，再次等待确认
                 self.load_step = State.CONFIRM_EXTRUSION
                 self.gcode.respond_info(f"[{channel_name} LOAD] STATE:30 CONFIRM_EXTRUSION")
