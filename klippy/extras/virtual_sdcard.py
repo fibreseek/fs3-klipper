@@ -139,13 +139,15 @@ class VirtualSD:
                          readpos, repr(data[:readcount]),
                          self.file_position, repr(data[readcount:]))
     def get_zmove_value(self, z_move_val):
-        if not self.is_start_move:
-            return
         eventtime = self.reactor.monotonic()
         stats = self.print_stats.get_status(eventtime)
         state = stats.get('state')
-        # 断电续打记录：打印中/暂停中/已暂停都要持续保存 Z 高度
+        # 断电续打记录：打印中/暂停中/已暂停/换料都要持续保存 Z 高度
         if state not in ("printing", "pausing", "paused", "load_unload"):
+            logging.info("get_zmove_value: not in printing, pausing, paused, load_unload")
+            return
+        # 只有 printing 状态需要判断 is_start_move，其他状态直接放行
+        if state == "printing" and not self.is_start_move:
             return
         # self.gcode.respond_raw("get z move value %.3f"%(z_move_val))
         if self.printed_pos_z != z_move_val:
@@ -1320,7 +1322,7 @@ class VirtualSD:
                     # Reduced from 1ms to 0.1ms to avoid stuttering during printing
                     self.reactor.pause(self.reactor.monotonic() + 0.0001)  # 0.1ms delay
                 if not self.is_start_move and (line.startswith('G1') or line.startswith('G0')) :
-                    self.gcode.respond_raw("Print move start: %s"%(line))
+                    self.gcode.respond_raw("[SDCARD_PRINT_FILE] Print move start: %s"%(line))
                     self.printer.send_event("virtual_sdcard:move_start", line)
                     self.is_start_move = True
             except self.gcode.error as e:

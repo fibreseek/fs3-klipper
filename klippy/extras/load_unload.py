@@ -1683,13 +1683,13 @@ class LoadUnloadHandler:
             self.gcode.respond_info(f"[{channel_name} LOAD] PROGRESS {current_distance:.0f}/{self.p2_long_distance:.0f}mm {step_length:.1f}mm/s")
 
             if current_distance >= self.p2_long_distance:
-                # P2通道需要冷却废料
-                self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT")
-                self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
                 # 熔融挤出完成，等待用户确认
                 self.load_step = State.CONFIRM_EXTRUSION
                 self.gcode.respond_info(f"[{channel_name} LOAD] STATE:30 CONFIRM_EXTRUSION")
                 self.gcode.respond_info("ACTION:PROMPT_CONFIRM P2_EXTRUDED")
+                # P2通道需要冷却废料
+                self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT WAIT_TIME=3000")
+                self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
                 return self.reactor.NEVER
 
             move_duration = step_length / speed_mm_s if speed_mm_s > 0 else self.load_step_time
@@ -1715,13 +1715,14 @@ class LoadUnloadHandler:
             self.gcode.respond_info(f"[{channel_name} LOAD] PROGRESS {current_distance:.0f}/{self.retry_distance:.0f}mm {speed_mm_s:.1f}mm/s")
 
             if current_distance >= self.retry_distance:
-                # P2通道需要冷却废料
-                self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT")
-                self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
                 # 补料完成，再次等待确认
                 self.load_step = State.CONFIRM_EXTRUSION
                 self.gcode.respond_info(f"[{channel_name} LOAD] STATE:30 CONFIRM_EXTRUSION")
                 self.gcode.respond_info("ACTION:PROMPT_CONFIRM P2_EXTRUDED")
+
+                # P2通道需要冷却废料
+                self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT WAIT_TIME=3000")
+                self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
                 return self.reactor.NEVER
 
             move_duration = retry_step / speed_mm_s if speed_mm_s > 0 else self.load_step_time
@@ -2080,6 +2081,7 @@ class LoadUnloadHandler:
             # T0左喷嘴清理流程
             self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
             self.gcode.run_script_from_command(f"M104 T0 S{cooling_temp:.0f}")
+            self.gcode.run_script_from_command("M400")
             self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT")
             self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
             self.gcode.run_script_from_command("MOVE_LEFT_COOLING_POSITION")
@@ -2093,6 +2095,7 @@ class LoadUnloadHandler:
             # T1右喷嘴清理流程
             # self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
             self.gcode.run_script_from_command(f"M104 T1 S{cooling_temp:.0f}")
+            self.gcode.run_script_from_command("M400")
             self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT")
             self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
             self.gcode.run_script_from_command("MOVE_RIGHT_COOLING_POSITION")

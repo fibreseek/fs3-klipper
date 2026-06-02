@@ -220,6 +220,17 @@ class BlindsHallMonitor:
         except Exception as e:
             logging.error(f"BlindsHallMonitor: Failed to check heater status: {str(e)}")
     
+    def _get_chamber_target_temp(self):
+        """读取腔温加热器当前的目标温度（用于判断“之前目标温度”）"""
+        try:
+            heater = self.printer.lookup_object('heater_generic chamber')
+            eventtime = self.reactor.monotonic()
+            status = heater.get_status(eventtime)
+            return float(status.get('target', 0) or 0)
+        except Exception as e:
+            logging.error("BlindsHallMonitor: Failed to get chamber target temp: %s" % str(e))
+            return self.current_target_temp
+
     def _start_recovery_mode(self, initial_state):
         self.gcode.respond_info("BlindsHallMonitor: Starting recovery mode for initial state: %s" % initial_state)
         
@@ -544,13 +555,14 @@ class BlindsHallMonitor:
             self._stop_monitoring()
             self._stop_cooling_fan_delay()
             
-            # 关闭百叶窗和风扇
+            # 打开横流风扇
             fan_command = "SET_FAN_SPEED FAN=fan6 SPEED=1.0"
             self.gcode.run_script_from_command(fan_command)
 
             # 设置排风风扇速度为0（关闭）
             self.gcode.run_script_from_command("EXHAUST_FAN S=0")
             
+            # 关闭百叶窗
             blinds_command = "SET_PIN PIN=SENSOR_MOTOR VALUE=1.00"
             self.gcode.run_script_from_command(blinds_command)
             
@@ -592,13 +604,14 @@ class BlindsHallMonitor:
             self._stop_monitoring()
             self._stop_cooling_fan_delay()
             
-            # 关闭百叶窗和风扇
+            # 打开横流风扇
             fan_command = "SET_FAN_SPEED FAN=fan6 SPEED=1.0"
             self.gcode.run_script_from_command(fan_command)
 
             # 关闭排风风扇  
             self.gcode.run_script_from_command("EXHAUST_FAN S=0")
             
+            # 关闭百叶窗
             blinds_command = "SET_PIN PIN=SENSOR_MOTOR VALUE=1.00"
             self.gcode.run_script_from_command(blinds_command)
             
@@ -664,27 +677,29 @@ class BlindsHallMonitor:
     
     def _execute_cooling_procedure(self, gcmd):
         try:
-            # 冷却模式 - 不检查门传感器
+            # 目标温度==0：先读取“之前的目标温度”，用于判断横流风机是否需要延时关闭
+            previous_target = self._get_chamber_target_temp()
+
+            # 冷却模式 - 停止门检测等监控（不检查门传感器）
             self._stop_monitoring()
-            
-            fan_command = "SET_FAN_SPEED FAN=fan6 SPEED=1.0"
-            self.gcode.run_script_from_command(fan_command)
-            
-            # 第一步：设置排风风扇速度为0（关闭）
-            self.gcode.run_script_from_command("EXHAUST_FAN S=0")
-            
-            blinds_command = "SET_PIN PIN=SENSOR_MOTOR VALUE=0.00"
-            self.gcode.run_script_from_command(blinds_command)
-            
-            self.start_close_to_open_monitoring()
-            
+
+            # 目标温度==0：百叶窗、外排风扇不动作，仅设置腔温为0
             heater_command = "SET_HEATER_TEMPERATURE HEATER=chamber TARGET=0.0"
             self.gcode.run_script_from_command(heater_command)
-            
-            self._start_cooling_fan_delay(gcmd)
+            self.current_target_temp = 0.0
+
             cmd = gcmd.get_command()
-            gcmd.respond_info("%s S0 executed: Blinds opened, Fan running for cooling" % cmd)
-                
+            if previous_target > 0:
+                # 之前目标温度不为零：横流风机延时关闭
+                self._start_cooling_fan_delay(gcmd)
+                gcmd.respond_info(
+                    "%s S0 executed: Chamber target set to 0, cross-flow fan will stop after delay "
+                    "(blinds and exhaust fan unchanged)" % cmd)
+            else:
+                # 之前目标温度==0：横流风机不操作延时关闭
+                gcmd.respond_info(
+                    "%s S0 executed: Chamber target set to 0 (cross-flow fan, blinds and exhaust fan unchanged)" % cmd)
+
         except Exception as e:
             logging.error("Cooling procedure error: %s" % str(e))
             gcmd.respond_info("ERROR: Cooling procedure failed - %s" % str(e))
