@@ -23,9 +23,10 @@ class MySerial:
         self.sample_interval = 0.3  # seconds (200ms)
         self.auto_baseline_discard_frames = 10
         
-        # 判堵/缠料：过滤异常幅值后，最近 trigger_sample_count 帧中，过半帧满足超阈即触发。
-        # 判堵：仅“往负方向”相对 force_baseline 偏离超过 jam_deviation_limit。
-        # 缠料：仅“往正方向”相对 force_baseline 偏离超过 tangling_deviation_limit。
+        # 判堵/缠料：过滤异常幅值后，最近 trigger_sample_count 连续帧均超阈，
+        # 且相对 force_baseline 的偏离持续增大（相邻帧允许 trend_tolerance 回落）。
+        # 判堵：负向偏离 (force_baseline - v) > jam_deviation_limit 且持续增大。
+        # 缠料：正向偏离 (v - force_baseline) > tangling_deviation_limit 且持续增大。
         # 基准仅由 TENSION_UPDATE_BASELINE（主簇中位值）更新。
         self.baseline_sample_count = 10
         self.baseline_cluster_eps = config.getint(
@@ -35,7 +36,7 @@ class MySerial:
             'baseline_cluster_min_points', 6, minval=2, maxval=50
         )
         self.trigger_sample_count = config.getint(
-            'trigger_sample_count', 6, minval=1, maxval=30
+            'trigger_sample_count', 4, minval=1, maxval=30
         )
         self.detection_buffer = collections.deque(maxlen=30)
         
@@ -48,6 +49,10 @@ class MySerial:
         # 缠料：判堵镜像逻辑，仅“往正方向”相对 force_baseline 偏离超过 tangling_deviation_limit 计为超阈。
         self.tangling_deviation_limit = config.getint(
             'tangling_deviation_limit', 40000, minval=1000, maxval=10000000
+        )
+        # 持续趋势判定：相邻帧偏离允许的最大回落量
+        self.trend_tolerance = config.getint(
+            'trend_tolerance', 1500, minval=0, maxval=10000
         )
         # 幅值饱和：|力值| 超过此值视为异常（正负对称）
         self.max_normal_value = 0x400000
@@ -128,12 +133,12 @@ class MySerial:
         self.gcode.register_command(
             'TENSION_SET_THRESHOLD',
             self.cmd_SET_THRESHOLD,
-            desc="TENSION_SET_THRESHOLD MIN_DEV=<n> [TANGLING_DEV=<n>]",
+            desc="TENSION_SET_THRESHOLD MIN_DEV=<n> [TANGLING_DEV=<n>] [TREND_TOL=<n>]",
         )
         self.gcode.register_command(
             'TENSION_SET_CONSECUTIVE',
             self.cmd_SET_CONSECUTIVE,
-            desc="TENSION_SET_CONSECUTIVE FRAMES=<n> (jam vote window, same as trigger_sample_count)",
+            desc="TENSION_SET_CONSECUTIVE FRAMES=<n> (consecutive trend frames, same as trigger_sample_count)",
         )
         self.gcode.register_command(
             'TENSION_SHOW_CONFIG',
@@ -306,65 +311,82 @@ class MySerial:
         }
         return baseline, None, details
 
-    def _jam_vote_stats(self):
-        """最近 N 帧中超阈帧数。超阈：仅往负方向 (force_baseline - v) > jam_deviation_limit。"""
+    def _trend_detection_tail(self, direction):
+        """取最近 N 帧及相对基准的偏离序列。direction: 'jam' | 'tangling'。"""
         baseline = self.force_baseline
         if baseline is None:
             return None
         n = self.trigger_sample_count
         if len(self.detection_buffer) < n:
             return None
-        limit = self.jam_deviation_limit
         tail = list(self.detection_buffer)[-n:]
-        over = sum(1 for v in tail if (baseline - v) > limit)
-        return tail, over, n, baseline, limit
+        if direction == 'jam':
+            limit = self.jam_deviation_limit
+            deviations = [baseline - v for v in tail]
+        else:
+            limit = self.tangling_deviation_limit
+            deviations = [v - baseline for v in tail]
+        return tail, deviations, n, baseline, limit
 
-    def _tangling_vote_stats(self):
-        """最近 N 帧中超阈帧数。超阈：仅往正方向 (v - force_baseline) > tangling_deviation_limit。"""
-        baseline = self.force_baseline
-        if baseline is None:
-            return None
-        n = self.trigger_sample_count
-        if len(self.detection_buffer) < n:
-            return None
-        limit = self.tangling_deviation_limit
-        tail = list(self.detection_buffer)[-n:]
-        over = sum(1 for v in tail if (v - baseline) > limit)
-        return tail, over, n, baseline, limit
+    def _evaluate_sustained_trend(self, deviations, limit, label):
+        """连续 N 帧均超阈，且偏离持续增大（相邻允许 trend_tolerance 回落）。"""
+        n = len(deviations)
+        tol = self.trend_tolerance
+        over_count = sum(1 for d in deviations if d > limit)
+        if over_count < n:
+            return False, (
+                f"{label}_trend not all over limit: {over_count}/{n} "
+                f"dev_limit={limit:.0f} tol={tol}"
+            )
+        for i in range(n - 1):
+            drop = deviations[i] - deviations[i + 1]
+            if drop > tol:
+                return False, (
+                    f"{label}_trend break at {i}->{i + 1}: "
+                    f"dev {deviations[i]:.0f}->{deviations[i + 1]:.0f} "
+                    f"(drop={drop:.0f}>{tol})"
+                )
+        return True, (
+            f"{label}_trend sustained {n} frames over limit={limit:.0f} "
+            f"tol={tol} dev={','.join(f'{d:.0f}' for d in deviations)}"
+        )
 
     def detect_jamming(self):
-        stats = self._jam_vote_stats()
+        stats = self._trend_detection_tail('jam')
         if stats is None:
             if self.force_baseline is None:
                 return False, "Collecting(no baseline)"
             return False, "Collecting"
-        tail, over, n, baseline, limit = stats
-        # 过半：严格大于 n/2（例如 N=6 需至少 4 帧超阈）
-        is_jamming = over > (n // 2)
+        tail, deviations, n, baseline, limit = stats
+        is_jamming, trend_reason = self._evaluate_sustained_trend(
+            deviations, limit, 'jam'
+        )
         reason = (
-            f"jam_vote over={over}/{n} (need>{n//2}) neg_dev_limit={limit:.0f} "
-            f"baseline={baseline:.0f} tail_min={min(tail):.0f} tail_max={max(tail):.0f}"
+            f"{trend_reason} baseline={baseline:.0f} "
+            f"tail_min={min(tail):.0f} tail_max={max(tail):.0f}"
         )
         return is_jamming, reason
 
     def detect_tangling(self):
-        stats = self._tangling_vote_stats()
+        stats = self._trend_detection_tail('tangling')
         if stats is None:
             if self.force_baseline is None:
                 return False, "Collecting(no baseline)"
             return False, "Collecting"
-        tail, over, n, baseline, limit = stats
-        is_tangling = over > (n // 2)
+        tail, deviations, n, baseline, limit = stats
+        is_tangling, trend_reason = self._evaluate_sustained_trend(
+            deviations, limit, 'tangling'
+        )
         reason = (
-            f"tangling_vote over={over}/{n} (need>{n//2}) pos_dev_limit={limit:.0f} "
-            f"baseline={baseline:.0f} tail_min={min(tail):.0f} tail_max={max(tail):.0f}"
+            f"{trend_reason} baseline={baseline:.0f} "
+            f"tail_min={min(tail):.0f} tail_max={max(tail):.0f}"
         )
         return is_tangling, reason
 
     def _record_jamming_snapshot(self, reason):
         """堵料锁定时将当前缓冲写入 klipper.log。"""
         try:
-            stats = self._jam_vote_stats()
+            stats = self._trend_detection_tail('jam')
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             logging.error(
                 "tension_sensor jamming snapshot begin time=%s reason=%s",
@@ -372,19 +394,19 @@ class MySerial:
                 reason,
             )
             logging.error(
-                "tension_sensor jamming meta interval_s=%.3f jam_vote_N=%d "
-                "jam_deviation_limit=%s baseline=%s",
+                "tension_sensor jamming meta interval_s=%.3f trend_N=%d "
+                "jam_deviation_limit=%s trend_tolerance=%s baseline=%s",
                 self.sample_interval,
                 self.trigger_sample_count,
                 self.jam_deviation_limit,
+                self.trend_tolerance,
                 self.force_baseline,
             )
             if stats is not None:
-                tail, over, n, baseline, limit = stats
+                tail, deviations, n, baseline, limit = stats
                 logging.error(
-                    "tension_sensor jamming jam_vote over=%d/%d limit=%s baseline=%s",
-                    over,
-                    n,
+                    "tension_sensor jamming trend deviations=%s limit=%s baseline=%s",
+                    deviations,
                     limit,
                     baseline,
                 )
@@ -402,7 +424,7 @@ class MySerial:
     def _record_tangling_snapshot(self, reason):
         """缠料锁定时将当前缓冲写入 klipper.log。"""
         try:
-            stats = self._tangling_vote_stats()
+            stats = self._trend_detection_tail('tangling')
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             logging.error(
                 "tension_sensor tangling snapshot begin time=%s reason=%s",
@@ -410,19 +432,19 @@ class MySerial:
                 reason,
             )
             logging.error(
-                "tension_sensor tangling meta interval_s=%.3f tangling_vote_N=%d "
-                "tangling_deviation_limit=%s baseline=%s",
+                "tension_sensor tangling meta interval_s=%.3f trend_N=%d "
+                "tangling_deviation_limit=%s trend_tolerance=%s baseline=%s",
                 self.sample_interval,
                 self.trigger_sample_count,
                 self.tangling_deviation_limit,
+                self.trend_tolerance,
                 self.force_baseline,
             )
             if stats is not None:
-                tail, over, n, baseline, limit = stats
+                tail, deviations, n, baseline, limit = stats
                 logging.error(
-                    "tension_sensor tangling tangling_vote over=%d/%d limit=%s baseline=%s",
-                    over,
-                    n,
+                    "tension_sensor tangling trend deviations=%s limit=%s baseline=%s",
+                    deviations,
                     limit,
                     baseline,
                 )
@@ -462,7 +484,8 @@ class MySerial:
         
         if len(self.detection_buffer) < self.trigger_sample_count:
             return False, "COLLECTING", (
-                f"{len(self.detection_buffer)}/{self.trigger_sample_count} for jam vote"
+                f"{len(self.detection_buffer)}/{self.trigger_sample_count} "
+                "for sustained trend"
             )
         
         is_jamming, reason = self.detect_jamming()
@@ -523,7 +546,7 @@ class MySerial:
         gcmd.respond_info(f"Alarm reset. Previous state: {prev}")
         gcmd.respond_info(
             "Detection buffer cleared; jam detection uses existing baseline and "
-            f"{self.trigger_sample_count} new sample(s) for jam vote window."
+            f"{self.trigger_sample_count} new sample(s) for sustained trend."
         )
 
     def cmd_GET_RAW_FORCE_DATA(self, gcmd):
@@ -564,6 +587,11 @@ class MySerial:
         if tangling_dev is not None and tangling_dev >= 1000:
             self.tangling_deviation_limit = tangling_dev
             changed.append(f"TANGLING_DEV={tangling_dev}")
+
+        trend_tol = gcmd.get_int('TREND_TOL', None)
+        if trend_tol is not None and trend_tol >= 0:
+            self.trend_tolerance = trend_tol
+            changed.append(f"TREND_TOL={trend_tol}")
         
         gcmd.respond_info(f"Updated: {', '.join(changed) if changed else 'None'}")
 
@@ -572,12 +600,13 @@ class MySerial:
         if frames is None:
             gcmd.respond_info(
                 f"Usage: TENSION_SET_CONSECUTIVE FRAMES=<1..30> "
-                f"(jam vote window, current={self.trigger_sample_count})"
+                f"(consecutive trend frames, current={self.trigger_sample_count})"
             )
             return
         self.trigger_sample_count = frames
         gcmd.respond_info(
-            f"Updated trigger_sample_count (jam vote window)={self.trigger_sample_count}"
+            f"Updated trigger_sample_count (consecutive trend frames)="
+            f"{self.trigger_sample_count}"
         )
 
     def cmd_SHOW_CONFIG(self, gcmd):
@@ -593,7 +622,8 @@ class MySerial:
             f"baseline_cluster_min_points: {self.baseline_cluster_min_points}"
         )
         gcmd.respond_info(
-            f"trigger_sample_count (jam vote window N): {self.trigger_sample_count}"
+            f"trigger_sample_count (consecutive trend frames N): "
+            f"{self.trigger_sample_count}"
         )
         gcmd.respond_info(f"jam_detection_enabled: {self.jam_detection_enabled}")
         gcmd.respond_info(
@@ -601,6 +631,7 @@ class MySerial:
         )
         gcmd.respond_info(f"jam_deviation_limit: {self.jam_deviation_limit}")
         gcmd.respond_info(f"tangling_deviation_limit: {self.tangling_deviation_limit}")
+        gcmd.respond_info(f"trend_tolerance: {self.trend_tolerance}")
         gcmd.respond_info(f"max_normal_value: {self.max_normal_value}")
         gcmd.respond_info(f"force_baseline: {self.force_baseline}")
 
@@ -705,37 +736,40 @@ class MySerial:
         gcmd.respond_info(f"Tangling Triggered: {self.tangling_triggered}")
         gcmd.respond_info(f"Jam deviation limit: {self.jam_deviation_limit}")
         gcmd.respond_info(f"Tangling deviation limit: {self.tangling_deviation_limit}")
+        gcmd.respond_info(f"Trend tolerance: {self.trend_tolerance}")
         gcmd.respond_info(f"force_baseline: {self.force_baseline}")
         
-        stats = self._jam_vote_stats()
+        stats = self._trend_detection_tail('jam')
         if stats is not None:
-            tail, over, n, baseline, limit = stats
-            need = (n // 2) + 1
-            gcmd.respond_info(
-                f"jam_vote: over={over}/{n} (majority need>={need}) "
-                f"limit={limit:.0f} baseline={baseline:.0f}"
+            tail, deviations, n, baseline, limit = stats
+            triggered, trend_reason = self._evaluate_sustained_trend(
+                deviations, limit, 'jam'
             )
             gcmd.respond_info(
-                f"Recent tail neg_dev max: "
-                f"{max(max(0, baseline - v) for v in tail):.0f}"
+                f"jam_trend: triggered={triggered} {trend_reason} "
+                f"baseline={baseline:.0f}"
+            )
+            gcmd.respond_info(
+                f"Recent tail neg_dev max: {max(deviations):.0f}"
             )
         else:
-            gcmd.respond_info("jam_vote: collecting")
+            gcmd.respond_info("jam_trend: collecting")
 
-        tstats = self._tangling_vote_stats()
+        tstats = self._trend_detection_tail('tangling')
         if tstats is not None:
-            tail, over, n, baseline, limit = tstats
-            need = (n // 2) + 1
-            gcmd.respond_info(
-                f"tangling_vote: over={over}/{n} (majority need>={need}) "
-                f"limit={limit:.0f} baseline={baseline:.0f}"
+            tail, deviations, n, baseline, limit = tstats
+            triggered, trend_reason = self._evaluate_sustained_trend(
+                deviations, limit, 'tangling'
             )
             gcmd.respond_info(
-                f"Recent tail pos_dev max: "
-                f"{max(max(0, v - baseline) for v in tail):.0f}"
+                f"tangling_trend: triggered={triggered} {trend_reason} "
+                f"baseline={baseline:.0f}"
+            )
+            gcmd.respond_info(
+                f"Recent tail pos_dev max: {max(deviations):.0f}"
             )
         else:
-            gcmd.respond_info("tangling_vote: collecting")
+            gcmd.respond_info("tangling_trend: collecting")
         
         if len(self.detection_buffer) > 0:
             recent = list(self.detection_buffer)[-min(10, len(self.detection_buffer)) :]
@@ -760,7 +794,7 @@ class MySerial:
         self.current_state = "NORMAL"
         gcmd.respond_info(
             "Detection buffers reset. Baseline unchanged. "
-            f"Need {self.trigger_sample_count} sample(s) for jam/tangling vote."
+            f"Need {self.trigger_sample_count} sample(s) for sustained trend."
         )
 
     def cmd_FORCE_SENSOR_STATUS(self, gcmd):
@@ -787,23 +821,27 @@ class MySerial:
         gcmd.respond_info(f"Tangling deviation limit: {self.tangling_deviation_limit}")
         gcmd.respond_info(f"force_baseline: {self.force_baseline}")
         
-        stats = self._jam_vote_stats()
+        stats = self._trend_detection_tail('jam')
         if stats is not None:
-            tail, over, n, baseline, limit = stats
-            need = (n // 2) + 1
-            gcmd.respond_info(
-                f"baseline={baseline:.0f} | jam_vote over={over}/{n} (need>={need}) "
-                f"| neg_dev_max={max(max(0, baseline - v) for v in tail):.0f} "
-                f"(limit={limit:.0f})"
+            tail, deviations, n, baseline, limit = stats
+            triggered, trend_reason = self._evaluate_sustained_trend(
+                deviations, limit, 'jam'
             )
-        tstats = self._tangling_vote_stats()
-        if tstats is not None:
-            tail, over, n, baseline, limit = tstats
-            need = (n // 2) + 1
             gcmd.respond_info(
-                f"baseline={baseline:.0f} | tangling_vote over={over}/{n} (need>={need}) "
-                f"| pos_dev_max={max(max(0, v - baseline) for v in tail):.0f} "
-                f"(limit={limit:.0f})"
+                f"baseline={baseline:.0f} | jam_trend triggered={triggered} "
+                f"| neg_dev_max={max(deviations):.0f} (limit={limit:.0f}) "
+                f"| tol={self.trend_tolerance}"
+            )
+        tstats = self._trend_detection_tail('tangling')
+        if tstats is not None:
+            tail, deviations, n, baseline, limit = tstats
+            triggered, trend_reason = self._evaluate_sustained_trend(
+                deviations, limit, 'tangling'
+            )
+            gcmd.respond_info(
+                f"baseline={baseline:.0f} | tangling_trend triggered={triggered} "
+                f"| pos_dev_max={max(deviations):.0f} (limit={limit:.0f}) "
+                f"| tol={self.trend_tolerance}"
             )
 
     def cmd_TENSION_SENSOR_PAUSE(self, gcmd):
