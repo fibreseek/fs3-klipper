@@ -458,7 +458,7 @@ class GCodeIO:
             try:
                 os.write(self.fd, (msg+"\n").encode())
             except os.error:
-                logging.exception("Write g-code response")
+                logging.exception("Write g-code response msg=%s", msg)
                 self.pipe_is_active = False
     def stats(self, eventtime):
         return False, "gcodein=%d" % (self.bytes_read,)
