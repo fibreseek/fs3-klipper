@@ -1688,7 +1688,7 @@ class LoadUnloadHandler:
                 self.gcode.respond_info(f"[{channel_name} LOAD] STATE:30 CONFIRM_EXTRUSION")
                 self.gcode.respond_info("ACTION:PROMPT_CONFIRM P2_EXTRUDED")
                 # P2通道需要冷却废料
-                self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT WAIT_TIME=3000")
+                # self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT WAIT_TIME=1000")
                 self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
                 return self.reactor.NEVER
 
@@ -1721,7 +1721,7 @@ class LoadUnloadHandler:
                 self.gcode.respond_info("ACTION:PROMPT_CONFIRM P2_EXTRUDED")
 
                 # P2通道需要冷却废料
-                self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT WAIT_TIME=3000")
+                # self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT WAIT_TIME=1000")
                 self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
                 return self.reactor.NEVER
 

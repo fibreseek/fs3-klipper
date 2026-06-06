@@ -97,8 +97,9 @@ class VirtualSD:
         self.powerloss_progress = powerloss_progress.setup_powerloss_progress(POWERLOSS_FILE_NAME, 5)
         self.is_recover_print = False
         self.powerloss_file_exist = self.powerloss_progress.check_powerloss_file()
-        # CHECK_POWERLOSS_FILE 扫描 G-code 头得到的参数，供 load_unload 等复用（含喷嘴温度）
+        # klippy:ready 时扫描 G-code 头得到的参数，供 load_unload 等复用（含喷嘴温度）
         self.powerloss_init_info = None
+        self._powerloss_recovery_initialized = False
         self.powerloss_info = None
         self.powerloss_position = None
         self._recovery_print_times = None
@@ -123,6 +124,7 @@ class VirtualSD:
         self.stealthchop = max(stepper_x_stealthchop, stepper_y_stealthchop)
         if self.stealthchop > 0:
             logging.info("VirtualSD: stealthchop_threshold set to %d", self.stealthchop)
+        self._init_powerloss_recovery()
 
     def handle_shutdown(self):
         if self.work_timer is not None:
@@ -193,6 +195,7 @@ class VirtualSD:
             'file_position': self.file_position,
             'file_size': self.file_size,
             'is_start_move': self.is_start_move,
+            'powerloss_file_exist': self.powerloss_file_exist,
         }
     def file_path(self):
         if self.current_file:
@@ -358,7 +361,7 @@ class VirtualSD:
             f.close()
             logging.exception("virtual_sdcard file read")
             raise gcmd.error("Error reading file '%s': %s" % (fname, e))
-        gcmd.respond_raw("File opened:%s Size:%d" % (filename, fsize))
+        gcmd.respond_raw("File opened:%s Size:%d Scanned:%d" % (filename, fsize, scanned_bytes))
         gcmd.respond_raw("File selected")
         self.current_file = f
         self.file_position = 0
@@ -463,55 +466,56 @@ class VirtualSD:
         self.powerloss_progress.clear_record()
         self.powerloss_file_exist = False
         self.powerloss_init_info = None
+        self._powerloss_recovery_initialized = False
         self.print_stats.note_standby()
         gcmd.respond_raw("[POWERLOSS] Powerloss file cleared")
 
-    def cmd_CHECK_POWERLOSS_FILE(self, gcmd):
-        # Check if powerloss file exists
-        if self.powerloss_file_exist:
-            gcmd.respond_raw("[POWERLOSS] Powerloss file exists. [FILE: %s]" % self.powerloss_progress.current_print_file)
-
-            # 在主动检查断电续打文件时，将 print_stats 状态设置为暂停，
-            # 方便上位机在用户选择是否恢复打印前展示为“暂停”状态（经状态机校验）
-            pl_file = getattr(self.powerloss_progress, "current_print_file", None)
-            self.print_stats.note_powerloss_recovery_paused(
-                filename=pl_file, gcmd=gcmd)
-
-            powerloss_init_info = self.powerloss_progress.scan_init_paramaters_for_startup()
-            self.powerloss_init_info = powerloss_init_info
-            logging.info(
-                "[POWERLOSS][CHECK] cache set id=%s current_tool=%s left_nozzle_temp=%s right_nozzle_temp=%s",
-                id(self.powerloss_init_info) if self.powerloss_init_info is not None else None,
-                powerloss_init_info.get('current_tool') if powerloss_init_info else None,
-                powerloss_init_info.get('left_nozzle_temp') if powerloss_init_info else None,
-                powerloss_init_info.get('right_nozzle_temp') if powerloss_init_info else None
-            )
-            gcode_script = []
-            if powerloss_init_info:
-                # Apply bed temperature
-                bed_temp = powerloss_init_info.get('bed_temp')
-                if bed_temp is not None:
-                    gcode_script.append("M140 S%.1f" % bed_temp)
-                
-                # Apply chamber temperature
-                chamber_temp = powerloss_init_info.get('chamber_temp')
-                if chamber_temp is not None:
-                    gcode_script.append("M141 S%.1f" % chamber_temp)
-
-            # Execute all gcode commands
-            if gcode_script:
-                logging.info("VirtualSD: Applying recovery parameters for bed and chamber: %s", gcode_script)
-                for cmd in gcode_script:
-                    try:
-                        cmd = cmd + '\n'
-                        self.gcode.run_script_from_command(cmd)
-                    except Exception as e:
-                        logging.warning("Failed to execute recovery command %s: %s" % (cmd, str(e)))
-                        self.gcode.respond_raw("Warning: Failed to execute %s" % cmd)
-            else:
-                self.gcode.respond_raw("No recovery parameters to apply.")
-        else:
+    def _init_powerloss_recovery(self):
+        if not self.powerloss_file_exist:
             self.powerloss_init_info = None
+            return
+        if self._powerloss_recovery_initialized:
+            return
+        self._powerloss_recovery_initialized = True
+        pl_file = getattr(self.powerloss_progress, "current_print_file", None)
+        logging.info("[POWERLOSS] Auto init on ready, file: %s", pl_file)
+        # 将 print_stats 设为 paused，供上位机展示断电续打任务
+        self.print_stats.note_powerloss_recovery_paused(filename=pl_file)
+        powerloss_init_info = self.powerloss_progress.scan_init_paramaters_for_startup()
+        self.powerloss_init_info = powerloss_init_info
+        logging.info(
+            "[POWERLOSS][INIT] cache set id=%s current_tool=%s left_nozzle_temp=%s right_nozzle_temp=%s",
+            id(self.powerloss_init_info) if self.powerloss_init_info is not None else None,
+            powerloss_init_info.get('current_tool') if powerloss_init_info else None,
+            powerloss_init_info.get('left_nozzle_temp') if powerloss_init_info else None,
+            powerloss_init_info.get('right_nozzle_temp') if powerloss_init_info else None
+        )
+        gcode_script = []
+        if powerloss_init_info:
+            bed_temp = powerloss_init_info.get('bed_temp')
+            if bed_temp is not None:
+                gcode_script.append("M140 S%.1f" % bed_temp)
+            chamber_temp = powerloss_init_info.get('chamber_temp')
+            if chamber_temp is not None:
+                gcode_script.append("M141 S%.1f" % chamber_temp)
+        if gcode_script:
+            logging.info(
+                "VirtualSD: Applying recovery parameters for bed and chamber: %s",
+                gcode_script)
+            for cmd in gcode_script:
+                try:
+                    self.gcode.run_script_from_command(cmd + '\n')
+                except Exception as e:
+                    logging.warning(
+                        "Failed to execute recovery command %s: %s" % (cmd, str(e)))
+
+    def cmd_CHECK_POWERLOSS_FILE(self, gcmd):
+        self.powerloss_file_exist = self.powerloss_progress.check_powerloss_file()
+        if self.powerloss_file_exist:
+            gcmd.respond_raw(
+                "[POWERLOSS] Powerloss file exists. [FILE: %s]"
+                % self.powerloss_progress.current_print_file)
+        else:
             gcmd.respond_raw("[POWERLOSS] No powerloss file found.")
 
     cmd_PREPARE_RECOVER_PRINT_FILE_help = "Prepare for recovering print from powerloss. "\

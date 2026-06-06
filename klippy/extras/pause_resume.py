@@ -73,7 +73,6 @@ class PauseResume:
         #     ps.note_pause()
     def send_resume_command(self):
         if self.sd_paused:
-            # Printing from virtual sd, run pause command
             self.v_sd.do_resume()
             self.sd_paused = False
         else:
@@ -93,7 +92,7 @@ class PauseResume:
     cmd_CLEAR_PAUSE_help = (
         "Clears the current paused state without resuming the print")
     def cmd_CLEAR_PAUSE(self, gcmd):
-        self.is_paused = self.pause_command_sent = False
+        self.is_paused = self.sd_paused = self.pause_command_sent = False
     cmd_CANCEL_PRINT_help = ("Cancel the current print")
     def cmd_CANCEL_PRINT(self, gcmd):
         if self.is_sd_active() or self.sd_paused:
