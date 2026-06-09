@@ -1,5 +1,4 @@
 import logging
-import traceback
 
 class BlindsHallMonitor:
     def __init__(self, config):
@@ -189,8 +188,7 @@ class BlindsHallMonitor:
     def _stop_door_monitoring(self):
         """停止门检测"""
         if self.door_monitoring_active or self.heating_active:
-            logging.info("BlindsHallMonitor: Door monitoring stopped - Call stack:\n" + 
-                        ''.join(traceback.format_stack()))
+            logging.info("BlindsHallMonitor: Door monitoring stopped")
         self.door_monitoring_active = False
         self.heating_active = False
         self.last_door_check_time = None
@@ -421,8 +419,7 @@ class BlindsHallMonitor:
     
     def _stop_monitoring(self):
         """完全停止所有监控（包括门检测）- 用于紧急情况"""
-        logging.info("BlindsHallMonitor: _stop_monitoring called - Call stack:\n" + 
-                    ''.join(traceback.format_stack()))
+        logging.info("BlindsHallMonitor: Monitoring stopped")
         self.monitoring_active = False
         self.recovery_mode_active = False
         self.expected_state_change_time = None
