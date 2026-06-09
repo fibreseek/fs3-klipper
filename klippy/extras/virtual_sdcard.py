@@ -777,6 +777,7 @@ class VirtualSD:
             "M118 [POWERLOSS] Prepare to home X and Y axes",
             "G28 X Y",
             "MOVE_TO_BRUSH_STATION",
+            "TENSION_SENSOR_START",
             "M400",
             "M118 [POWERLOSS] Prepare to recover print finished, current_tool: %d"
             % current_tool,
@@ -966,7 +967,6 @@ class VirtualSD:
             gcode_script.append("G1 F%.1f" % feedrate)
         
         gcode_script.append("M400")
-        gcode_script.append("TENSION_SENSOR_START")
         gcode_script.append("M118 [POWERLOSS] Recover print finished.")
         
         # Execute all gcode commands

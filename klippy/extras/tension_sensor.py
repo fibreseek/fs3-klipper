@@ -80,6 +80,11 @@ class MySerial:
         self._baseline_phase = None
         self._baseline_warmup = []
         self._baseline_samples = []
+        # 检测启动后首帧 baseline 参考；后续 baseline 更新与之比较，连续 2 次超阈也可判堵。
+        self._detection_baseline_active = False
+        self._detection_start_baseline = None
+        self._baseline_jam_streak = 0
+        self._baseline_jam_trigger_count = 2
         
         printer = config.get_printer()
         self.gcode = printer.lookup_object('gcode')
@@ -328,6 +333,57 @@ class MySerial:
             deviations = [v - baseline for v in tail]
         return tail, deviations, n, baseline, limit
 
+    def _reset_detection_baseline_tracking(self):
+        self._detection_baseline_active = False
+        self._detection_start_baseline = None
+        self._baseline_jam_streak = 0
+
+    def _reset_baseline_jam_state(self):
+        """重置 baseline 漂移判堵计数与首帧参考，保留检测会话开关。"""
+        self._detection_start_baseline = None
+        self._baseline_jam_streak = 0
+
+    def _evaluate_baseline_jam(self, new_baseline):
+        """检测启动后：首帧 baseline 作参考，后续更新若相对参考负向偏离连续超阈则判堵。"""
+        if not self._detection_baseline_active or not self.jam_detection_enabled:
+            return False, None
+        if self.jamming_triggered:
+            return False, None
+
+        ref = self._detection_start_baseline
+        if ref is None:
+            self._detection_start_baseline = new_baseline
+            self._baseline_jam_streak = 0
+            return False, (
+                f"detection start baseline recorded: {new_baseline}"
+            )
+
+        deviation = ref - new_baseline
+        limit = self.jam_deviation_limit
+        if deviation > limit:
+            self._baseline_jam_streak += 1
+            reason = (
+                f"baseline_jam streak={self._baseline_jam_streak}/"
+                f"{self._baseline_jam_trigger_count} "
+                f"ref={ref} new={new_baseline} dev={deviation:.0f} "
+                f"limit={limit}"
+            )
+            if self._baseline_jam_streak >= self._baseline_jam_trigger_count:
+                return True, reason
+            return False, reason
+
+        self._baseline_jam_streak = 0
+        return False, (
+            f"baseline within limit ref={ref} new={new_baseline} "
+            f"dev={deviation:.0f} limit={limit}"
+        )
+
+    def _trigger_baseline_jam(self, reason):
+        self.jamming_triggered = True
+        self.current_state = "JAMMED"
+        logging.error(f"JAMMING DETECTED (baseline drift) and LOCKED! {reason}")
+        self._record_jamming_snapshot(reason)
+
     def _evaluate_sustained_trend(self, deviations, limit, label):
         """连续 N 帧均超阈，且偏离持续增大（相邻允许 trend_tolerance 回落）。"""
         n = len(deviations)
@@ -395,12 +451,15 @@ class MySerial:
             )
             logging.error(
                 "tension_sensor jamming meta interval_s=%.3f trend_N=%d "
-                "jam_deviation_limit=%s trend_tolerance=%s baseline=%s",
+                "jam_deviation_limit=%s trend_tolerance=%s baseline=%s "
+                "detection_start_baseline=%s baseline_jam_streak=%s",
                 self.sample_interval,
                 self.trigger_sample_count,
                 self.jam_deviation_limit,
                 self.trend_tolerance,
                 self.force_baseline,
+                self._detection_start_baseline,
+                self._baseline_jam_streak,
             )
             if stats is not None:
                 tail, deviations, n, baseline, limit = stats
@@ -538,6 +597,7 @@ class MySerial:
         self.current_state = "NORMAL"
         self.detection_buffer.clear()
         self.value_history.clear()
+        self._reset_baseline_jam_state()
         prev = "NORMAL"
         if was_jammed:
             prev = "JAMMED"
@@ -545,7 +605,8 @@ class MySerial:
             prev = "TANGLING"
         gcmd.respond_info(f"Alarm reset. Previous state: {prev}")
         gcmd.respond_info(
-            "Detection buffer cleared; jam detection uses existing baseline and "
+            "Detection buffer cleared; baseline jam streak/reference reset; "
+            "jam detection uses existing force_baseline and "
             f"{self.trigger_sample_count} new sample(s) for sustained trend."
         )
 
@@ -634,6 +695,25 @@ class MySerial:
         gcmd.respond_info(f"trend_tolerance: {self.trend_tolerance}")
         gcmd.respond_info(f"max_normal_value: {self.max_normal_value}")
         gcmd.respond_info(f"force_baseline: {self.force_baseline}")
+        gcmd.respond_info(
+            f"detection_baseline_active: {self._detection_baseline_active}"
+        )
+        gcmd.respond_info(
+            f"detection_start_baseline: {self._detection_start_baseline}"
+        )
+        gcmd.respond_info(
+            f"baseline_jam_streak: {self._baseline_jam_streak}/"
+            f"{self._baseline_jam_trigger_count}"
+        )
+
+    def _baseline_update_allowed(self):
+        if not self.enabled:
+            return False, "tension_sensor enable=false"
+        if not self.polling_enabled:
+            return False, "polling not active"
+        if self._temp_paused:
+            return False, "polling temporarily paused"
+        return True, None
 
     def _finish_baseline_update(self):
         self._skip_jam_detection = False
@@ -644,6 +724,13 @@ class MySerial:
 
     def _baseline_update_event(self, eventtime):
         if not self._baseline_update_running:
+            return self.reactor.NEVER
+        allowed, block_reason = self._baseline_update_allowed()
+        if not allowed:
+            self._notify_info(
+                f"TENSION_UPDATE_BASELINE aborted: {block_reason}"
+            )
+            self._finish_baseline_update()
             return self.reactor.NEVER
         try:
             val = self.read_spi_once()
@@ -685,6 +772,20 @@ class MySerial:
 
             self.force_baseline = baseline
             self.detection_buffer.clear()
+            is_baseline_jam, baseline_reason = self._evaluate_baseline_jam(
+                baseline
+            )
+            if is_baseline_jam:
+                self._trigger_baseline_jam(baseline_reason)
+                self._finish_baseline_update()
+                self.reactor.register_callback(
+                    lambda e: self._send_jamming_warning(baseline_reason)
+                )
+                return self.reactor.NEVER
+            if baseline_reason is not None:
+                logging.info(
+                    "tension_sensor: baseline jam check: %s", baseline_reason
+                )
             if details is None:
                 self._notify_info(f"Baseline updated to {baseline}")
             else:
@@ -706,23 +807,25 @@ class MySerial:
         return self.reactor.NEVER
 
     def _start_baseline_update(self):
+        allowed, reason = self._baseline_update_allowed()
+        if not allowed:
+            return False, reason
         if self._baseline_update_running:
-            return False
+            return False, "previous update still running"
         if spidev is not None and not self._open_spi():
-            return False
+            return False, "SPI open failed"
         self._baseline_update_running = True
         self._skip_jam_detection = True
         self._baseline_phase = "warmup"
         self._baseline_warmup = []
         self._baseline_samples = []
         self.reactor.update_timer(self._baseline_timer, self.reactor.NOW)
-        return True
+        return True, None
 
     def cmd_TENSION_UPDATE_BASELINE(self, gcmd):
-        if not self._start_baseline_update():
-            gcmd.respond_info(
-                "TENSION_UPDATE_BASELINE ignored: previous update still running"
-            )
+        ok, reason = self._start_baseline_update()
+        if not ok:
+            gcmd.respond_info(f"TENSION_UPDATE_BASELINE ignored: {reason}")
             return
         gcmd.respond_info(
             "TENSION_UPDATE_BASELINE started in background timer; "
@@ -738,6 +841,12 @@ class MySerial:
         gcmd.respond_info(f"Tangling deviation limit: {self.tangling_deviation_limit}")
         gcmd.respond_info(f"Trend tolerance: {self.trend_tolerance}")
         gcmd.respond_info(f"force_baseline: {self.force_baseline}")
+        gcmd.respond_info(
+            f"detection_baseline_active: {self._detection_baseline_active} "
+            f"| detection_start_baseline: {self._detection_start_baseline} "
+            f"| baseline_jam_streak: {self._baseline_jam_streak}/"
+            f"{self._baseline_jam_trigger_count}"
+        )
         
         stats = self._trend_detection_tail('jam')
         if stats is not None:
@@ -792,6 +901,7 @@ class MySerial:
         self.jamming_triggered = False
         self.tangling_triggered = False
         self.current_state = "NORMAL"
+        self._baseline_jam_streak = 0
         gcmd.respond_info(
             "Detection buffers reset. Baseline unchanged. "
             f"Need {self.trigger_sample_count} sample(s) for sustained trend."
@@ -820,6 +930,11 @@ class MySerial:
         gcmd.respond_info(f"Jam deviation limit: {self.jam_deviation_limit}")
         gcmd.respond_info(f"Tangling deviation limit: {self.tangling_deviation_limit}")
         gcmd.respond_info(f"force_baseline: {self.force_baseline}")
+        gcmd.respond_info(
+            f"detection_start_baseline: {self._detection_start_baseline} "
+            f"| baseline_jam_streak: {self._baseline_jam_streak}/"
+            f"{self._baseline_jam_trigger_count}"
+        )
         
         stats = self._trend_detection_tail('jam')
         if stats is not None:
@@ -881,6 +996,9 @@ class MySerial:
         if not self.start_polling():
             gcmd.respond_info("ERROR: SPI open failed, polling not started")
             return
+        self._detection_baseline_active = True
+        self._detection_start_baseline = None
+        self._baseline_jam_streak = 0
         self._auto_baseline_requested = True
         self._auto_baseline_pending_frames = self.auto_baseline_discard_frames
         mode = "DETECTION" if self.jam_detection_enabled else "LOG_ONLY"
@@ -893,6 +1011,12 @@ class MySerial:
             f"Auto baseline update scheduled after "
             f"{self.auto_baseline_discard_frames} frames "
             "(startup dirty-data discard)."
+        )
+        gcmd.respond_info(
+            f"Baseline drift jam: first baseline update recorded as reference; "
+            f"subsequent updates vs reference, "
+            f"{self._baseline_jam_trigger_count} consecutive over "
+            f"jam_deviation_limit={self.jam_deviation_limit} also triggers jam."
         )
 
     def cmd_TENSION_SENSOR_START(self, gcmd):
@@ -954,6 +1078,7 @@ class MySerial:
         self.jamming_triggered = False
         self.tangling_triggered = False
         self.current_state = "NORMAL"
+        self._reset_detection_baseline_tracking()
         self._temp_paused = False
         self._auto_baseline_requested = False
         self._auto_baseline_pending_frames = 0
@@ -975,6 +1100,7 @@ class MySerial:
         self._temp_paused = False
         self._auto_baseline_requested = False
         self._auto_baseline_pending_frames = 0
+        self._reset_detection_baseline_tracking()
         self.reactor.update_timer(self._polling_timer, self.reactor.NEVER)
         self._close_spi_if_idle()
         logging.info("Polling stopped")
@@ -1021,14 +1147,15 @@ class MySerial:
                 self._auto_baseline_pending_frames -= 1
                 if self._auto_baseline_pending_frames <= 0:
                     self._auto_baseline_requested = False
-                    if self._start_baseline_update():
+                    ok, reason = self._start_baseline_update()
+                    if ok:
                         self._notify_info(
                             f"Auto baseline update started after "
                             f"{self.auto_baseline_discard_frames} startup frames"
                         )
                     else:
                         logging.info(
-                            "Auto baseline update skipped: baseline update already running"
+                            "Auto baseline update skipped: %s", reason
                         )
         except Exception as e:
             logging.error(f"Polling error: {e}")

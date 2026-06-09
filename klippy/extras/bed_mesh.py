@@ -230,6 +230,9 @@ class BedMesh:
         self.gcode.register_command(
             'BED_MESH_CHECK_RANGE', self.cmd_BED_MESH_CHECK_RANGE,
             desc=self.cmd_BED_MESH_CHECK_RANGE_help)
+        self.gcode.register_command(
+            'BED_MESH_VERIFY', self.cmd_BED_MESH_VERIFY,
+            desc=self.cmd_BED_MESH_VERIFY_help)
         # Register dump webhooks
         webhooks = self.printer.lookup_object('webhooks')
         webhooks.register_endpoint(
@@ -408,6 +411,54 @@ class BedMesh:
                 "bed_mesh: mesh z out of range, |min|=%.2f |max|=%.2f "
                 "> %.2f mm."
                 % (abs(z_min), abs(z_max), max_range))
+    cmd_BED_MESH_VERIFY_help = (
+        "Probe at X,Y and compare with mesh z; error if delta exceeds "
+        "LIMIT (mm)")
+    def cmd_BED_MESH_VERIFY(self, gcmd):
+        if self.z_mesh is None:
+            raise gcmd.error("bed_mesh: no mesh loaded for verify")
+        pprobe = self.printer.lookup_object('probe', None)
+        if pprobe is None:
+            raise gcmd.error("bed_mesh: probe not configured")
+        x = gcmd.get_float('X', 150.)
+        y = gcmd.get_float('Y', 150.)
+        limit = gcmd.get_float('LIMIT', 0.05, above=0.)
+        samples = gcmd.get_int('SAMPLES', 4, minval=1)
+        speed = gcmd.get_float('SPEED', 100., above=0.)
+        mesh_params = self.z_mesh.get_mesh_params()
+        min_c = (mesh_params['min_x'], mesh_params['min_y'])
+        max_c = (mesh_params['max_x'], mesh_params['max_y'])
+        if not within((x, y), min_c, max_c, tol=.001):
+            raise gcmd.error(
+                "bed_mesh: verify point (%.2f, %.2f) outside mesh bounds "
+                "(%.2f, %.2f) to (%.2f, %.2f)"
+                % (x, y, min_c[0], min_c[1], max_c[0], max_c[1]))
+        mesh_z = self.z_mesh.calc_z(x, y)
+        z_offset = pprobe.get_offsets()[2]
+        pparams = pprobe.get_probe_params(gcmd)
+        lift_z = max(self.horizontal_move_z,
+                     pparams['sample_retract_dist'] + 1.)
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.manual_move([None, None, lift_z], speed)
+        toolhead.wait_moves()
+        toolhead.manual_move([x, y, None], speed)
+        toolhead.wait_moves()
+        probe_gcmd = self.gcode.create_gcode_command(
+            "PROBE",
+            "PROBE SAMPLES=%d SAMPLES_TOLERANCE_RETRIES=0"
+            % (samples,),
+            {'SAMPLES': str(samples), 'SAMPLES_TOLERANCE_RETRIES': '0'})
+        pos = probe.run_single_probe(pprobe, probe_gcmd)
+        probe_mesh_z = pos[2] - z_offset
+        delta = probe_mesh_z - mesh_z
+        gcmd.respond_info(
+            "bed_mesh verify at (%.2f, %.2f): probe_z=%.4f z_offset=%.4f "
+            "probe_mesh_z=%.4f mesh_z=%.4f delta=%.4f (limit=%.4f)"
+            % (x, y, pos[2], z_offset, probe_mesh_z, mesh_z, delta, limit))
+        if abs(delta) > limit:
+            raise gcmd.error(
+                "bed_mesh: verify failed, delta %.4f mm > %.4f mm, mesh unreliable"
+                % (abs(delta), limit))
     cmd_BED_MESH_OFFSET_help = "Add X/Y offsets to the mesh lookup"
     def cmd_BED_MESH_OFFSET(self, gcmd):
         if self.z_mesh is not None:
@@ -876,7 +927,7 @@ class BedMeshCalibrate:
             if z_delta < z_delta_min:
                 z_delta_min = z_delta
         z_delta_range = z_delta_max - z_delta_min
-        self.temp_cspt = None # 使用完毕及时释放内存
+        self.temp_cpst = None # 使用完毕及时释放内存
 
         # 7. 分类处理
         Z_DELTA_THRESHOLD = 0.03 # 容许的z偏差阈值
