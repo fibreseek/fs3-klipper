@@ -249,8 +249,8 @@ class VirtualSD:
         self.powerloss_file_exist = False
         self.powerloss_init_info = None
         self.powerloss_progress.clear_record()
-        # 若处于 preprinting（宏预备后调用 BASE），不重置 print_stats，保留 state/prep_stage
-        if self.print_stats.state != "preprinting":
+        # 若处于 precheck/preprinting，不重置 print_stats，保留 state/prep_stage
+        if self.print_stats.state not in ("preprinting", "precheck"):
             self.print_stats.reset()
         self.printer.send_event("virtual_sdcard:reset_file")
     cmd_SDCARD_RESET_FILE_help = "Clears a loaded SD File. Stops the print "\

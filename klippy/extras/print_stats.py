@@ -246,6 +246,7 @@ class PrintStats:
         self._require_allowed_state_transition("precheck")
         self.state = "precheck"
         self.error_message = ""
+        self._stop_busy_timer()
 
     def note_preprinting(self):
         # 进入预备动作阶段（加热、归位、清理、调平等）
