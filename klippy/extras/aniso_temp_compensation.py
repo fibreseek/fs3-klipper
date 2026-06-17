@@ -5,6 +5,29 @@ import logging, os
 class error(Exception):
     pass
 
+def _limit_extrapolated_z(pred_z, edge_z):
+    if not np.isfinite(pred_z):
+        return float(edge_z) if np.isfinite(edge_z) else 0.0
+    if not np.isfinite(edge_z):
+        return 0.0
+    if edge_z >= 0.0:
+        return max(float(pred_z), 0.0)
+    return min(float(pred_z), 0.0)
+
+def predict_limited_linear_extrapolation(axis_values, z_values, target, edge_index):
+    axis_values = np.asarray(axis_values, dtype=np.float32)
+    z_values = np.asarray(z_values, dtype=np.float32)
+    edge_z = float(z_values[edge_index])
+    valid_mask = np.isfinite(axis_values) & np.isfinite(z_values)
+    if np.count_nonzero(valid_mask) < 2:
+        return edge_z
+    try:
+        coeffs = np.polyfit(axis_values[valid_mask], z_values[valid_mask], 1)
+        pred_z = float(np.polyval(coeffs, target))
+    except Exception:
+        return edge_z
+    return _limit_extrapolated_z(pred_z, edge_z)
+
 class AnisoTempCompensation:
     # 热床温度补偿器，用于快速调平的跨温度对比
     def __init__(self, mesh_min, mesh_max, n_x, n_y, root_config=None):
@@ -168,14 +191,43 @@ class AnisoTempCompensation:
         self.val_z = [] # 清空列表释放内存
 
         def process_space_z(eventtime):
+            core_x = self.grid_x[idx_head_x:idx_head_x + self.n_x]
+            core_y = self.grid_y[idx_head_y:idx_head_y + self.n_y]
+            t_count = self.grid_z.shape[2]
+            # 空间外推使用同一行/列的内部趋势预测，只限制反向越界。
+            # 这样真实边缘起翘可继续补偿，但不会把趋势外推到相反方向。
             if ext_head_x:
-                self.grid_z[0, :, :] = self.grid_z[1, :, :]
+                target_x = self.grid_x[0]
+                for j in range(idx_head_y, idx_head_y + self.n_y):
+                    for k in range(t_count):
+                        self.grid_z[0, j, k] = predict_limited_linear_extrapolation(
+                            core_x,
+                            self.grid_z[idx_head_x:idx_head_x + self.n_x, j, k],
+                            target_x, 0)
             if ext_tail_x:
-                self.grid_z[-1, :, :] = self.grid_z[-2, :, :]
+                target_x = self.grid_x[-1]
+                for j in range(idx_head_y, idx_head_y + self.n_y):
+                    for k in range(t_count):
+                        self.grid_z[-1, j, k] = predict_limited_linear_extrapolation(
+                            core_x,
+                            self.grid_z[idx_head_x:idx_head_x + self.n_x, j, k],
+                            target_x, -1)
             if ext_head_y:
-                self.grid_z[:, 0, :] = self.grid_z[:, 1, :]
+                target_y = self.grid_y[0]
+                for i in range(len_x):
+                    for k in range(t_count):
+                        self.grid_z[i, 0, k] = predict_limited_linear_extrapolation(
+                            core_y,
+                            self.grid_z[i, idx_head_y:idx_head_y + self.n_y, k],
+                            target_y, 0)
             if ext_tail_y:
-                self.grid_z[:, -1, :] = self.grid_z[:, -2, :]
+                target_y = self.grid_y[-1]
+                for i in range(len_x):
+                    for k in range(t_count):
+                        self.grid_z[i, -1, k] = predict_limited_linear_extrapolation(
+                            core_y,
+                            self.grid_z[i, idx_head_y:idx_head_y + self.n_y, k],
+                            target_y, -1)
             
             reactor.register_callback(lambda e: self.save_model())
 
