@@ -10,6 +10,8 @@ ENDSTOP_SAMPLE_TIME = .000015
 ENDSTOP_SAMPLE_COUNT = 4
 # Z归位后探针校验：探点结果相对 z_offset 的最大允许偏差(mm)
 HOMING_PROBE_DEVIATION_MAX = 0.05
+# Z归位误触发/未触发时的最大重试次数
+Z_HOMING_RETRIES = 3
 
 # Return a completion that completes when all completions in a list complete
 def multi_complete(printer, completions):
@@ -209,26 +211,65 @@ class Homing:
     def set_homed_position(self, pos):
         self.gcode.respond_info("set_homed_position pos:%d" % pos)  
         self.toolhead.set_position(self._fill_coord(pos))
-    def home_rails(self, rails, forcepos, movepos):
-        # Notify of upcoming homing operation
-        self.printer.send_event("homing:home_rails_begin", self, rails)
-        # Alter kinematics class to think printer is at forcepos
-        force_axes = [axis for axis in range(3) if forcepos[axis] is not None]
+    @staticmethod
+    def _is_z_homing_retryable_error(msg):
+        if "after full movement" in msg:
+            return ("No trigger on z" in msg
+                    or "No trigger on probe" in msg)
+        if "still triggered after retract" in msg:
+            return ("Endstop z " in msg
+                    or "Endstop probe " in msg)
+        return False
+    def _prepare_z_homing_retry(self, rails, hi, forcepos, attempt,
+                                homing_travel):
+        aniso = self.printer.lookup_object('aniso_bed_mesh')
+        aniso.stop_sampling()
+        kin = self.toolhead.get_kinematics()
+        kin.limits[2] = rails[0].get_range()
+        lift_z = max(hi.retract_dist * 2., 8.)
+        curpos = self.toolhead.get_position()
+        self.gcode.respond_info(
+            "Z homing retry %d/%d: cur Z=%.3f lift %.1f mm"
+            % (attempt, Z_HOMING_RETRIES, curpos[2], lift_z))
+        curpos[2] += lift_z
+        self.toolhead.move(curpos, hi.retract_speed)
+        self.gcode.run_script_from_command("M400\nG4 P200")
+        filled_force = self._fill_coord(forcepos)
+        lifted_z = self.toolhead.get_position()[2]
+        retry_force_z = max(filled_force[2], lifted_z + homing_travel)
+        retry_forcepos = list(forcepos)
+        retry_forcepos[2] = retry_force_z
+        self.gcode.respond_info(
+            "Z homing retry %d/%d: forcepos Z=%.3f lifted Z=%.3f"
+            " travel=%.3f"
+            % (attempt, Z_HOMING_RETRIES, retry_force_z, lifted_z,
+               homing_travel))
+        logging.info(
+            "Z homing retry %d/%d: lifted Z=%.3f forcepos Z=%.3f"
+            " travel=%.3f",
+            attempt, Z_HOMING_RETRIES, lifted_z, retry_force_z, homing_travel)
+        return retry_forcepos
+    def _home_rails_once(self, rails, forcepos, movepos, force_axes,
+                         attempt=0):
         homing_axes = "".join(["xyz"[i] for i in force_axes])
         startpos = self._fill_coord(forcepos)
         homepos = self._fill_coord(movepos)
+        is_z_homing = 2 in force_axes
+        if is_z_homing:
+            self.gcode.respond_info(
+                "Z homing attempt %d: forcepos Z=%.3f homepos Z=%.3f"
+                % (attempt + 1, startpos[2], homepos[2]))
+            logging.info(
+                "Z homing attempt %d: forcepos Z=%.3f homepos Z=%.3f",
+                attempt + 1, startpos[2], homepos[2])
         self.toolhead.set_position(startpos, homing_axes=homing_axes)
-        # Perform first home
         endstops = [es for rail in rails for es in rail.get_endstops()]
         hi = rails[0].get_homing_info()
         hmove = HomingMove(self.printer, endstops)
         hmove.homing_move(homepos, hi.speed)
-        # Perform second home
         if hi.retract_dist:
-            is_z_homing = 2 in force_axes
-            homing_cycles = 1 if is_z_homing else 1
+            homing_cycles = 2 if is_z_homing else 1
             for cycle in range(homing_cycles):
-                # Retract
                 startpos = self._fill_coord(forcepos)
                 homepos = self._fill_coord(movepos)
                 axes_d = [hp - sp for hp, sp in zip(homepos, startpos)]
@@ -237,25 +278,67 @@ class Homing:
                 retractpos = [hp - ad * retract_r
                             for hp, ad in zip(homepos, axes_d)]
                 self.toolhead.move(retractpos, hi.retract_speed)
-                self.gcode.run_script_from_command("SET_TMC_FIELD STEPPER=stepper_y FIELD=drv_err VALUE=1")
-                self.gcode.run_script_from_command("SET_TMC_FIELD STEPPER=stepper_x FIELD=drv_err VALUE=1")
-                # Home again
+                for stepper in ('stepper_y', 'stepper_x'):
+                    if self.printer.lookup_object(
+                            'tmc2240 %s' % stepper, None) is not None:
+                        self.gcode.run_script_from_command(
+                            "SET_TMC_FIELD STEPPER=%s FIELD=drv_err VALUE=1"
+                            % stepper)
                 startpos = [rp - ad * retract_r
                             for rp, ad in zip(retractpos, axes_d)]
                 self.toolhead.set_position(startpos)
-                # 仅针对z轴的Home again
                 anisopos = None
-                if is_z_homing and cycle < homing_cycles - 1:
+                if is_z_homing:
                     kin = self.toolhead.get_kinematics()
-                    anisopos = (homepos[2],  kin.limits[2][0]) #暂存触发位置和负限位
-                    homepos[2] = -kin.limits[2][1] #修改目标位置
-                    kin.limits[2] = (homepos[2]-0.1, kin.limits[2][1]) #修改限位
+                    anisopos = (homepos[2], kin.limits[2][0])
+                    homepos[2] = -kin.limits[2][1]
+                    kin.limits[2] = (homepos[2] - 0.1, kin.limits[2][1])
                 hmove = HomingMove(self.printer, endstops)
-                hmove.homing_move(homepos, hi.second_homing_speed, aniso_pos=anisopos)
+                hmove.homing_move(homepos, hi.second_homing_speed,
+                                  aniso_pos=anisopos)
                 if hmove.check_no_movement() is not None:
                     raise self.printer.command_error(
                         "Endstop %s still triggered after retract"
                         % (hmove.check_no_movement(),))
+        return hmove
+    def home_rails(self, rails, forcepos, movepos):
+        # Notify of upcoming homing operation
+        self.printer.send_event("homing:home_rails_begin", self, rails)
+        force_axes = [axis for axis in range(3) if forcepos[axis] is not None]
+        is_z_homing = 2 in force_axes
+        hi = rails[0].get_homing_info()
+        hmove = None
+        if is_z_homing:
+            filled_force = self._fill_coord(forcepos)
+            filled_home = self._fill_coord(movepos)
+            homing_travel = abs(filled_force[2] - filled_home[2])
+            max_attempts = Z_HOMING_RETRIES + 1
+            self.gcode.respond_info(
+                "Z homing start: travel=%.3f max_attempts=%d"
+                % (homing_travel, max_attempts))
+            logging.info(
+                "Z homing start: travel=%.3f max_attempts=%d",
+                homing_travel, max_attempts)
+            cur_forcepos = forcepos
+            for attempt in range(max_attempts):
+                try:
+                    hmove = self._home_rails_once(
+                        rails, cur_forcepos, movepos, force_axes, attempt)
+                    break
+                except self.printer.command_error as e:
+                    err = str(e)
+                    if self.printer.is_shutdown():
+                        raise
+                    if (attempt >= max_attempts - 1
+                            or not self._is_z_homing_retryable_error(err)):
+                        raise
+                    self.gcode.respond_info(
+                        "Z homing failed (%s), will retry" % (err,))
+                    cur_forcepos = self._prepare_z_homing_retry(
+                        rails, hi, forcepos, attempt + 1, homing_travel)
+        else:
+            hmove = self._home_rails_once(
+                rails, forcepos, movepos, force_axes)
 
         # Signal home operation complete
         self.toolhead.flush_step_generation()
@@ -306,6 +389,34 @@ class PrinterHoming:
             raise self.printer.command_error(
                 "The homing sensor was triggered before the Z-axis moved.")
         return epos
+    def _get_z_rail(self, kin):
+        if hasattr(kin, 'get_rails'):
+            return kin.get_rails()[2]
+        return kin.rails[2]
+    def _prepare_z_rehome_from_probe_fail(self, kin):
+        aniso = self.printer.lookup_object('aniso_bed_mesh')
+        aniso.stop_sampling()
+        z_rail = self._get_z_rail(kin)
+        kin.limits[2] = z_rail.get_range()
+        hi = z_rail.get_homing_info()
+        lift_z = max(hi.retract_dist * 2., 8.)
+        toolhead = self.printer.lookup_object('toolhead')
+        gcode = self.printer.lookup_object('gcode')
+        curpos = toolhead.get_position()
+        gcode.respond_info(
+            "Z re-home after probe check fail: cur Z=%.3f lift %.1f mm"
+            % (curpos[2], lift_z))
+        logging.info(
+            "Z re-home after probe check fail: cur Z=%.3f lift %.1f mm",
+            curpos[2], lift_z)
+        curpos[2] += lift_z
+        toolhead.move(curpos, hi.retract_speed)
+        gcode.run_script_from_command("M400\nG4 P200")
+    def _rehome_z_axis(self, kin):
+        kin.clear_homing_state("z")
+        z_homing_state = Homing(self.printer)
+        z_homing_state.set_axes([2])
+        kin.home(z_homing_state)
     def _z_homing_probe_check(self, gcode):
         probe = self.printer.lookup_object('probe')
         toolhead = self.printer.lookup_object('toolhead')
@@ -364,8 +475,29 @@ class PrinterHoming:
         try:
             kin.home(homing_state)
             if 2 in axes and not skip_z_probe_check:
-                self._z_homing_probe_check(
-                    self.printer.lookup_object('gcode'))
+                gcode = self.printer.lookup_object('gcode')
+                max_probe_attempts = Z_HOMING_RETRIES + 1
+                for probe_attempt in range(max_probe_attempts):
+                    try:
+                        self._z_homing_probe_check(gcode)
+                        break
+                    except self.printer.command_error as e:
+                        err = str(e)
+                        if self.printer.is_shutdown():
+                            raise
+                        if (probe_attempt >= max_probe_attempts - 1
+                                or not Homing._is_z_homing_retryable_error(
+                                    err)):
+                            raise
+                        gcode.respond_info(
+                            "Z homing probe check failed (%s),"
+                            " will re-home Z" % (err,))
+                        logging.info(
+                            "Z homing probe check failed (%s),"
+                            " re-home Z attempt %d/%d",
+                            err, probe_attempt + 1, Z_HOMING_RETRIES)
+                        self._prepare_z_rehome_from_probe_fail(kin)
+                        self._rehome_z_axis(kin)
         except self.printer.command_error:
             if self.printer.is_shutdown():
                 raise self.printer.command_error(
