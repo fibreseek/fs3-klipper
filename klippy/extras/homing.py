@@ -288,7 +288,7 @@ class Homing:
                             for rp, ad in zip(retractpos, axes_d)]
                 self.toolhead.set_position(startpos)
                 anisopos = None
-                if is_z_homing and cycle < homing_cycles - 1:
+                if is_z_homing:
                     kin = self.toolhead.get_kinematics()
                     anisopos = (homepos[2], kin.limits[2][0])
                     homepos[2] = -kin.limits[2][1]
@@ -389,6 +389,34 @@ class PrinterHoming:
             raise self.printer.command_error(
                 "The homing sensor was triggered before the Z-axis moved.")
         return epos
+    def _get_z_rail(self, kin):
+        if hasattr(kin, 'get_rails'):
+            return kin.get_rails()[2]
+        return kin.rails[2]
+    def _prepare_z_rehome_from_probe_fail(self, kin):
+        aniso = self.printer.lookup_object('aniso_bed_mesh')
+        aniso.stop_sampling()
+        z_rail = self._get_z_rail(kin)
+        kin.limits[2] = z_rail.get_range()
+        hi = z_rail.get_homing_info()
+        lift_z = max(hi.retract_dist * 2., 8.)
+        toolhead = self.printer.lookup_object('toolhead')
+        gcode = self.printer.lookup_object('gcode')
+        curpos = toolhead.get_position()
+        gcode.respond_info(
+            "Z re-home after probe check fail: cur Z=%.3f lift %.1f mm"
+            % (curpos[2], lift_z))
+        logging.info(
+            "Z re-home after probe check fail: cur Z=%.3f lift %.1f mm",
+            curpos[2], lift_z)
+        curpos[2] += lift_z
+        toolhead.move(curpos, hi.retract_speed)
+        gcode.run_script_from_command("M400\nG4 P200")
+    def _rehome_z_axis(self, kin):
+        kin.clear_homing_state("z")
+        z_homing_state = Homing(self.printer)
+        z_homing_state.set_axes([2])
+        kin.home(z_homing_state)
     def _z_homing_probe_check(self, gcode):
         probe = self.printer.lookup_object('probe')
         toolhead = self.printer.lookup_object('toolhead')
@@ -447,8 +475,29 @@ class PrinterHoming:
         try:
             kin.home(homing_state)
             if 2 in axes and not skip_z_probe_check:
-                self._z_homing_probe_check(
-                    self.printer.lookup_object('gcode'))
+                gcode = self.printer.lookup_object('gcode')
+                max_probe_attempts = Z_HOMING_RETRIES + 1
+                for probe_attempt in range(max_probe_attempts):
+                    try:
+                        self._z_homing_probe_check(gcode)
+                        break
+                    except self.printer.command_error as e:
+                        err = str(e)
+                        if self.printer.is_shutdown():
+                            raise
+                        if (probe_attempt >= max_probe_attempts - 1
+                                or not Homing._is_z_homing_retryable_error(
+                                    err)):
+                            raise
+                        gcode.respond_info(
+                            "Z homing probe check failed (%s),"
+                            " will re-home Z" % (err,))
+                        logging.info(
+                            "Z homing probe check failed (%s),"
+                            " re-home Z attempt %d/%d",
+                            err, probe_attempt + 1, Z_HOMING_RETRIES)
+                        self._prepare_z_rehome_from_probe_fail(kin)
+                        self._rehome_z_axis(kin)
         except self.printer.command_error:
             if self.printer.is_shutdown():
                 raise self.printer.command_error(
