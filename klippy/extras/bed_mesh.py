@@ -3,7 +3,7 @@
 # Copyright (C) 2018-2019 Eric Callahan <arksine.code@gmail.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging, math, json, collections
+import logging, math, json, collections, os, csv, time
 from . import probe, aniso_temp_compensation
 import numpy as np
 from scipy.spatial.distance import pdist, squareform
@@ -35,6 +35,74 @@ def constrain(val, min_val, max_val):
 # Linear interpolation between two values
 def lerp(t, v0, v1):
     return (1. - t) * v0 + t * v1
+
+def _is_temperature_mesh_profile(profile_name):
+    if not profile_name:
+        return False
+    return '@' in profile_name and profile_name.endswith('C')
+
+def calc_fast_bed_mesh_point_delta(
+        z_mesh, temp_cpst, mesh_source, x, y, temp_trig, z_trig,
+        probe_z_offset):
+    z_trig_normalized = z_trig - probe_z_offset
+    z_default = z_mesh.calc_z(x, y)
+    should_apply_temp_comp = not (
+        mesh_source == "active"
+        and _is_temperature_mesh_profile(z_mesh.get_profile_name())
+    )
+    z_comp = temp_cpst.predict(x, y, temp_trig) if should_apply_temp_comp else 0.0
+    z_predict = z_default + z_comp
+    z_delta = z_trig_normalized - z_predict
+    return {
+        'z_trig_normalized': z_trig_normalized,
+        'z_default': z_default,
+        'z_comp': z_comp,
+        'z_predict': z_predict,
+        'z_delta': z_delta,
+    }
+
+def calc_fast_bed_mesh_strategy(
+        z_deltas, max_abs_threshold, range_threshold, shift_apply_min=0.01):
+    z_shift = float(np.median(z_deltas))
+    residuals = [z - z_shift for z in z_deltas]
+    residual_max = max(residuals)
+    residual_min = min(residuals)
+    residual_range = residual_max - residual_min
+    residual_max_abs = max(abs(residual_max), abs(residual_min))
+    raw_max = max(z_deltas)
+    raw_min = min(z_deltas)
+    raw_range = raw_max - raw_min
+    raw_max_abs = max(abs(raw_max), abs(raw_min))
+
+    if raw_max_abs <= max_abs_threshold and raw_range <= range_threshold:
+        action = "load_profile_mesh"
+    elif residual_max_abs <= max_abs_threshold and residual_range <= range_threshold:
+        if abs(z_shift) >= shift_apply_min:
+            action = "apply_mesh_z_shift"
+        else:
+            action = "load_profile_mesh"
+    else:
+        action = "recalibrate_mesh"
+
+    return {
+        'action': action,
+        'z_shift': z_shift,
+        'residual_max': residual_max,
+        'residual_min': residual_min,
+        'residual_range': residual_range,
+        'residual_max_abs': residual_max_abs,
+        'raw_max': raw_max,
+        'raw_min': raw_min,
+        'raw_range': raw_range,
+        'raw_max_abs': raw_max_abs,
+    }
+
+def should_auto_save_calibrated_profile(temp_sampling_session, profile_name):
+    if profile_name is None:
+        return False
+    if temp_sampling_session is None:
+        return True
+    return not temp_sampling_session.get("baseline_profile_saved", False)
 
 # retrieve comma separated pair from config
 def parse_config_pair(config, option, default, minval=None, maxval=None):
@@ -212,6 +280,8 @@ class BedMesh:
         self.splitter = MoveSplitter(config, self.gcode)
         # setup persistent storage
         self.pmgr = ProfileManager(config, self)
+        self.runtime_mesh_path = os.path.expanduser(
+            "~/printer_data/config/bed_mesh_runtime_active.npz")
         self.save_profile = self.pmgr.save_profile
         # register gcodes
         self.gcode.register_command(
@@ -281,6 +351,60 @@ class BedMesh:
         gcode_move = self.printer.lookup_object('gcode_move')
         gcode_move.reset_last_position()
         self.update_status()
+    def save_runtime_mesh_snapshot(self, mesh=None, path=None):
+        z_mesh = mesh if mesh is not None else self.get_mesh()
+        if z_mesh is None:
+            logging.info("bed_mesh: runtime mesh snapshot skipped, no active mesh")
+            return False
+        probed_matrix = z_mesh.get_probed_matrix()
+        if not probed_matrix or not probed_matrix[0]:
+            logging.info(
+                "bed_mesh: runtime mesh snapshot skipped, probed matrix empty")
+            return False
+        save_path = os.path.expanduser(path or self.runtime_mesh_path)
+        save_dir = os.path.dirname(save_path)
+        try:
+            if save_dir:
+                os.makedirs(save_dir, exist_ok=True)
+            payload = {
+                "points": np.asarray(probed_matrix, dtype=np.float32),
+                "mesh_params_json": json.dumps(dict(z_mesh.get_mesh_params())),
+                "profile_name": z_mesh.get_profile_name(),
+            }
+            np.savez_compressed(save_path, **payload)
+            logging.info("bed_mesh: runtime mesh snapshot saved to %s", save_path)
+            return True
+        except Exception:
+            logging.exception(
+                "bed_mesh: failed to save runtime mesh snapshot to %s",
+                save_path)
+            return False
+    def load_runtime_mesh_snapshot(self, path=None):
+        load_path = os.path.expanduser(path or self.runtime_mesh_path)
+        if not os.path.exists(load_path):
+            logging.info(
+                "bed_mesh: runtime mesh snapshot missing: %s", load_path)
+            return False
+        try:
+            with np.load(load_path, allow_pickle=False) as data:
+                probed_matrix = data["points"].tolist()
+                raw_profile_name = data["profile_name"].item()
+                raw_params = json.loads(data["mesh_params_json"].item())
+            mesh_params = collections.OrderedDict()
+            for key, value_type in PROFILE_OPTIONS.items():
+                value = raw_params[key]
+                mesh_params[key] = value_type(value)
+            z_mesh = ZMesh(mesh_params, raw_profile_name)
+            z_mesh.build_mesh(probed_matrix)
+            self.set_mesh(z_mesh)
+            logging.info(
+                "bed_mesh: runtime mesh snapshot loaded from %s", load_path)
+            return True
+        except Exception:
+            logging.exception(
+                "bed_mesh: failed to load runtime mesh snapshot from %s",
+                load_path)
+            return False
     def get_z_factor(self, z_pos):
         z_pos += self.tool_offset
         if z_pos >= self.fade_end:
@@ -507,7 +631,20 @@ class ZrefMode:
 
 class BedMeshCalibrate:
     ALGOS = ['lagrange', 'bicubic']
+    TEMP_CSV_FIELDNAMES = (
+        "run_id",
+        "stage_index",
+        "stage_count",
+        "target_temp",
+        "measured_temp",
+        "row_index",
+        "col_index",
+        "x",
+        "y",
+        "z",
+    )
     def __init__(self, config, bedmesh):
+        self.config = config
         self.printer = config.get_printer()
         self.orig_config = {'radius': None, 'origin': None}
         self.radius = self.origin = None
@@ -527,6 +664,9 @@ class BedMeshCalibrate:
         except BedMeshError as e:
             raise config.error(str(e))
         self.temp_cpst = None # 温度补偿器
+        self._temp_sampling_session = None
+        self._temp_csv_session = None
+        self._temp_csv_dir = "~/printer_data/config/bed_mesh_samples"
         self._profile_name = "default"
         self.gcode = self.printer.lookup_object('gcode')
         self.gcode.register_command(
@@ -536,6 +676,222 @@ class BedMeshCalibrate:
             'BED_MESH_CALIBRATE_FAST', self.cmd_BED_MESH_CALIBRATE_FAST)
         self.gcode.register_command(
             'BED_MESH_TEMP', self.cmd_BED_MESH_TEMP) # 温度补偿接口
+        self.gcode.register_command(
+            'BED_MESH_TEMP_LOAD', self.cmd_BED_MESH_TEMP_LOAD)
+    def _get_temp_comp(self):
+        if self.temp_cpst is None:
+            self.temp_cpst = aniso_temp_compensation.AnisoTempCompensation(
+                self.mesh_min, self.mesh_max,
+                self.mesh_config['x_count'],
+                self.mesh_config['y_count'],
+                root_config=self.config)
+        return self.temp_cpst
+    def _load_profile_mesh(self, profile_name):
+        profile = self.bedmesh.pmgr.profiles.get(profile_name, None)
+        if profile is None:
+            raise self.gcode.error(
+                f"bed_mesh: Unknown profile {profile_name}")
+        z_mesh = ZMesh(profile['mesh_params'], profile_name)
+        try:
+            z_mesh.build_mesh(profile['points'])
+        except BedMeshError as e:
+            raise self.gcode.error(str(e))
+        return z_mesh
+    def _get_probe_axis_values(self, mesh_params):
+        x_count = mesh_params['x_count']
+        y_count = mesh_params['y_count']
+        min_x = mesh_params['min_x']
+        max_x = mesh_params['max_x']
+        min_y = mesh_params['min_y']
+        max_y = mesh_params['max_y']
+        if x_count == 1:
+            xs = [float(min_x)]
+        else:
+            xs = [
+                float(min_x + (max_x - min_x) * idx / float(x_count - 1))
+                for idx in range(x_count)
+            ]
+        if y_count == 1:
+            ys = [float(min_y)]
+        else:
+            ys = [
+                float(min_y + (max_y - min_y) * idx / float(y_count - 1))
+                for idx in range(y_count)
+            ]
+        return xs, ys
+    def build_temperature_mesh(self, target_temp, profile_name="default"):
+        z_mesh = self._load_profile_mesh(profile_name)
+        temp_cpst = self._get_temp_comp()
+        if not temp_cpst.load_model():
+            logging.info(
+                "bed_mesh: temp model missing, skip predicted mesh build")
+            self.temp_cpst = None
+            return None
+        mesh_params = z_mesh.get_mesh_params()
+        xs, ys = self._get_probe_axis_values(mesh_params)
+        base_points = z_mesh.get_probed_matrix()
+        predicted_points = []
+        for y_idx, row in enumerate(base_points):
+            predicted_row = []
+            for x_idx, base_z in enumerate(row):
+                x = xs[x_idx]
+                y = ys[y_idx]
+                z_comp = temp_cpst.predict(x, y, target_temp)
+                predicted_row.append(round(float(base_z + z_comp), 6))
+            predicted_points.append(predicted_row)
+        predicted_name = "%s@%.1fC" % (profile_name, target_temp)
+        predicted_mesh = ZMesh(mesh_params, predicted_name)
+        predicted_mesh.build_mesh(predicted_points)
+        self.temp_cpst = None
+        return predicted_mesh
+    def load_temperature_mesh(self, target_temp, profile_name="default",
+                              save_snapshot=True):
+        predicted_mesh = self.build_temperature_mesh(target_temp, profile_name)
+        if predicted_mesh is None:
+            self.bedmesh.pmgr.load_profile(profile_name)
+            if save_snapshot:
+                self.bedmesh.save_runtime_mesh_snapshot()
+            return False
+        self.bedmesh.set_mesh(predicted_mesh)
+        if save_snapshot:
+            self.bedmesh.save_runtime_mesh_snapshot(predicted_mesh)
+        return True
+    def _parse_temp_list(self, gcmd):
+        raw = gcmd.get("TEMPS", None)
+        if raw is None:
+            return None
+        raw = raw.strip().strip('"').strip("'")
+        temps = [float(v.strip()) for v in raw.split(',') if v.strip()]
+        if not temps:
+            raise gcmd.error("Parameter 'TEMPS' must contain at least one value")
+        return temps
+    def _reset_temp_csv_session(self):
+        self._temp_csv_session = None
+    def _reset_temp_sampling_session(self):
+        self._temp_sampling_session = None
+    def _start_temp_sampling_session(self, temps):
+        if not temps:
+            self._reset_temp_sampling_session()
+            return None
+        self._temp_sampling_session = {
+            "temps": list(temps),
+            "baseline_profile_saved": False,
+        }
+        return self._temp_sampling_session
+    def _start_temp_csv_session(self, temps):
+        self._reset_temp_csv_session()
+        if not temps:
+            return None
+        sample_dir = os.path.expanduser(self._temp_csv_dir)
+        run_id = time.strftime("%Y%m%d_%H%M%S")
+        try:
+            os.makedirs(sample_dir, exist_ok=True)
+            filename = "bed_mesh_full_%s.csv" % (run_id,)
+            filepath = os.path.join(sample_dir, filename)
+            suffix = 1
+            while os.path.exists(filepath):
+                filename = "bed_mesh_full_%s_%02d.csv" % (run_id, suffix)
+                filepath = os.path.join(sample_dir, filename)
+                suffix += 1
+            session = {
+                "run_id": filename[len("bed_mesh_full_"):-len(".csv")],
+                "path": filepath,
+                "temps": list(temps),
+                "stage_index": 0,
+            }
+            with open(filepath, "w", newline="") as csv_file:
+                writer = csv.DictWriter(
+                    csv_file, fieldnames=self.TEMP_CSV_FIELDNAMES)
+                writer.writeheader()
+            self._temp_csv_session = session
+            logging.info("bed_mesh: sample csv session started: %s", filepath)
+            return session
+        except Exception:
+            logging.exception(
+                "bed_mesh: failed to start sample csv session in %s",
+                sample_dir)
+            self._reset_temp_csv_session()
+            return None
+    def _group_base_points_by_row(self, base_points):
+        if not base_points:
+            return []
+        grouped_rows = []
+        current_row = [base_points[0]]
+        prev_y = base_points[0][1]
+        for point in base_points[1:]:
+            if not isclose(point[1], prev_y, abs_tol=.1):
+                if len(current_row) > 1 and current_row[0][0] > current_row[-1][0]:
+                    current_row.reverse()
+                grouped_rows.append(current_row)
+                current_row = [point]
+            else:
+                current_row.append(point)
+            prev_y = point[1]
+        if len(current_row) > 1 and current_row[0][0] > current_row[-1][0]:
+            current_row.reverse()
+        grouped_rows.append(current_row)
+        return grouped_rows
+    def _build_temp_csv_rows(self, base_points, probed_matrix, measured_temp):
+        session = self._temp_csv_session
+        if session is None or not probed_matrix or not probed_matrix[0]:
+            return []
+        grouped_points = self._group_base_points_by_row(base_points)
+        if len(grouped_points) != len(probed_matrix):
+            raise BedMeshError(
+                "bed_mesh: sample csv point rows mismatch, base=%d probe=%d"
+                % (len(grouped_points), len(probed_matrix)))
+        stage_index = session["stage_index"]
+        stage_count = len(session["temps"])
+        target_temp = ""
+        if stage_index < stage_count:
+            target_temp = session["temps"][stage_index]
+        rows = []
+        for row_index, (row_points, row_values) in enumerate(
+                zip(grouped_points, probed_matrix)):
+            if len(row_points) != len(row_values):
+                raise BedMeshError(
+                    "bed_mesh: sample csv point count mismatch, row=%d base=%d probe=%d"
+                    % (row_index, len(row_points), len(row_values)))
+            for col_index, ((x_pos, y_pos), z_pos) in enumerate(
+                    zip(row_points, row_values)):
+                rows.append({
+                    "run_id": session["run_id"],
+                    "stage_index": stage_index,
+                    "stage_count": stage_count,
+                    "target_temp": target_temp,
+                    "measured_temp": measured_temp,
+                    "row_index": row_index,
+                    "col_index": col_index,
+                    "x": round(float(x_pos), 6),
+                    "y": round(float(y_pos), 6),
+                    "z": round(float(z_pos), 6),
+                })
+        return rows
+    def _append_temp_csv_sample(self, probed_matrix, measured_temp):
+        session = self._temp_csv_session
+        if session is None:
+            return False
+        try:
+            rows = self._build_temp_csv_rows(
+                self.probe_mgr.get_base_points(), probed_matrix, measured_temp)
+            if not rows:
+                logging.info("bed_mesh: sample csv skipped, probed matrix empty")
+                return False
+            with open(session["path"], "a", newline="") as csv_file:
+                writer = csv.DictWriter(
+                    csv_file, fieldnames=self.TEMP_CSV_FIELDNAMES)
+                writer.writerows(rows)
+            logging.info(
+                "bed_mesh: sample csv appended, stage=%d rows=%d path=%s",
+                session["stage_index"], len(rows), session["path"])
+            return True
+        except Exception:
+            logging.exception(
+                "bed_mesh: failed to append sample csv stage=%d path=%s",
+                session["stage_index"], session["path"])
+            return False
+        finally:
+            session["stage_index"] += 1
     def print_generated_points(self, print_func, truncate=False):
         x_offset = y_offset = 0.
         probe = self.printer.lookup_object('probe', None)
@@ -566,6 +922,38 @@ class BedMeshCalibrate:
                 pt = points[i]
                 print_func("%d (%.2f, %.2f), substituted points: %s"
                            % (i, pt[0], pt[1], repr(v)))
+    def _get_fast_bed_mesh_safe_bounds(self, mesh_min, mesh_max, probe_offsets):
+        min_x, min_y = mesh_min
+        max_x, max_y = mesh_max
+        x_margin = abs(float(probe_offsets[0]))
+        y_margin = abs(float(probe_offsets[1]))
+        safe_min_x = min_x + x_margin
+        safe_max_x = max_x - x_margin
+        safe_min_y = min_y + y_margin
+        safe_max_y = max_y - y_margin
+        if safe_min_x > safe_max_x or safe_min_y > safe_max_y:
+            raise BedMeshError(
+                "bed_mesh: fast bed mesh safe bounds invalid. "
+                "mesh_min=%s mesh_max=%s probe_offsets=%s"
+                % (mesh_min, mesh_max, probe_offsets))
+        return safe_min_x, safe_min_y, safe_max_x, safe_max_y
+    def _clamp_fast_bed_mesh_points(self, points, mesh_min, mesh_max,
+                                    probe_offsets):
+        safe_min_x, safe_min_y, safe_max_x, safe_max_y = \
+            self._get_fast_bed_mesh_safe_bounds(
+                mesh_min, mesh_max, probe_offsets)
+        clamped_points = []
+        seen = set()
+        for x, y in points:
+            clamped_x = constrain(float(x), safe_min_x, safe_max_x)
+            clamped_y = constrain(float(y), safe_min_y, safe_max_y)
+            key = (round(clamped_x, 6), round(clamped_y, 6))
+            if key in seen:
+                continue
+            seen.add(key)
+            clamped_points.append([clamped_x, clamped_y])
+        return clamped_points, (
+            safe_min_x, safe_min_y), (safe_max_x, safe_max_y)
     def _init_mesh_config(self, config):
         mesh_cfg = self.mesh_config
         orig_cfg = self.orig_config
@@ -846,6 +1234,7 @@ class BedMeshCalibrate:
         self._profile_name = gcmd.get('PROFILE', "default")
         if not self._profile_name.strip():
             raise gcmd.error("Value for parameter 'PROFILE' must be specified")
+        active_mesh = self.bedmesh.get_mesh()
         self.bedmesh.set_mesh(None)
         try:
             self.update_config(gcmd)
@@ -875,95 +1264,206 @@ class BedMeshCalibrate:
         poffset = (0., 0., 0.) # 探针偏移初值
         if self.probe_mgr.probe_helper.use_offsets:
             poffset = pprobe.get_offsets() # 探针偏移更新
+        mesh_source = "profile"
+        if active_mesh is not None:
+            z_mesh = active_mesh
+            mesh_source = "active"
+        else:
+            z_mesh = self._load_profile_mesh(self._profile_name)
+        ref_mesh_params = z_mesh.get_mesh_params()
+        ref_mesh_min = (
+            float(ref_mesh_params['min_x']),
+            float(ref_mesh_params['min_y']))
+        ref_mesh_max = (
+            float(ref_mesh_params['max_x']),
+            float(ref_mesh_params['max_y']))
+        try:
+            raw_pts = [pt[:] for pt in pts]
+            pts, safe_min, safe_max = self._clamp_fast_bed_mesh_points(
+                pts, ref_mesh_min, ref_mesh_max, poffset)
+        except BedMeshError as e:
+            raise gcmd.error(str(e))
+        self.gcode.respond_info(
+            "[FAST_BED_MESH] start: profile=%s print_min=(%.2f, %.2f) "
+            "print_max=(%.2f, %.2f) toolhead=(%.2f, %.2f, %.2f) "
+            "probe_offset=(%.4f, %.4f, %.4f) ref_mesh_source=%s "
+            "ref_mesh_min=(%.2f, %.2f) ref_mesh_max=(%.2f, %.2f) "
+            "safe_min=(%.2f, %.2f) safe_max=(%.2f, %.2f) "
+            "raw_trig_pts=%s trig_pts=%s"
+            % (self._profile_name, pt_min[0], pt_min[1], pt_max[0], pt_max[1],
+               pt_now[0], pt_now[1], pt_now[2], poffset[0], poffset[1],
+               poffset[2], mesh_source,
+               ref_mesh_min[0], ref_mesh_min[1],
+               ref_mesh_max[0], ref_mesh_max[1],
+               safe_min[0], safe_min[1], safe_max[0], safe_max[1],
+               raw_pts, pts))
 
         # 4. 依次探点（参考cmd_PROBE方法）
-        trig_pts = [[pt, None] for pt in pts]
-        for i, (pt, _) in enumerate(trig_pts):
+        heater_bed = self.printer.lookup_object("heater_bed", None)
+        trig_pts = [[pt, None, 70.0] for pt in pts]
+        for i, (pt, _, _) in enumerate(trig_pts):
             pt[0] -= poffset[0] # 消除x轴探针偏移
             pt[1] -= poffset[1] # 消除y轴探针偏移
             # TODO: pt未包含z坐标，有待观察是否存在z运动干涉
             toolhead.manual_move(pt, 100) # 移动到目标坐标
             toolhead.wait_moves() # 等待移动完成
             trig_pt = probe.run_single_probe(pprobe, gcmd) # 触发探针测量
+            temp_trig = 70.0 # 当前点采样时的热床温度（基准值为70℃）
+            if heater_bed is not None:
+                temp_trig = heater_bed.get_status(0)['temperature']
             trig_pts[i][1] = trig_pt[2] # 保存触发时刻的目标点z坐标
+            trig_pts[i][2] = temp_trig # 保存触发时刻的热床温度
 
         # 5. 加载mesh（参考load_profile方法）
-        profile = self.bedmesh.pmgr.profiles.get(self._profile_name, None)
-        if profile is None:
-            raise gcmd.error(
-                f"bed_mesh: Unknown profile {self._profile_name}")
-        z_mesh = ZMesh(profile['mesh_params'], self._profile_name)
-        try:
-            z_mesh.build_mesh(profile['points'])
-        except BedMeshError as e:
-            raise gcmd.error(str(e))
-
         # 6. 计算偏差
-        temp_now = 70.0 # 当前热床温度（基准值为70℃）
-        heater_bed = self.printer.lookup_object("heater_bed", None)
-        if heater_bed is not None: # ["target"]期望温度, ["temperature"]实测温度
-            temp_now = heater_bed.get_status(0)['temperature']
+        self.gcode.respond_info(
+            "[FAST_BED_MESH] profile loaded: source=%s profile=%s "
+            "mesh_params=%s"
+            % (mesh_source, z_mesh.get_profile_name(), z_mesh.get_mesh_params()))
         
-        if self.temp_cpst is None: # 仅在有需要时再实例化
-            self.temp_cpst = aniso_temp_compensation.AnisoTempCompensation(
-                self.mesh_min, self.mesh_max,
-                self.mesh_config['x_count'],
-                self.mesh_config['y_count'])
+        temp_cpst = self._get_temp_comp()
         
-        z_delta_max, z_delta_min = float('-inf'), float('inf')
-        for pt, z_trig in trig_pts:
+        z_deltas = []
+        for pt, z_trig, temp_trig in trig_pts:
             x, y = float(pt[0]), float(pt[1])
-            # 点xy在default温度的绝对z
-            z_default = z_mesh.calc_z(x, y)
-            # 点xy从default温度到当前温度的相对补偿z
-            z_comp = self.temp_cpst.predict(x, y, temp_now)
-            # 点xy在当前温度的绝对z(预测估算的)
-            z_default += z_comp
-            # 点xy的实测z值与预测z值的偏差
-            z_delta = z_trig - z_default
-            if z_delta > z_delta_max:
-                z_delta_max = z_delta
-            if z_delta < z_delta_min:
-                z_delta_min = z_delta
-        z_delta_range = z_delta_max - z_delta_min
+            point_delta = calc_fast_bed_mesh_point_delta(
+                z_mesh=z_mesh,
+                temp_cpst=temp_cpst,
+                mesh_source=mesh_source,
+                x=x, y=y,
+                temp_trig=temp_trig,
+                z_trig=z_trig,
+                probe_z_offset=poffset[2],
+            )
+            z_trig_normalized = point_delta['z_trig_normalized']
+            z_default = point_delta['z_default']
+            z_comp = point_delta['z_comp']
+            z_predict = point_delta['z_predict']
+            z_delta = point_delta['z_delta']
+            self.gcode.respond_info(
+                "[FAST_BED_MESH] point: x=%.2f y=%.2f temp_trig=%.2f "
+                "z_trig=%.6f z_trig_norm=%.6f z_default=%.6f z_comp=%.6f "
+                "z_predict=%.6f z_delta=%.6f"
+                % (x, y, temp_trig, z_trig, z_trig_normalized,
+                   z_default, z_comp,
+                   z_predict, z_delta))
+            z_deltas.append(z_delta)
         self.temp_cpst = None # 使用完毕及时释放内存
 
         # 7. 分类处理
-        Z_DELTA_THRESHOLD = 0.02 # 容许的z偏差阈值
-        if Z_DELTA_THRESHOLD > z_delta_max: # 偏差不大，不必重新探点
-        # if Z_DELTA_THRESHOLD > z_delta_range * 0.5: # 偏差不大，不必重新探点
-            # z_offset = (z_delta_max + z_delta_min) * 0.5 # 临时更新z偏移
-            self.bedmesh.set_mesh(z_mesh) # 使用default bed_mesh
-        else: # 差值太大，重新探床 model_leveling
+        # 单点探测误差约 ±0.03mm，因此快速调平不能用 0.02mm 这么严
+        Z_MAX_ABS_THRESHOLD = 0.06   # 单点最大绝对偏差阈值
+        Z_RANGE_THRESHOLD = 0.06     # 多点偏差极差阈值，用于判断床面形状是否变化
+
+        strategy = calc_fast_bed_mesh_strategy(
+            z_deltas,
+            max_abs_threshold=Z_MAX_ABS_THRESHOLD,
+            range_threshold=Z_RANGE_THRESHOLD,
+        )
+
+        if strategy['action'] == "load_profile_mesh":
+            self.gcode.respond_info(
+                "[FAST_BED_MESH] accepted: "
+                "max_abs_threshold=%.6f range_threshold=%.6f "
+                "z_delta_max=%.6f z_delta_min=%.6f "
+                "z_delta_range=%.6f max_abs_delta=%.6f "
+                "z_shift=%.6f residual_max_abs=%.6f residual_range=%.6f "
+                "action=load_profile_mesh"
+                % (
+                    Z_MAX_ABS_THRESHOLD, Z_RANGE_THRESHOLD,
+                    strategy['raw_max'], strategy['raw_min'],
+                    strategy['raw_range'], strategy['raw_max_abs'],
+                    strategy['z_shift'], strategy['residual_max_abs'],
+                    strategy['residual_range']
+                )
+            )
+            self.bedmesh.set_mesh(z_mesh)
+            self.bedmesh.save_runtime_mesh_snapshot(z_mesh)
+        elif strategy['action'] == "apply_mesh_z_shift":
+            z_mesh.set_mesh_z_shift(strategy['z_shift'])
+            self.gcode.respond_info(
+                "[FAST_BED_MESH] accepted: "
+                "max_abs_threshold=%.6f range_threshold=%.6f "
+                "z_delta_max=%.6f z_delta_min=%.6f "
+                "z_delta_range=%.6f max_abs_delta=%.6f "
+                "z_shift=%.6f residual_max_abs=%.6f residual_range=%.6f "
+                "action=apply_mesh_z_shift"
+                % (
+                    Z_MAX_ABS_THRESHOLD, Z_RANGE_THRESHOLD,
+                    strategy['raw_max'], strategy['raw_min'],
+                    strategy['raw_range'], strategy['raw_max_abs'],
+                    strategy['z_shift'], strategy['residual_max_abs'],
+                    strategy['residual_range']
+                )
+            )
+            self.bedmesh.set_mesh(z_mesh)
+            self.bedmesh.save_runtime_mesh_snapshot(z_mesh)
+        else:
+            self.gcode.respond_info(
+                "[FAST_BED_MESH] rejected: "
+                "max_abs_threshold=%.6f range_threshold=%.6f "
+                "z_delta_max=%.6f z_delta_min=%.6f "
+                "z_delta_range=%.6f max_abs_delta=%.6f "
+                "z_shift=%.6f residual_max_abs=%.6f residual_range=%.6f "
+                "action=recalibrate_mesh"
+                % (
+                    Z_MAX_ABS_THRESHOLD, Z_RANGE_THRESHOLD,
+                    strategy['raw_max'], strategy['raw_min'],
+                    strategy['raw_range'], strategy['raw_max_abs'],
+                    strategy['z_shift'], strategy['residual_max_abs'],
+                    strategy['residual_range']
+                )
+            )
             self.gcode.run_script_from_command(
                 "BED_MESH_CLEAR\n"
                 f"BED_MESH_CALIBRATE {gcmd.get_raw_command_parameters()}\n"
                 "BED_MESH_PROFILE SAVE=model_leveling\n"
                 "BED_MESH_PROFILE LOAD=model_leveling\n"
-                "G1 Z10 F600\n"# 下降Z轴到10mm, 移动到清洁位置
-                )
-
+                "G1 Z10 F600\n"
+            )
+            self.bedmesh.save_runtime_mesh_snapshot()
+    def cmd_BED_MESH_TEMP_LOAD(self, gcmd):
+        target_temp = gcmd.get_float('TEMP')
+        profile_name = gcmd.get('PROFILE', "default")
+        predicted_loaded = self.load_temperature_mesh(
+            target_temp, profile_name=profile_name, save_snapshot=True)
+        if predicted_loaded:
+            self.gcode.respond_info(
+                "[BED_MESH_TEMP_LOAD] predicted mesh loaded: profile=%s temp=%.2f"
+                % (profile_name, target_temp))
+        else:
+            self.gcode.respond_info(
+                "[BED_MESH_TEMP_LOAD] predicted mesh unavailable, fallback profile=%s temp=%.2f"
+                % (profile_name, target_temp))
     def cmd_BED_MESH_TEMP(self, gcmd):
         flag = gcmd.get_int('P', 0)
-        if flag == 1:
+        if flag == 0:
+            temps = self._parse_temp_list(gcmd)
+            temp_cpst = self._get_temp_comp()
+            temp_cpst.reset(val_t=temps)
+            self._start_temp_sampling_session(temps)
+            self._start_temp_csv_session(temps)
+        elif flag == 1:
             temp_now = None
             heater_bed = self.printer.lookup_object("heater_bed", None)
             if heater_bed is not None: # ["target"]期望温度, ["temperature"]实测温度
                 temp_now = heater_bed.get_status(0)["temperature"]
 
             z_mesh = self.bedmesh.get_mesh()
+            if z_mesh is None:
+                logging.info("bed_mesh: temp sample skipped, no active mesh")
+                self._append_temp_csv_sample([], temp_now)
+                return
             probed_matrix = z_mesh.get_probed_matrix()
-            if self.temp_cpst is None: # 仅在有需要时再实例化
-                self.temp_cpst = aniso_temp_compensation.AnisoTempCompensation(
-                    self.mesh_min, self.mesh_max,
-                    self.mesh_config['x_count'],
-                    self.mesh_config['y_count'])
-            self.temp_cpst.receive(probed_matrix, temp_now)
+            self._get_temp_comp().receive(probed_matrix, temp_now)
+            self._append_temp_csv_sample(probed_matrix, temp_now)
         elif flag == 2:
             def clean():
                 self.temp_cpst = None # 使用完毕，及时释放内存
+                self._reset_temp_sampling_session()
+                self._reset_temp_csv_session()
             reactor = self.printer.get_reactor()
-            self.temp_cpst.fit(reactor, clean)
+            self._get_temp_comp().fit(reactor, clean)
 
     def probe_finalize(self, offsets, positions):
         z_offset = offsets[2]
@@ -1098,8 +1598,20 @@ class BedMeshCalibrate:
             z_mesh.set_zero_reference(*zero_ref_pos)
         self.bedmesh.set_mesh(z_mesh)
         self.gcode.respond_info("Mesh Bed Leveling Complete")
-        if self._profile_name is not None:
+        if should_auto_save_calibrated_profile(
+                self._temp_sampling_session, self._profile_name):
             self.bedmesh.save_profile(self._profile_name)
+            if self._temp_sampling_session is not None:
+                self._temp_sampling_session["baseline_profile_saved"] = True
+        elif self._profile_name is not None:
+            logging.info(
+                "bed_mesh: skip auto-save profile [%s] during temperature "
+                "sampling baseline_profile_saved=%s csv_stage=%s",
+                self._profile_name,
+                self._temp_sampling_session.get("baseline_profile_saved", None)
+                if self._temp_sampling_session is not None else None,
+                self._temp_csv_session.get("stage_index", None)
+                if self._temp_csv_session is not None else None)
     def _dump_points(self, probed_pts, corrected_pts, offsets):
         # logs generated points with offset applied, points received
         # from the finalize callback, and the list of corrected points
@@ -1639,6 +2151,7 @@ class ZMesh:
         self.probed_matrix = self.mesh_matrix = None
         self.mesh_params = params
         self.mesh_offsets = [0., 0.]
+        self.mesh_z_shift = 0.
         logging.debug('bed_mesh: probe/mesh parameters:')
         for key, value in self.mesh_params.items():
             logging.debug("%s :  %s" % (key, value))
@@ -1674,12 +2187,12 @@ class ZMesh:
                            (self.mesh_y_count - 1)
     def get_mesh_matrix(self):
         if self.mesh_matrix is not None:
-            return [[round(z, 6) for z in line]
+            return [[round(z + self.mesh_z_shift, 6) for z in line]
                     for line in self.mesh_matrix]
         return [[]]
     def get_probed_matrix(self):
         if self.probed_matrix is not None:
-            return [[round(z, 6) for z in line]
+            return [[round(z + self.mesh_z_shift, 6) for z in line]
                     for line in self.probed_matrix]
         return [[]]
     def get_mesh_params(self):
@@ -1735,6 +2248,8 @@ class ZMesh:
         for i, o in enumerate(offsets):
             if o is not None:
                 self.mesh_offsets[i] = o
+    def set_mesh_z_shift(self, z_shift):
+        self.mesh_z_shift = z_shift
     def get_x_coordinate(self, index):
         return self.mesh_x_min + self.mesh_x_dist * index
     def get_y_coordinate(self, index):
@@ -1746,14 +2261,14 @@ class ZMesh:
             ty, yidx = self._get_linear_index(y + self.mesh_offsets[1], 1)
             z0 = lerp(tx, tbl[yidx][xidx], tbl[yidx][xidx+1])
             z1 = lerp(tx, tbl[yidx+1][xidx], tbl[yidx+1][xidx+1])
-            return lerp(ty, z0, z1)
+            return lerp(ty, z0, z1) + self.mesh_z_shift
         else:
             # No mesh table generated, no z-adjustment
             return 0.
     def get_z_range(self):
         if self.mesh_matrix is not None:
-            mesh_min = min([min(x) for x in self.mesh_matrix])
-            mesh_max = max([max(x) for x in self.mesh_matrix])
+            mesh_min = min([min(x) for x in self.mesh_matrix]) + self.mesh_z_shift
+            mesh_max = max([max(x) for x in self.mesh_matrix]) + self.mesh_z_shift
             return mesh_min, mesh_max
         else:
             return 0., 0.
@@ -1761,6 +2276,7 @@ class ZMesh:
         if self.mesh_matrix is not None:
             avg_z = (sum([sum(x) for x in self.mesh_matrix]) /
                      sum([len(x) for x in self.mesh_matrix]))
+            avg_z += self.mesh_z_shift
             # Round average to the nearest 100th.  This
             # should produce an offset that is divisible by common
             # z step distances
@@ -2048,6 +2564,7 @@ class ProfileManager:
         except BedMeshError as e:
             raise self.gcode.error(str(e))
         self.bedmesh.set_mesh(z_mesh)
+        self.bedmesh.save_runtime_mesh_snapshot(z_mesh)
     def remove_profile(self, prof_name):
         if prof_name in self.profiles:
             configfile = self.printer.lookup_object('configfile')
@@ -2080,12 +2597,7 @@ class ProfileManager:
                         "Value for parameter '%s' must be specified" % (key)
                     )
                 
-                if name == "default" and key == 'SAVE':
-                    gcmd.respond_info(
-                        "Profile 'default' is reserved, please choose"
-                        " another profile name.")
-                else:
-                    func(name)
+                func(name)
                 return
         gcmd.respond_info("Invalid syntax '%s'" % (gcmd.get_commandline(),))
 
