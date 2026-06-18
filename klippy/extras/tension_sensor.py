@@ -75,6 +75,7 @@ class MySerial:
         self._poll_sample_counter = 0
         self._auto_baseline_requested = False
         self._auto_baseline_pending_frames = 0
+        self._awaiting_first_auto_baseline = False
         self._skip_jam_detection = False
         self._baseline_update_running = False
         self._baseline_phase = None
@@ -537,6 +538,8 @@ class MySerial:
         
         if self._skip_jam_detection:
             return False, "NORMAL", "baseline capture (jam check skipped)"
+        if self._awaiting_first_auto_baseline:
+            return False, "NORMAL", "awaiting first auto baseline (jam check skipped)"
         
         if self.force_baseline is None:
             return False, "COLLECTING", "no baseline (run TENSION_UPDATE_BASELINE)"
@@ -772,6 +775,13 @@ class MySerial:
 
             self.force_baseline = baseline
             self.detection_buffer.clear()
+            if self._awaiting_first_auto_baseline:
+                self._awaiting_first_auto_baseline = False
+                logging.info(
+                    "tension_sensor: first auto baseline complete, "
+                    "jam detection enabled (baseline=%s)",
+                    baseline,
+                )
             is_baseline_jam, baseline_reason = self._evaluate_baseline_jam(
                 baseline
             )
@@ -999,6 +1009,7 @@ class MySerial:
         self._detection_baseline_active = True
         self._detection_start_baseline = None
         self._baseline_jam_streak = 0
+        self._awaiting_first_auto_baseline = self.jam_detection_enabled
         self._auto_baseline_requested = True
         self._auto_baseline_pending_frames = self.auto_baseline_discard_frames
         mode = "DETECTION" if self.jam_detection_enabled else "LOG_ONLY"
@@ -1007,6 +1018,14 @@ class MySerial:
             f"klipper.log={'ON' if self.polling_log_enabled else 'OFF'} "
             f"mode={mode}"
         )
+        if self.jam_detection_enabled:
+            discard = self.auto_baseline_discard_frames
+            capture = self.baseline_sample_count * 2
+            gcmd.respond_info(
+                "Jam check disabled until first auto baseline completes "
+                "(after %d discard frames + %d capture samples)."
+                % (discard, capture)
+            )
         gcmd.respond_info(
             f"Auto baseline update scheduled after "
             f"{self.auto_baseline_discard_frames} frames "
@@ -1082,6 +1101,7 @@ class MySerial:
         self._temp_paused = False
         self._auto_baseline_requested = False
         self._auto_baseline_pending_frames = 0
+        self._awaiting_first_auto_baseline = False
         self.polling_enabled = True
         self._poll_sample_counter = 0
         self.reactor.update_timer(self._polling_timer, self.reactor.NOW)
@@ -1100,6 +1120,7 @@ class MySerial:
         self._temp_paused = False
         self._auto_baseline_requested = False
         self._auto_baseline_pending_frames = 0
+        self._awaiting_first_auto_baseline = False
         self._reset_detection_baseline_tracking()
         self.reactor.update_timer(self._polling_timer, self.reactor.NEVER)
         self._close_spi_if_idle()
@@ -1156,6 +1177,10 @@ class MySerial:
                     else:
                         logging.info(
                             "Auto baseline update skipped: %s", reason
+                        )
+                        self._auto_baseline_requested = True
+                        self._auto_baseline_pending_frames = (
+                            self.auto_baseline_discard_frames
                         )
         except Exception as e:
             logging.error(f"Polling error: {e}")
