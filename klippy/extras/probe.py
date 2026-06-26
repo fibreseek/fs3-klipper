@@ -573,6 +573,8 @@ class ProbeSessionHelper:
         # Session state
         self.hw_probe_session = None
         self.results = []
+        self.probe_point_num = None
+        self.probe_point_total = None
         # Register event handlers
         self.printer.register_event_handler("gcode:command_error",
                                             self._handle_command_error)
@@ -590,7 +592,12 @@ class ProbeSessionHelper:
             self._probe_state_error()
         self.hw_probe_session = self.start_session_cb(gcmd)
         self.results = []
+        self.probe_point_num = None
+        self.probe_point_total = None
         return self
+    def set_probe_point_num(self, point_num, total=None):
+        self.probe_point_num = point_num
+        self.probe_point_total = total
     def end_probe_session(self):
         hw_probe_session = self.hw_probe_session
         if hw_probe_session is None:
@@ -668,7 +675,14 @@ class ProbeSessionHelper:
         # Calculate result
         epos = calc_probe_z_average(positions, params['samples_result'])
         # 参与最终特征值计算的z_posistions，以及特征值z_eigen_value
-        gcode.respond_info(f"zpos=[{', '.join(f'{x[2]:.6f}' for x in positions)}], zev={epos[2]:.6f}")
+        point_info = ""
+        if self.probe_point_num is not None:
+            if self.probe_point_total is not None:
+                point_info = f"point={self.probe_point_num}/{self.probe_point_total}, "
+            else:
+                point_info = f"point={self.probe_point_num}, "
+        prefix = "[BED_LEVELING] " if self.probe_point_num is not None else ""
+        gcode.respond_info(f"{prefix}{point_info}zpos=[{', '.join(f'{x[2]:.6f}' for x in positions)}], zev={epos[2]:.6f}")
         self.results.append(epos)
     def pull_probed_results(self):
         res = self.results
@@ -781,6 +795,7 @@ class ProbePointsHelper:
                 # Caller wants a "retry" - restart probing
                 probe_num = 0
             self._move_next(probe_num)
+            probe_session.set_probe_point_num(probe_num + 1, len(self.probe_points))
             probe_session.run_probe(gcmd)
             probe_num += 1
         probe_session.end_probe_session()

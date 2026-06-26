@@ -635,6 +635,44 @@ class VirtualSD:
         result = z_factor * (raw - fade_target) + fade_target
         logging.info("virtual_sdcard: bed_mesh Z: %.4f, result: %.4f" % (raw, result))
         return result
+    def _restore_recovery_bed_mesh(self, gcmd, file_info):
+        bed_mesh = self.printer.lookup_object('bed_mesh', None)
+        if bed_mesh is None:
+            gcmd.respond_raw("No bed_mesh object, skip recovery mesh restore")
+            return False
+
+        if bed_mesh.load_runtime_mesh_snapshot():
+            gcmd.respond_raw("Loading recovery bed mesh runtime snapshot")
+            return True
+
+        bed_temp = file_info.get('bed_temp')
+        if bed_temp is not None:
+            try:
+                predicted_loaded = bed_mesh.bmc.load_temperature_mesh(
+                    float(bed_temp), profile_name="default",
+                    save_snapshot=False)
+                if predicted_loaded:
+                    gcmd.respond_raw(
+                        "Loading predicted recovery bed mesh from file_info.bed_temp: %.1f"
+                        % (bed_temp,))
+                else:
+                    gcmd.respond_raw(
+                        "Recovery temp model unavailable, fallback to default mesh: %.1f"
+                        % (bed_temp,))
+                return True
+            except Exception:
+                logging.exception(
+                    "virtual_sdcard: failed to build recovery predicted mesh")
+
+        gcmd.respond_raw(
+            "Recovery bed temperature missing, loading default mesh only")
+        try:
+            bed_mesh.pmgr.load_profile("default")
+            return True
+        except Exception:
+            logging.exception(
+                "virtual_sdcard: failed to load default recovery mesh")
+            return False
     
     def _run_script_list(self, scripts, label):
         if not scripts:
@@ -752,14 +790,7 @@ class VirtualSD:
         # gcode_script.append("SET_KINEMATIC_POSITION X=%.3f Y=%.3f" % (temp_x, temp_y))
         
         # 加载调平数据（须在 SET_KINEMATIC_POSITION 之前执行，以便叠加网床 Z）
-        if self.config.has_section('bed_mesh model_leveling'):
-            gcode_script.append("BED_MESH_PROFILE LOAD=model_leveling")
-            gcmd.respond_raw("Loading bed mesh profile: model_leveling")
-            mesh_profile_loaded = True
-        elif self.config.has_section('bed_mesh default'):
-            gcode_script.append("BED_MESH_PROFILE LOAD=default")
-            gcmd.respond_raw("Loading bed mesh profile: default")
-            mesh_profile_loaded = True
+        mesh_profile_loaded = self._restore_recovery_bed_mesh(gcmd, file_info)
 
         self._run_script_list(gcode_script, "Prepare applying recovery parameters...")
 
@@ -834,6 +865,8 @@ class VirtualSD:
         logging.info(
             "virtual_sdcard recover resume: seek=%d first_line=%s",
             self.file_position, preview_line)
+
+        self._restore_recovery_bed_mesh(gcmd, self.powerloss_info)
         
         # Apply recovered parameters
         self._apply_recovery_parameters(gcmd, self.powerloss_info)

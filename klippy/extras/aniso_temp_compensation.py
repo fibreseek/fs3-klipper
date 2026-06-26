@@ -5,9 +5,32 @@ import logging, os
 class error(Exception):
     pass
 
+def _limit_extrapolated_z(pred_z, edge_z):
+    if not np.isfinite(pred_z):
+        return float(edge_z) if np.isfinite(edge_z) else 0.0
+    if not np.isfinite(edge_z):
+        return 0.0
+    if edge_z >= 0.0:
+        return max(float(pred_z), 0.0)
+    return min(float(pred_z), 0.0)
+
+def predict_limited_linear_extrapolation(axis_values, z_values, target, edge_index):
+    axis_values = np.asarray(axis_values, dtype=np.float32)
+    z_values = np.asarray(z_values, dtype=np.float32)
+    edge_z = float(z_values[edge_index])
+    valid_mask = np.isfinite(axis_values) & np.isfinite(z_values)
+    if np.count_nonzero(valid_mask) < 2:
+        return edge_z
+    try:
+        coeffs = np.polyfit(axis_values[valid_mask], z_values[valid_mask], 1)
+        pred_z = float(np.polyval(coeffs, target))
+    except Exception:
+        return edge_z
+    return _limit_extrapolated_z(pred_z, edge_z)
+
 class AnisoTempCompensation:
     # 热床温度补偿器，用于快速调平的跨温度对比
-    def __init__(self, mesh_min, mesh_max, n_x, n_y):
+    def __init__(self, mesh_min, mesh_max, n_x, n_y, root_config=None):
         """
         初始化温度形变补偿器
 
@@ -30,23 +53,41 @@ class AnisoTempCompensation:
         self.val_x = np.linspace(mesh_min[0], mesh_max[0], n_x)
         self.val_y = np.linspace(mesh_min[1], mesh_max[1], n_y)
         # TODO: 最好写成config参数，校准宏也要同步读取
-        self.val_t = np.array([30.0, 70.0], dtype=np.float32)
+        self.val_t = np.array([55.0, 100.0], dtype=np.float32)
         self.val_z = []
 
         self.n_x = n_x
         self.n_y = n_y
         self.n_t = len(self.val_t)
 
-        # TODO: 需同步stepper_x模块: position_min, position_max
         self.limit_x = (-43.5, 325.0)
-        # TODO: 需同步stepper_y模块: position_min, position_max
         self.limit_y = (-6.0, 339.0)
-        # TODO: 需同步heater_bed模块: min_temp, max_temp
         self.limit_t = (0.0, 130.0)
+        if root_config is not None:
+            self._sync_limits_from_config(root_config)
 
         self.built = False # 网格构建完成标志位
         self.fname = "~/printer_data/config/temp_comp.npz"
         self.clean_callback = None
+
+    def _sync_limits_from_config(self, root_config):
+        xconfig = root_config.getsection('stepper_x')
+        yconfig = root_config.getsection('stepper_y')
+        bedconfig = root_config.getsection('heater_bed')
+        self.limit_x = (
+            xconfig.getfloat('position_min', note_valid=False),
+            xconfig.getfloat('position_max', note_valid=False),
+        )
+        logging.debug(f"[TempComp] limit_x: {self.limit_x}")
+        self.limit_y = (
+            yconfig.getfloat('position_min', note_valid=False),
+            yconfig.getfloat('position_max', note_valid=False),
+        )
+        logging.debug(f"[TempComp] limit_y: {self.limit_y}")
+        self.limit_t = (
+            bedconfig.getfloat('min_temp'),
+            bedconfig.getfloat('max_temp'),
+        )
 
     def setup(self, val_t=None, limit_x=None, limit_y=None, limit_t=None):
         # TODO: 修改val_t和limit_t，可能存在干涉，需判断
@@ -60,7 +101,24 @@ class AnisoTempCompensation:
         if limit_t is not None:
             self.limit_t = limit_t
 
-    def receive(self, matrix_p):
+    def reset(self, val_t=None):
+        if val_t is not None:
+            self.setup(val_t=val_t)
+        self.val_z = []
+        self.grid_x = None
+        self.grid_y = None
+        self.grid_t = None
+        self.grid_z = None
+        self.built = False
+
+    def receive(self, matrix_p, temp_now):
+        if len(self.val_z) >= self.n_t:
+            raise error("[TempComp] sample count exceeds configured temperatures")
+        # 更新为实测热床温度
+        if temp_now is not None:
+            idx = len(self.val_z)
+            self.val_t[idx] = temp_now
+
         # 注意 matrix_p 是 (ny,nx) 形状的二维数组
         self.val_z.append(matrix_p)
         self.built = False
@@ -121,7 +179,7 @@ class AnisoTempCompensation:
         self.val_z = np.transpose(self.val_z, (2, 1, 0))  # (n_x, n_y, n_t)
 
         # 转为相对形变 Z 矩阵
-        base_z = self.val_z[...,-1:]
+        base_z = self.val_z[..., :1]
         self.val_z -= base_z
         del base_z
 
@@ -133,14 +191,43 @@ class AnisoTempCompensation:
         self.val_z = [] # 清空列表释放内存
 
         def process_space_z(eventtime):
+            core_x = self.grid_x[idx_head_x:idx_head_x + self.n_x]
+            core_y = self.grid_y[idx_head_y:idx_head_y + self.n_y]
+            t_count = self.grid_z.shape[2]
+            # 空间外推使用同一行/列的内部趋势预测，只限制反向越界。
+            # 这样真实边缘起翘可继续补偿，但不会把趋势外推到相反方向。
             if ext_head_x:
-                self.grid_z[0, :, :] = self.grid_z[1, :, :]
+                target_x = self.grid_x[0]
+                for j in range(idx_head_y, idx_head_y + self.n_y):
+                    for k in range(t_count):
+                        self.grid_z[0, j, k] = predict_limited_linear_extrapolation(
+                            core_x,
+                            self.grid_z[idx_head_x:idx_head_x + self.n_x, j, k],
+                            target_x, 0)
             if ext_tail_x:
-                self.grid_z[-1, :, :] = self.grid_z[-2, :, :]
+                target_x = self.grid_x[-1]
+                for j in range(idx_head_y, idx_head_y + self.n_y):
+                    for k in range(t_count):
+                        self.grid_z[-1, j, k] = predict_limited_linear_extrapolation(
+                            core_x,
+                            self.grid_z[idx_head_x:idx_head_x + self.n_x, j, k],
+                            target_x, -1)
             if ext_head_y:
-                self.grid_z[:, 0, :] = self.grid_z[:, 1, :]
+                target_y = self.grid_y[0]
+                for i in range(len_x):
+                    for k in range(t_count):
+                        self.grid_z[i, 0, k] = predict_limited_linear_extrapolation(
+                            core_y,
+                            self.grid_z[i, idx_head_y:idx_head_y + self.n_y, k],
+                            target_y, 0)
             if ext_tail_y:
-                self.grid_z[:, -1, :] = self.grid_z[:, -2, :]
+                target_y = self.grid_y[-1]
+                for i in range(len_x):
+                    for k in range(t_count):
+                        self.grid_z[i, -1, k] = predict_limited_linear_extrapolation(
+                            core_y,
+                            self.grid_z[i, idx_head_y:idx_head_y + self.n_y, k],
+                            target_y, -1)
             
             reactor.register_callback(lambda e: self.save_model())
 

@@ -419,6 +419,95 @@ class xyz_align:
                trigger_t1_y1, center_x1, center_y1))
         return center_x1, center_y1, trigger_z1
 
+    def _probe_z_trigger_step(self, x, y, trigger_press_z, context=""):
+        self.gcode.run_script_from_command(
+            "G90\n"
+            "G1 Z%.3f F600\n"
+            "G1 X%.3f Y%.3f F3000\n"
+            "G1 Z%.3f F180\n"
+            % (self.offset_z, x, y, trigger_press_z))
+
+        self.gcode.run_script_from_command("G91\n")
+        self.gcode.run_script_from_command("G1 Z2 F120\n")
+        self.gcode.run_script_from_command("G90\n")
+        self.gcode.run_script_from_command("M400\n")
+        self._send_align_trigger_query()
+        if not self._wait_align_trigger_response(
+                "probe_z_trigger_step %s" % context):
+            return None
+        if self.trigger_value != 1:
+            return None
+        return self.trigger_step_z
+
+    def probe_center_z_surround(self, center_x, center_y, tool=1, offset=2.0):
+        z_rotation_distance = self.session_z.getfloat('rotation_distance')
+        z_microsteps = self.session_z.getfloat('microsteps')
+        per_step_distance_z = z_rotation_distance / (z_microsteps * 200)
+
+        positions = [
+            ("center", center_x, center_y),
+            ("X+", center_x + offset, center_y),
+            ("X-", center_x - offset, center_y),
+            ("Y+", center_x, center_y + offset),
+            ("Y-", center_x, center_y - offset),
+        ]
+        step_results = {}
+        center_step_z = None
+        for name, x, y in positions:
+            trigger_step_z = self._probe_z_trigger_step(
+                x, y, self.offset_z_press, "%s T%d" % (name, tool))
+            if trigger_step_z is None:
+                msg = ("[NOZZLE_OFFSET_CALIBRATION] T%d %s Z surround probe "
+                       "failed" % (tool, name))
+                self.gcode.respond_info(msg)
+                logging.error(msg)
+                return None
+            step_results[name] = trigger_step_z
+            if name == "center":
+                center_step_z = trigger_step_z
+
+        center_z = center_step_z * per_step_distance_z
+        self.gcode.respond_info(
+            "[NOZZLE_OFFSET_CALIBRATION] T%d center Z flatness "
+            "(center_step=%d, center_Z=%.4f, offset=%.1fmm):"
+            % (tool, center_step_z, center_z, offset))
+        logging.info(
+            "T%d center Z flatness (center_step=%d, center_Z=%.4f, offset=%.1fmm):"
+            % (tool, center_step_z, center_z, offset))
+        for name in ("X+", "X-", "Y+", "Y-"):
+            step_diff = step_results[name] - center_step_z
+            z_val = step_results[name] * per_step_distance_z
+            diff = step_diff * per_step_distance_z
+            line = ("  %s: step=%d, Z=%.4f, delta=%.4f"
+                    % (name, step_results[name], z_val, diff))
+            self.gcode.respond_info(line)
+            logging.info("T%d center Z flatness %s" % (tool, line.strip()))
+
+        z_x_plus = step_results["X+"] * per_step_distance_z
+        z_x_minus = step_results["X-"] * per_step_distance_z
+        z_y_plus = step_results["Y+"] * per_step_distance_z
+        z_y_minus = step_results["Y-"] * per_step_distance_z
+        z_x_compensation = (z_x_plus - z_x_minus) / 2
+        z_y_compensation = (z_y_plus - z_y_minus) / 2
+        if abs(z_x_compensation) >= abs(z_y_compensation):
+            z_compensation = abs(z_x_compensation)
+            comp_axis = "X"
+        else:
+            z_compensation = abs(z_y_compensation)
+            comp_axis = "Y"
+        self.gcode.respond_info(
+            "[NOZZLE_OFFSET_CALIBRATION] T%d Z surround compensation "
+            "(X+=%.4f, X-=%.4f, comp=%.4f; "
+            "Y+=%.4f, Y-=%.4f, comp=%.4f; use=%s, val=%.4f)"
+            % (tool, z_x_plus, z_x_minus, z_x_compensation,
+               z_y_plus, z_y_minus, z_y_compensation,
+               comp_axis, z_compensation))
+        logging.info(
+            "T%d Z surround compensation X comp=%.4f Y comp=%.4f use=%s val=%.4f"
+            % (tool, z_x_compensation, z_y_compensation,
+               comp_axis, z_compensation))
+        return z_compensation
+
     def get_trigger_steps(self, center_x, center_y, trigger_press_z):
         trigger_step_z0 = 0
         init_step_x0 = 0
@@ -622,6 +711,15 @@ class xyz_align:
         self.t1_offset_x = center_x1
         self.t1_offset_y = center_y1
         self.offset_z = 12
+        z_surround_compensation = self.probe_center_z_surround(
+            center_x1, center_y1, tool=1, offset=1.5)
+        if z_surround_compensation is None:
+            self.gcode.respond_info(
+                "[NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=0 T1 center Z "
+                "flatness probe failed, aborting.")
+            self.gcode.run_script_from_command(
+                "RESTORE_GCODE_STATE NAME=pre_offset_state\n")
+            return
 
         results = []
         for _ in range(3):
@@ -659,7 +757,7 @@ class xyz_align:
 
         x_offset = center_x1 - center_x0
         y_offset = center_y1 - center_y0
-        z_offset = abs(trigger_z1 - trigger_z0)
+        z_offset = abs(trigger_z1 - trigger_z0) + z_surround_compensation
         self.gcode.run_script_from_command(
             "SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (x_offset))
         self.gcode.run_script_from_command(
@@ -667,8 +765,9 @@ class xyz_align:
         self.gcode.run_script_from_command(
             "SAVE_VARIABLE VARIABLE=zoffset VALUE=%f" % (z_offset))
         self.gcode.respond_info(
-            "[NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=1 x_offset=%f y_offset=%f z_offset=%f"
-            % (x_offset, y_offset, z_offset))
+            "[NOZZLE_OFFSET_CALIBRATION] XYZ_ALIGN=1 x_offset=%f y_offset=%f "
+            "z_offset=%f (z_surround_compensation=%f)"
+            % (x_offset, y_offset, z_offset, z_surround_compensation))
 
         self.t0_offset_x = center_x0
         self.t0_offset_y = center_y0
