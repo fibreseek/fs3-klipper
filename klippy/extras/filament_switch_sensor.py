@@ -48,11 +48,22 @@ class RunoutHelper:
             desc=self.cmd_SET_FILAMENT_SENSOR_DEBOUNCE_help)
     def _handle_ready(self):
         self.min_event_systime = self.reactor.monotonic() + 2.
+    def _is_printing_state(self):
+        print_stats = self.printer.lookup_object("print_stats")
+        return print_stats.state == "printing"
+    def _skip_deferred_runout(self):
+        logging.info(
+            "Filament Sensor %s: skip deferred runout, state=%s" %
+            (self.name, self.printer.lookup_object("print_stats").state))
+        self.min_event_systime = self.reactor.monotonic() + self.event_delay
     def _runout_event_handler(self, eventtime):
         # Pausing from inside an event requires that the pause portion
         # of pause_resume execute immediately.
         pause_prefix = ""
         if self.runout_pause:
+            if not self._is_printing_state():
+                self._skip_deferred_runout()
+                return
             pause_resume = self.printer.lookup_object('pause_resume')
             pause_resume.send_pause_command()
             pause_prefix = "PAUSE\n"
@@ -61,6 +72,9 @@ class RunoutHelper:
     def _insert_event_handler(self, eventtime):
         self._exec_gcode("", self.insert_gcode)
     def _exec_gcode(self, prefix, template):
+        if template is self.runout_gcode and not self._is_printing_state():
+            self._skip_deferred_runout()
+            return
         try:
             self.gcode.run_script(prefix + template.render() + "\nM400")
         except Exception:
