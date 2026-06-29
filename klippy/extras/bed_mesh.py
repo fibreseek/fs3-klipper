@@ -1229,6 +1229,19 @@ class BedMeshCalibrate:
             raise gcmd.error(str(e))
         self.probe_mgr.start_probe(gcmd)
 
+    def _run_fast_bed_mesh_recalibrate(self, gcmd, reason):
+        logging.info(
+            "bed_mesh: fast bed mesh fallback to recalibrate, reason=%s",
+            reason)
+        self.gcode.run_script_from_command(
+            "BED_MESH_CLEAR\n"
+            f"BED_MESH_CALIBRATE {gcmd.get_raw_command_parameters()}\n"
+            "BED_MESH_PROFILE SAVE=model_leveling\n"
+            "BED_MESH_PROFILE LOAD=model_leveling\n"
+            "G1 Z10 F600\n"
+        )
+        self.bedmesh.save_runtime_mesh_snapshot()
+
     def cmd_BED_MESH_CALIBRATE_FAST(self, gcmd):
         # 1. 卸载mesh（参考cmd_BED_MESH_CALIBRATE方法）
         self._profile_name = gcmd.get('PROFILE', "default")
@@ -1240,7 +1253,22 @@ class BedMeshCalibrate:
             self.update_config(gcmd)
         except BedMeshError as e:
             raise gcmd.error(str(e))
-        
+
+        mesh_source = "profile"
+        if active_mesh is not None:
+            z_mesh = active_mesh
+            mesh_source = "active"
+        else:
+            z_mesh = self._load_profile_mesh(self._profile_name)
+        temp_cpst = self._get_temp_comp()
+        if not temp_cpst.load_model():
+            self.gcode.respond_info(
+                "[FAST_BED_MESH] temp model missing: "
+                "action=recalibrate_mesh")
+            self.temp_cpst = None
+            self._run_fast_bed_mesh_recalibrate(gcmd, "temp_model_missing")
+            return
+
         # 2. 路径规划（旅行商问题）
         toolhead = self.printer.lookup_object('toolhead')
         pt_now = toolhead.get_position()
@@ -1264,12 +1292,6 @@ class BedMeshCalibrate:
         poffset = (0., 0., 0.) # 探针偏移初值
         if self.probe_mgr.probe_helper.use_offsets:
             poffset = pprobe.get_offsets() # 探针偏移更新
-        mesh_source = "profile"
-        if active_mesh is not None:
-            z_mesh = active_mesh
-            mesh_source = "active"
-        else:
-            z_mesh = self._load_profile_mesh(self._profile_name)
         ref_mesh_params = z_mesh.get_mesh_params()
         ref_mesh_min = (
             float(ref_mesh_params['min_x']),
@@ -1320,9 +1342,7 @@ class BedMeshCalibrate:
             "[FAST_BED_MESH] profile loaded: source=%s profile=%s "
             "mesh_params=%s"
             % (mesh_source, z_mesh.get_profile_name(), z_mesh.get_mesh_params()))
-        
-        temp_cpst = self._get_temp_comp()
-        
+
         z_deltas = []
         for pt, z_trig, temp_trig in trig_pts:
             x, y = float(pt[0]), float(pt[1])
@@ -1414,14 +1434,7 @@ class BedMeshCalibrate:
                     strategy['residual_range']
                 )
             )
-            self.gcode.run_script_from_command(
-                "BED_MESH_CLEAR\n"
-                f"BED_MESH_CALIBRATE {gcmd.get_raw_command_parameters()}\n"
-                "BED_MESH_PROFILE SAVE=model_leveling\n"
-                "BED_MESH_PROFILE LOAD=model_leveling\n"
-                "G1 Z10 F600\n"
-            )
-            self.bedmesh.save_runtime_mesh_snapshot()
+            self._run_fast_bed_mesh_recalibrate(gcmd, "strategy_rejected")
     def cmd_BED_MESH_TEMP_LOAD(self, gcmd):
         target_temp = gcmd.get_float('TEMP')
         profile_name = gcmd.get('PROFILE', "default")
