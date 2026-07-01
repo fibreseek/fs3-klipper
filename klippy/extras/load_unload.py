@@ -1633,6 +1633,7 @@ class LoadUnloadHandler:
 
         # ------ 阶段11：等待插入耗材 ------
         if load_step == State.WAIT_INSERT:
+            self.gcode.respond_info(f"[{channel_name} LOAD] STATE:11 WAIT_INSERT")
             filament_sensor = self.printer.lookup_object('filament_switch_sensor filament_sensor_3', None)
             sensor_status = filament_sensor.get_status(eventtime) if filament_sensor else {}
             if filament_sensor and sensor_status.get('filament_detected', False):
@@ -2184,7 +2185,8 @@ class LoadUnloadHandler:
             # P2通道释放废料
             if index == Channel.P2:
                 self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT")
-                self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
+                self.gcode.run_script_from_command("CLEAN_NOZZLE")
+                self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
             elif index == Channel.P1:
                 self.gcode.run_script_from_command("CLEAN_NOZZLE")
                 self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
