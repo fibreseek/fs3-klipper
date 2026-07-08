@@ -519,6 +519,9 @@ class LoadUnloadHandler:
         index = self.load_unload_index
         channel_name = self._get_channel_name(index)
 
+        if index == Channel.P2:
+            self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
+
         # 进入补料重试阶段（移除状态检查，避免时序问题）
         self.load_step = State.RETRYING
         self.load_distance = 0.0
@@ -1687,9 +1690,6 @@ class LoadUnloadHandler:
                 self.load_step = State.CONFIRM_EXTRUSION
                 self.gcode.respond_info(f"[{channel_name} LOAD] STATE:30 CONFIRM_EXTRUSION")
                 self.gcode.respond_info("ACTION:PROMPT_CONFIRM P2_EXTRUDED")
-                # P2通道需要冷却废料
-                # self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT WAIT_TIME=1000")
-                self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
                 return self.reactor.NEVER
 
             move_duration = step_length / speed_mm_s if speed_mm_s > 0 else self.load_step_time
@@ -1719,10 +1719,6 @@ class LoadUnloadHandler:
                 self.load_step = State.CONFIRM_EXTRUSION
                 self.gcode.respond_info(f"[{channel_name} LOAD] STATE:30 CONFIRM_EXTRUSION")
                 self.gcode.respond_info("ACTION:PROMPT_CONFIRM P2_EXTRUDED")
-
-                # P2通道需要冷却废料
-                # self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT WAIT_TIME=1000")
-                self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
                 return self.reactor.NEVER
 
             move_duration = retry_step / speed_mm_s if speed_mm_s > 0 else self.load_step_time
