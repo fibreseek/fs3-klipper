@@ -260,6 +260,18 @@ class LoadUnloadHandler:
 
 
         self.count = 0
+
+    def _run_gcode(self, script, from_command=False):
+        """按调用上下文安全执行 G-code。
+
+        from_command=True: 已在 G-code handler 内（持有 mutex），用 run_script_from_command
+        from_command=False: 定时器/事件等独立上下文，用 run_script 加锁
+        """
+        if from_command:
+            self.gcode.run_script_from_command(script)
+        else:
+            self.gcode.run_script(script)
+
     # ============================================================
     # G-code 命令实现
     # ============================================================
@@ -314,7 +326,7 @@ class LoadUnloadHandler:
         if target <= min_temp:
             gcmd.respond_info(f"[{channel_name} LOAD] ERROR: Temperature {target}C too low")
             return
-        self._sync_print_stats_load_unload("load_unload")
+        self._sync_print_stats_load_unload("load_unload", from_command=True)
 
         # 初始化状态变量
         self.load_unload_index = index
@@ -341,8 +353,8 @@ class LoadUnloadHandler:
 
         # F通道：立即设置debounce=1
         if index == Channel.F:
-            self.gcode.run_script_from_command(
-                "SET_FILAMENT_SENSOR_DEBOUNCE SENSOR=filament_sensor DELAY=1")
+            self._run_gcode(
+                "SET_FILAMENT_SENSOR_DEBOUNCE SENSOR=filament_sensor DELAY=1", from_command=True)
 
         # 停止P1堵料检测（防止上一次操作的堵料检测干扰新操作）
         self.printer.send_event("filament_clog:check_stop")
@@ -350,15 +362,15 @@ class LoadUnloadHandler:
 
         logger.info(f"[LOAD_FILAMENT] Calling _prepare_load()")
         # 扩展 idle_timeout（在准备进料之前）
-        self._extend_idle_timeout()
+        self._extend_idle_timeout(from_command=True)
         # 准备进料（移动到废料站、切换喷嘴等）
-        self._prepare_load()
+        self._prepare_load(from_command=True)
 
         # 只有非 P1 的情况下才设置目标温度
         # P1通道（L=0或L=1）: 初始化时不设置温度，保持当前温度，在阶段2(CLOG_DETECTION)设置50°C
         if index != Channel.P1:
             logger.info(f"[LOAD_FILAMENT] Setting heater temperature: M104 T{nozzle} S{target}")
-            self.gcode.run_script_from_command(f"M104 T{nozzle} S{target}")
+            self._run_gcode(f"M104 T{nozzle} S{target}", from_command=True)
         else:
             # P1通道：初始化时不设置温度，保持当前温度
             logger.info(f"[LOAD_FILAMENT] P1: Not setting initial temperature, keeping current temperature")
@@ -369,7 +381,7 @@ class LoadUnloadHandler:
         if index == Channel.P1:
             # P1通道，直接进入等待插入
             self.load_step = State.WAIT_INSERT
-            self.gcode.run_script_from_command("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=0")
+            self._run_gcode("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=0", from_command=True)
             gcmd.respond_info(f"[{channel_name} LOAD] STATE:11 WAIT_INSERT")
             # 启动核心处理定时器开始检测耗材
             self._start_process_timer(1.0)
@@ -426,7 +438,7 @@ class LoadUnloadHandler:
             gcmd.respond_info(f"[{channel_name} UNLOAD] ERROR: Extruder '{extruder_name}' not found")
             return
         min_temp = extruder.heater.min_extrude_temp
-        self._sync_print_stats_load_unload("load_unload")
+        self._sync_print_stats_load_unload("load_unload", from_command=True)
 
         # 初始化变量
         self.load_unload_nozzle = nozzle
@@ -440,21 +452,21 @@ class LoadUnloadHandler:
         self._stop_timeout_timer()
 
         # 扩展 idle_timeout（在准备退料之前）
-        self._extend_idle_timeout()
+        self._extend_idle_timeout(from_command=True)
         # 准备退料
-        self._prepare_unload()
+        self._prepare_unload(from_command=True)
 
         if index == Channel.F:
             # F通道直接退料（关闭最低挤出温度限制，允许冷挤出）
-            self.gcode.run_script_from_command("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=0")
+            self._run_gcode("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=0", from_command=True)
             self.load_step = State.UNLOADING
             gcmd.respond_info(f"[{channel_name} UNLOAD] STATE:51 UNLOADING")
-            self.gcode.run_script_from_command("M2800")  # 切断纤维
+            self._run_gcode("M2800", from_command=True)  # 切断纤维
             self._start_process_timer(0.1)
         else:
             # P1/P2需要预热
             if target > min_temp:
-                self.gcode.run_script_from_command(f"M104 T{nozzle} S{target}")
+                self._run_gcode(f"M104 T{nozzle} S{target}", from_command=True)
                 self.load_step = State.PREHEATING_UNLOAD
                 gcmd.respond_info(f"[{channel_name} UNLOAD] STATE:50 PREHEATING_UNLOAD T:{target}")
                 self._start_temp_timer(1.0)
@@ -496,14 +508,14 @@ class LoadUnloadHandler:
 
         if index == Channel.F:
             # F 通道：切断耗材纤维，进入阶段 40（降温、开风扇、V 进挤在 CONFIRM_CLEANED 执行）
-            self.gcode.run_script_from_command("M2800")
+            self._run_gcode("M2800", from_command=True)
             self.load_step = State.WAIT_USER_CLEAN
             self.user_confirmed = 0
             gcmd.respond_info(f"[{channel_name} LOAD] STATE:40 WAIT_USER_CLEAN")
             gcmd.respond_info(f"ACTION:PROMPT_CONFIRM {channel_name}_CLEANED")
         elif index == Channel.P2:
             # P2 通道直接结束逻辑（进入自动擦嘴流程）
-            self._finish_loadunload()
+            self._finish_loadunload(from_command=True)
 
     cmd_CONTINUE_LOAD_help = "继续补料（用户确认未出料）"
     def cmd_CONTINUE_LOAD(self, gcmd):
@@ -518,9 +530,6 @@ class LoadUnloadHandler:
         """
         index = self.load_unload_index
         channel_name = self._get_channel_name(index)
-
-        if index == Channel.P2:
-            self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
 
         # 进入补料重试阶段（移除状态检查，避免时序问题）
         self.load_step = State.RETRYING
@@ -548,18 +557,18 @@ class LoadUnloadHandler:
         if (index == Channel.F or index == Channel.P1) and load_step == State.WAIT_USER_CLEAN:
             if index == Channel.F:
                 # F 通道：用户确认清理完成后，执行 V 进挤 2mm、降温、开风扇，再进入自动擦嘴
-                self.gcode.run_script_from_command("M83")
-                self.gcode.run_script_from_command("ACTIVATE_LEFT_P_EXTRUDER")
-                self.gcode.run_script_from_command("G1 V2 F100")
+                self._run_gcode("M83", from_command=True)
+                self._run_gcode("ACTIVATE_LEFT_P_EXTRUDER", from_command=True)
+                self._run_gcode("G1 V2 F100", from_command=True)
                 nozzle = self.load_unload_nozzle
                 target = self.load_unload_temperature
                 cooling_temp = target - self.temperature_offset
-                self.gcode.run_script_from_command(f"M104 T{nozzle} S{cooling_temp}")
-            self._finish_loadunload()
+                self._run_gcode(f"M104 T{nozzle} S{cooling_temp}", from_command=True)
+            self._finish_loadunload(from_command=True)
         else:
             gcmd.respond_info(f"[{channel_name} LOAD] STATE:99 ERROR Invalid state")
 
-    def _exit_loadunload_on_timeout(self):
+    def _exit_loadunload_on_timeout(self, from_command=False):
         """
         超时退出进出料流程（内部方法，不输出状态码）
 
@@ -578,7 +587,7 @@ class LoadUnloadHandler:
         self._stop_process_timer()
         self._stop_temp_timer()
         self._stop_timeout_timer()
-        self._restore_idle_timeout()
+        self._restore_idle_timeout(from_command=from_command)
 
         # 停止P1堵料检测（如果已启动）
         self.printer.send_event("filament_clog:check_stop")
@@ -591,18 +600,18 @@ class LoadUnloadHandler:
         self.user_confirmed = 0
 
         # 恢复最低挤出温度限制
-        self.gcode.run_script_from_command("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=180")
+        self._run_gcode("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=180", from_command=from_command)
 
         # 关闭加热器
-        self.gcode.run_script_from_command("M104 T0 S0")
-        self.gcode.run_script_from_command("M104 T1 S0")
+        self._run_gcode("M104 T0 S0", from_command=from_command)
+        self._run_gcode("M104 T1 S0", from_command=from_command)
 
         # 关闭风扇（所有通道）
-        self.gcode.run_script_from_command("M106 P1 S0")
-        self.gcode.run_script_from_command("M106 P2 S0")
+        self._run_gcode("M106 P1 S0", from_command=from_command)
+        self._run_gcode("M106 P2 S0", from_command=from_command)
 
-        self._restore_f_filament_sensor_debounce()
-        self._sync_print_stats_load_unload("error", "Load/unload timeout")
+        self._restore_f_filament_sensor_debounce(from_command=from_command)
+        self._sync_print_stats_load_unload("error", "Load/unload timeout", from_command=from_command)
 
     cmd_EXIT_LOADUNLOAD_help = "退出进出料流程"
     def cmd_EXIT_LOADUNLOAD(self, gcmd):
@@ -629,7 +638,7 @@ class LoadUnloadHandler:
         self._stop_process_timer()
         self._stop_temp_timer()
         self._stop_timeout_timer()  # 停止超时定时器
-        self._restore_idle_timeout()
+        self._restore_idle_timeout(from_command=True)
 
         # 停止P1堵料检测（如果已启动）
         self.printer.send_event("filament_clog:check_stop")
@@ -641,18 +650,18 @@ class LoadUnloadHandler:
         self.user_confirmed = 0
 
         # 恢复最低挤出温度限制
-        self.gcode.run_script_from_command("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=180")
+        self._run_gcode("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=180", from_command=True)
 
         # 关闭加热器
-        self.gcode.run_script_from_command("M104 T0 S0")
-        self.gcode.run_script_from_command("M104 T1 S0")
+        self._run_gcode("M104 T0 S0", from_command=True)
+        self._run_gcode("M104 T1 S0", from_command=True)
 
         # 关闭风扇（所有通道）
-        self.gcode.run_script_from_command("M106 P1 S0")
-        self.gcode.run_script_from_command("M106 P2 S0")
+        self._run_gcode("M106 P1 S0", from_command=True)
+        self._run_gcode("M106 P2 S0", from_command=True)
 
-        self._restore_f_filament_sensor_debounce()
-        self._sync_print_stats_load_unload("standby")
+        self._restore_f_filament_sensor_debounce(from_command=True)
+        self._sync_print_stats_load_unload("standby", from_command=True)
         gcmd.respond_info(f"[{channel_name} {action}] STATE:91 CANCELLED")
 
     cmd_PREPARE_LOAD_UNLOAD_NOZZLE_help = "准备进出料喷嘴"
@@ -733,12 +742,12 @@ class LoadUnloadHandler:
         self._stop_process_timer()
         self._stop_temp_timer()
         self._stop_timeout_timer()
-        self._restore_idle_timeout()
+        self._restore_idle_timeout(from_command=True)
 
         gcmd.respond_info(f"[{channel_name} {action}] User manually finished the process")
 
         # 完成流程
-        self._finish_loadunload()
+        self._finish_loadunload(from_command=True)
 
     # ============================================================
     # 定时器管理方法
@@ -785,25 +794,25 @@ class LoadUnloadHandler:
             self.reactor.unregister_timer(self.p1_timeout_timer)
             self.p1_timeout_timer = None
 
-    def _extend_idle_timeout(self):
+    def _extend_idle_timeout(self, from_command=False):
         """
         扩展 idle_timeout 超时时间，防止进退料期间触发空闲超时
 
         功能：调用 IDLE_TIMEOUT_OFF 宏关闭空闲超时
         """
-        self.gcode.run_script_from_command("IDLE_TIMEOUT_OFF")
+        self._run_gcode("IDLE_TIMEOUT_OFF", from_command=from_command)
         logger.info("[_extend_idle_timeout] Called IDLE_TIMEOUT_OFF")
 
-    def _restore_idle_timeout(self):
+    def _restore_idle_timeout(self, from_command=False):
         """
         恢复 idle_timeout 原始超时时间
 
         功能：调用 IDLE_TIMEOUT_ON 宏恢复空闲超时
         """
-        self.gcode.run_script_from_command("IDLE_TIMEOUT_ON")
+        self._run_gcode("IDLE_TIMEOUT_ON", from_command=from_command)
         logger.info("[_restore_idle_timeout] Called IDLE_TIMEOUT_ON")
 
-    def _restore_f_filament_sensor_debounce(self):
+    def _restore_f_filament_sensor_debounce(self, from_command=False):
         """
         恢复 filament_sensor debounce 值为默认值 5
 
@@ -811,7 +820,7 @@ class LoadUnloadHandler:
         1. 将 filament_sensor 的 debounce 恢复为固定值 5
         """
         try:
-            self.gcode.run_script_from_command("SET_FILAMENT_SENSOR_DEBOUNCE SENSOR=filament_sensor DELAY=5")
+            self._run_gcode("SET_FILAMENT_SENSOR_DEBOUNCE SENSOR=filament_sensor DELAY=5", from_command=from_command)
             logger.info("[_restore_f_filament_sensor_debounce] Restored filament_sensor debounce to 5")
         except Exception as e:
             logger.warning(f"[_restore_f_filament_sensor_debounce] Failed to restore debounce: {e}")
@@ -853,7 +862,7 @@ class LoadUnloadHandler:
         # F通道：在加热阶段持续检测并咬住耗材
         if (self.operation_mode == OperationMode.LOADING
                 and index == Channel.F):
-            self._handle_f_insert_bite(eventtime)
+            self._handle_f_insert_bite(eventtime, from_command=False)
 
         # 获取当前温度
         extruder_name = 'extruder' if nozzle == 0 else 'extruder1'
@@ -896,12 +905,12 @@ class LoadUnloadHandler:
                 was_loaded = self.was_loaded_parameter
                 if was_loaded == 1:
                     # L=1: 直接进入熔融挤出（耗材已在喷嘴中）
-                    self.gcode.run_script_from_command("G1 Y100 F4000")
+                    self._run_gcode("G1 Y100 F4000", from_command=False)
                     self.load_step = State.MELT_EXTRUDING
                     self.gcode.respond_info(f"[{channel_name} LOAD] STATE:22 MELT_EXTRUDING (L=1)")
                 else:
                     # L=0: 进入等待插入状态（需要等待传感器检测）
-                    self.gcode.run_script_from_command("G1 Y100 F4000")
+                    self._run_gcode("G1 Y100 F4000", from_command=False)
                     self.load_step = State.WAIT_INSERT
                     self.gcode.respond_info(f"[{channel_name} LOAD] STATE:11 WAIT_INSERT (L=0)")
             else:
@@ -916,7 +925,7 @@ class LoadUnloadHandler:
             # 退料模式：P1/P2使用WAITING_TEMPERATURE等待温度，F不使用
             # T1喷嘴或P1通道需要预回抽
             if nozzle == 1 or index == Channel.P1:
-                self._preloading_retract_filament()
+                self._preloading_retract_filament(from_command=False)
                 # 预回抽完成后，进入等待状态（3秒后才进入UNLOADING）
                 self.load_step = State.PREHEATING_UNLOAD_WAIT
                 self.gcode.respond_info(f"[{channel_name} {action}] STATE:52 PREHEATING_UNLOAD_WAIT")
@@ -958,13 +967,13 @@ class LoadUnloadHandler:
         self.operation_mode = OperationMode.IDLE
         self.load_step = State.ERROR
         self._sync_print_stats_load_unload("error",
-            f"P1 slow extrusion timeout ({self.p1_slow_extrusion_timeout}s)")
+            f"P1 slow extrusion timeout ({self.p1_slow_extrusion_timeout}s)", from_command=False)
         self.gcode.respond_info(f"[{channel_name} LOAD] STATE:98 ERROR (Timeout: {self.p1_slow_extrusion_timeout}s)")
 
         # P1 通道特有：关闭温度和风扇，取消注册堵料检测事件
         nozzle = self.load_unload_nozzle
-        self.gcode.run_script_from_command(f"M104 T{nozzle} S0")  # 关闭对应喷嘴温度
-        self.gcode.run_script_from_command("M106 P2 S0")
+        self._run_gcode(f"M104 T{nozzle} S0", from_command=False)  # 关闭对应喷嘴温度
+        self._run_gcode("M106 P2 S0", from_command=False)
 
         return self.reactor.NEVER
 
@@ -983,7 +992,7 @@ class LoadUnloadHandler:
             return self.reactor.NEVER
 
         # 设置相对坐标模式（所有进料/退料操作都需要）
-        self.gcode.run_script_from_command("M83")
+        self._run_gcode("M83", from_command=False)
 
         if self.operation_mode == OperationMode.UNLOADING:
             return self._process_unload(eventtime)
@@ -996,7 +1005,7 @@ class LoadUnloadHandler:
     # 辅助方法
     # ============================================================
 
-    def _sync_print_stats_load_unload(self, end_state, error_message=""):
+    def _sync_print_stats_load_unload(self, end_state, error_message="", from_command=False):
         """
         同步 print_stats 状态，与状态机设计一致
         end_state: 'load_unload' | 'standby' | 'error'（error 仅记录日志并同样恢复先前状态）
@@ -1016,7 +1025,7 @@ class LoadUnloadHandler:
                     % (self._print_stats_state_before_load_unload,))
                 # 暂停状态下保持 paused，不切换为 load_unload
                 if self._print_stats_state_before_load_unload != "paused":
-                    self.gcode.run_script_from_command("SET_PRINT_STATS_INFO STATE=load_unload")
+                    self._run_gcode("SET_PRINT_STATS_INFO STATE=load_unload", from_command=from_command)
             elif end_state in ("standby", "error"):
                 if end_state == "error" and error_message:
                     logger.info(
@@ -1033,8 +1042,8 @@ class LoadUnloadHandler:
                 logger.info(
                     "[_sync_print_stats_load_unload] restore print_stats -> %s (end=%s)"
                     % (restore, end_state))
-                self.gcode.run_script_from_command(
-                    "SET_PRINT_STATS_INFO STATE=%s" % (restore,))
+                self._run_gcode(
+                    "SET_PRINT_STATS_INFO STATE=%s" % (restore,), from_command=from_command)
         except Exception as e:
             logger.info(f"[_sync_print_stats_load_unload] {e}")
 
@@ -1054,7 +1063,7 @@ class LoadUnloadHandler:
             self.gcode.respond_info(f"[{channel_name} {action}] STATE:{state_code} {state_name}")
             self.last_reported_state = state_code
 
-    def _handle_f_insert_bite(self, eventtime):
+    def _handle_f_insert_bite(self, eventtime, from_command=False):
         if self.load_unload_index != Channel.F or self.f_insert_bite_done:
             return False
         filament_sensor = self.printer.lookup_object(
@@ -1062,12 +1071,12 @@ class LoadUnloadHandler:
         sensor_status = filament_sensor.get_status(eventtime) if filament_sensor else {}
         if not filament_sensor or not sensor_status.get('filament_detected', False):
             return False
-        self.gcode.run_script_from_command("M83")
-        self.gcode.run_script_from_command(
-            f"G1 U{self.f_insert_bite_distance} F{self.f_insert_bite_speed}")
+        self._run_gcode("M83", from_command=from_command)
+        self._run_gcode(
+            f"G1 U{self.f_insert_bite_distance} F{self.f_insert_bite_speed}", from_command=from_command)
         self.f_insert_bite_done = True
         # 咬住后立即恢复debounce为5
-        self._restore_f_filament_sensor_debounce()
+        self._restore_f_filament_sensor_debounce(from_command=from_command)
         self.gcode.respond_info(
             f"[F LOAD] FILAMENT_DETECTED - Bite {self.f_insert_bite_distance:.0f}mm")
         return True
@@ -1215,8 +1224,8 @@ class LoadUnloadHandler:
             speed_mm_s = self.f_step_length
             remaining_distance = self.f_long_distance - self.load_distance
             step_length = min(speed_mm_s * self.load_step_time, remaining_distance)
-            self.gcode.run_script_from_command("M83")  # 设置相对坐标模式
-            self.gcode.run_script_from_command(f"G1 U{step_length} F{speed_mm_s * 60}")  # U轴进料
+            self._run_gcode("M83", from_command=False)  # 设置相对坐标模式
+            self._run_gcode(f"G1 U{step_length} F{speed_mm_s * 60}", from_command=False)  # U轴进料
             self.load_distance += step_length
             current_distance = self.load_distance
 
@@ -1225,7 +1234,7 @@ class LoadUnloadHandler:
 
             if current_distance >= self.f_long_distance:
                 # 快速进料完成，直接进入熔融挤出
-                self.gcode.run_script_from_command("G1 Y100 F4000")
+                self._run_gcode("G1 Y100 F4000", from_command=False)
                 self.load_step = State.MELT_EXTRUDING
                 self.load_distance = 0.0
                 self.gcode.respond_info(f"[{channel_name} LOAD] STATE:22 MELT_EXTRUDING")
@@ -1254,8 +1263,8 @@ class LoadUnloadHandler:
             speed_mm_s = self.f_melt_step_length
             remaining_distance = self.f_melt_distance - self.load_distance
             melt_step = min(speed_mm_s * self.load_step_time, remaining_distance)
-            self.gcode.run_script_from_command("M83")
-            self.gcode.run_script_from_command(f"G1 U{melt_step} F{speed_mm_s * 60}")
+            self._run_gcode("M83", from_command=False)
+            self._run_gcode(f"G1 U{melt_step} F{speed_mm_s * 60}", from_command=False)
             self.load_distance += melt_step
             current_distance = self.load_distance
 
@@ -1284,7 +1293,7 @@ class LoadUnloadHandler:
             retry_feedrate = speed_mm_s * 60.0
             remaining_distance = self.retry_distance - self.load_distance
             retry_step = min(speed_mm_s * self.load_step_time, remaining_distance)
-            self.gcode.run_script_from_command(f"G1 U{retry_step} F{retry_feedrate}")
+            self._run_gcode(f"G1 U{retry_step} F{retry_feedrate}", from_command=False)
             self.load_distance += retry_step
             current_distance = self.load_distance
 
@@ -1389,18 +1398,18 @@ class LoadUnloadHandler:
                 current_temp = extruder.heater.get_temp(eventtime)[0] if extruder else 0
 
                 # 设置50°C
-                self.gcode.run_script_from_command(f"M104 T{nozzle} S50")
+                self._run_gcode(f"M104 T{nozzle} S50", from_command=False)
                 self.p1_clog_detection_initialized = True  # 标记已初始化，允许快速进料开始
 
                 # 检查当前温度，输出提示信息（但不阻塞快速进料）
                 if current_temp > 55:  # 需要冷却
-                    self.gcode.run_script_from_command("M106 P2 S255")
+                    self._run_gcode("M106 P2 S255", from_command=False)
                     self.gcode.respond_info(f"[{channel_name} LOAD] Cooling to 50°C... {current_temp:.0f}C (Fans ON)")
                 elif current_temp < 45:  # 需要加热
-                    self.gcode.run_script_from_command("M106 P2 S0")
+                    self._run_gcode("M106 P2 S0", from_command=False)
                     self.gcode.respond_info(f"[{channel_name} LOAD] Heating to 50°C... {current_temp:.0f}C")
                 else:  # 温度在45-55°C范围内
-                    self.gcode.run_script_from_command("M106 P2 S0")
+                    self._run_gcode("M106 P2 S0", from_command=False)
                     self.gcode.respond_info(f"[{channel_name} LOAD] PREHEAT_LOW (50°C)")
 
             # 检查温度是否适合慢速挤出（45-55°C范围）
@@ -1441,7 +1450,7 @@ class LoadUnloadHandler:
                         return eventtime + 1.0
 
                     # 温度已达标，进入慢速挤出（在真正转换时才设置标志）
-                    self.gcode.run_script_from_command("M400")
+                    self._run_gcode("M400", from_command=False)
                     self.p1_slow_extrusion_entered = True
                     self.load_step = State.SLOW_EXTRUSION
                     self.p1_slow_extrusion_distance = 0.0
@@ -1468,8 +1477,8 @@ class LoadUnloadHandler:
                 speed_mm_s = self.p1_fast_move_speed / 60.0
                 step_length = min(speed_mm_s * self.load_step_time, remaining_distance)
 
-                self.gcode.run_script_from_command("M83")
-                self.gcode.run_script_from_command(f"G1 V{step_length} F{self.p1_fast_move_speed}")  # V轴进料
+                self._run_gcode("M83", from_command=False)
+                self._run_gcode(f"G1 V{step_length} F{self.p1_fast_move_speed}", from_command=False)  # V轴进料
                 self.load_distance += step_length
                 current_distance = self.load_distance
 
@@ -1494,7 +1503,7 @@ class LoadUnloadHandler:
             if extruder is None:
                 self.gcode.respond_info(f"[{channel_name} LOAD] ERROR: Extruder '{extruder_name}' not found in PREHEAT_LOW")
                 self.load_step = State.ERROR
-                self._sync_print_stats_load_unload("error", f"Extruder '{extruder_name}' not found")
+                self._sync_print_stats_load_unload("error", f"Extruder '{extruder_name}' not found", from_command=False)
                 return self.reactor.NEVER
 
             current_temp = extruder.heater.get_temp(eventtime)[0]
@@ -1534,8 +1543,8 @@ class LoadUnloadHandler:
 
             # 2mm逐毫米挤出
             step_length = 1.0
-            self.gcode.run_script_from_command("M83")
-            self.gcode.run_script_from_command(f"G1 V{step_length} F{self.p1_slow_move_speed}")  # V轴进料
+            self._run_gcode("M83", from_command=False)
+            self._run_gcode(f"G1 V{step_length} F{self.p1_slow_move_speed}", from_command=False)  # V轴进料
             self.p1_slow_extrusion_distance += step_length
 
             elapsed_time = eventtime - self.p1_slow_extrusion_start_time
@@ -1563,8 +1572,8 @@ class LoadUnloadHandler:
 
             # 2mm逐毫米挤出
             step_length = self.p1_melt_step_length
-            self.gcode.run_script_from_command("M83")
-            self.gcode.run_script_from_command(f"G1 V{step_length} F{self.p1_slow_move_speed}")  # V轴进料
+            self._run_gcode("M83", from_command=False)
+            self._run_gcode(f"G1 V{step_length} F{self.p1_slow_move_speed}", from_command=False)  # V轴进料
             self.p1_slow_extrusion_distance += step_length
 
             elapsed_time = eventtime - self.p1_slow_extrusion_start_time
@@ -1590,25 +1599,25 @@ class LoadUnloadHandler:
             self.p1_clog_extruded = True
 
             # 回退5mm后再前进3mm
-            self.gcode.run_script_from_command("M83")
+            self._run_gcode("M83", from_command=False)
             retract_distance = self.p1_clog_retract_distance
-            self.gcode.run_script_from_command(f"G1 V-{retract_distance} F{self.retry_speed}")
-            self.gcode.run_script_from_command("M400") 
+            self._run_gcode(f"G1 V-{retract_distance} F{self.retry_speed}", from_command=False)
+            self._run_gcode("M400", from_command=False) 
             advance_distance = 3.0
-            self.gcode.run_script_from_command(f"G1 V{advance_distance} F{self.retry_speed}")
+            self._run_gcode(f"G1 V{advance_distance} F{self.retry_speed}", from_command=False)
             self.gcode.respond_info(f"[{channel_name} LOAD] CLOG_DETECTED - Retract {retract_distance}mm, advance {advance_distance}mm")
 
             # 完成流程
             self.operation_mode = OperationMode.IDLE
             self.load_step = State.FINISHED
-            self._sync_print_stats_load_unload("standby")
+            self._sync_print_stats_load_unload("standby", from_command=False)
             self._send_state_code(90, 'FINISHED', channel_name)
 
             # P1 通道特有：关闭温度和风扇，取消注册堵料检测事件
             nozzle = self.load_unload_nozzle
-            self.gcode.run_script_from_command(f"M104 T{nozzle} S0")  # 关闭对应喷嘴温度
-            self.gcode.run_script_from_command("M106 P2 S0")
-            self._restore_idle_timeout()
+            self._run_gcode(f"M104 T{nozzle} S0", from_command=False)  # 关闭对应喷嘴温度
+            self._run_gcode("M106 P2 S0", from_command=False)
+            self._restore_idle_timeout(from_command=False)
 
             return self.reactor.NEVER
 
@@ -1670,15 +1679,15 @@ class LoadUnloadHandler:
             if self.user_confirmed == 1:
                 # 用户已确认，P2 直接进入自动擦嘴
                 self.user_confirmed = 0
-                self._finish_loadunload()
+                self._finish_loadunload(from_command=False)
                 return self.reactor.NEVER
 
             # 继续熔融挤出
             speed_mm_s = self.p2_step_length
             remaining_distance = self.p2_long_distance - self.load_distance
             step_length = min(speed_mm_s * self.load_step_time, remaining_distance)
-            self.gcode.run_script_from_command("M83")
-            self.gcode.run_script_from_command(f"G1 E{step_length} F{speed_mm_s * 60}")  # E轴进料
+            self._run_gcode("M83", from_command=False)
+            self._run_gcode(f"G1 E{step_length} F{speed_mm_s * 60}", from_command=False)  # E轴进料
             self.load_distance += step_length
             current_distance = self.load_distance
 
@@ -1690,6 +1699,10 @@ class LoadUnloadHandler:
                 self.load_step = State.CONFIRM_EXTRUSION
                 self.gcode.respond_info(f"[{channel_name} LOAD] STATE:30 CONFIRM_EXTRUSION")
                 self.gcode.respond_info("ACTION:PROMPT_CONFIRM P2_EXTRUDED")
+
+                # 冷却耗材、清理耗材
+                self._run_gcode("COOLLING_WASTE_FILAMENT WAIT_TIME=3000", from_command=False)
+                self._run_gcode("RELEASE_WASTE_FILAMENT", from_command=False)
                 return self.reactor.NEVER
 
             move_duration = step_length / speed_mm_s if speed_mm_s > 0 else self.load_step_time
@@ -1706,8 +1719,8 @@ class LoadUnloadHandler:
             retry_feedrate = speed_mm_s * 60.0
             remaining_distance = self.retry_distance - self.load_distance
             retry_step = min(speed_mm_s * self.load_step_time, remaining_distance)
-            self.gcode.run_script_from_command("M83")
-            self.gcode.run_script_from_command(f"G1 E{retry_step} F{retry_feedrate}")
+            self._run_gcode("M83", from_command=False)
+            self._run_gcode(f"G1 E{retry_step} F{retry_feedrate}", from_command=False)
             self.load_distance += retry_step
             current_distance = self.load_distance
 
@@ -1719,6 +1732,10 @@ class LoadUnloadHandler:
                 self.load_step = State.CONFIRM_EXTRUSION
                 self.gcode.respond_info(f"[{channel_name} LOAD] STATE:30 CONFIRM_EXTRUSION")
                 self.gcode.respond_info("ACTION:PROMPT_CONFIRM P2_EXTRUDED")
+
+                # 冷却耗材、清理耗材
+                self._run_gcode("COOLLING_WASTE_FILAMENT WAIT_TIME=3000", from_command=False)
+                self._run_gcode("RELEASE_WASTE_FILAMENT", from_command=False)
                 return self.reactor.NEVER
 
             move_duration = retry_step / speed_mm_s if speed_mm_s > 0 else self.load_step_time
@@ -1786,7 +1803,7 @@ class LoadUnloadHandler:
         # 如果传感器检测到料已退出，停止退料并完成流程
         if self.load_distance >= 200 and not filament_detected:
             self.gcode.respond_info(f"[{channel_name} UNLOAD] SENSOR_DETECTED: Filament removed")
-            self._finish_loadunload()
+            self._finish_loadunload(from_command=False)
             return self.reactor.NEVER
 
         # 检查用户是否请求中止
@@ -1801,11 +1818,11 @@ class LoadUnloadHandler:
 
         # 根据通道选择对应的轴进行退料
         if index == Channel.F:
-            self.gcode.run_script_from_command(f"G1 U-{step_length} F{current_speed}")
+            self._run_gcode(f"G1 U-{step_length} F{current_speed}", from_command=False)
         elif index == Channel.P1:
-            self.gcode.run_script_from_command(f"G1 V-{step_length} F{current_speed}")
+            self._run_gcode(f"G1 V-{step_length} F{current_speed}", from_command=False)
         else:
-            self.gcode.run_script_from_command(f"G1 E-{step_length} F{current_speed}")
+            self._run_gcode(f"G1 E-{step_length} F{current_speed}", from_command=False)
 
         self.load_distance += step_length
 
@@ -1843,7 +1860,7 @@ class LoadUnloadHandler:
             return self.p1_slow_move_speed / 60.0
         return self.p2_step_length
 
-    def _prepare_load(self):
+    def _prepare_load(self, from_command=False):
         """
         准备进料宏
 
@@ -1868,7 +1885,7 @@ class LoadUnloadHandler:
         # F通道：尝试检测并咬住耗材
         if self.load_unload_index == Channel.F:
             eventtime = self.reactor.monotonic()
-            self._handle_f_insert_bite(eventtime)
+            self._handle_f_insert_bite(eventtime, from_command=from_command)
 
         print_stats = self.printer.lookup_object('print_stats')
         toolhead = self.printer.lookup_object('toolhead')
@@ -1879,7 +1896,7 @@ class LoadUnloadHandler:
         # 如果未归零，先归零
         if self._print_stats_state_before_load_unload == "standby":
             if "xyz" not in toolhead.get_status(eventtime)['homed_axes']:
-                self.gcode.run_script_from_command("G28 S1")
+                self._run_gcode("G28 S1", from_command=from_command)
         elif self._print_stats_state_before_load_unload == "paused":
             v_sd = self.printer.lookup_object('virtual_sdcard', None)
             init_info = getattr(v_sd, 'powerloss_init_info', None) if v_sd else None
@@ -1891,32 +1908,32 @@ class LoadUnloadHandler:
                     left_nozzle_temp = left_nozzle_temp - 50
                     if left_nozzle_temp < 180:
                         left_nozzle_temp = 180
-                    self.gcode.run_script_from_command("M2800")
-                    self.gcode.run_script_from_command("M104 S%.1f T0" % left_nozzle_temp)
+                    self._run_gcode("M2800", from_command=from_command)
+                    self._run_gcode("M104 S%.1f T0" % left_nozzle_temp, from_command=from_command)
                 if right_nozzle_temp is not None:
                     right_nozzle_temp = right_nozzle_temp - 50
                     if right_nozzle_temp < 180:
                         right_nozzle_temp = 180
-                    self.gcode.run_script_from_command("M104 S%.1f T1" % right_nozzle_temp)
+                    self._run_gcode("M104 S%.1f T1" % right_nozzle_temp, from_command=from_command)
                 
                 if left_nozzle_temp is not None:
-                    self.gcode.run_script_from_command("M109 S%.1f T0" % left_nozzle_temp)
+                    self._run_gcode("M109 S%.1f T0" % left_nozzle_temp, from_command=from_command)
                 if right_nozzle_temp is not None:
-                    self.gcode.run_script_from_command("M109 S%.1f T1" % right_nozzle_temp)
+                    self._run_gcode("M109 S%.1f T1" % right_nozzle_temp, from_command=from_command)
             else:
                 logger.info("[_prepare_load] powerloss_init_info does not exist")
             if "xy" not in toolhead.get_status(eventtime)['homed_axes']:
-                self.gcode.run_script_from_command("G28 XY")
+                self._run_gcode("G28 XY", from_command=from_command)
         else:
             if "xy" not in toolhead.get_status(eventtime)['homed_axes']:
-                self.gcode.run_script_from_command("G28 XY")
+                self._run_gcode("G28 XY", from_command=from_command)
         
         th_status = toolhead.get_status(eventtime)
         if "z" in th_status['homed_axes']:
             move_z = self.load_unload_z
             current_z = toolhead.get_position()[2]
             if move_z > current_z:
-                self.gcode.run_script_from_command(f"G1 Z{move_z} F600")
+                self._run_gcode(f"G1 Z{move_z} F600", from_command=from_command)
         
         # 根据喷嘴选择移动到预装载位置
         nozzle = self.load_unload_nozzle
@@ -1924,21 +1941,21 @@ class LoadUnloadHandler:
         if nozzle == 0:
             # T0左喷嘴
             logger.info("[_prepare_load] Running T0, MOVE_TO_BRUSH_STATION, MOVE_LEFT_PRELOAD_POSITION")
-            self.gcode.run_script_from_command("T0 MOVE_Z=0")
-            self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
+            self._run_gcode("T0 MOVE_Z=0", from_command=from_command)
+            self._run_gcode("MOVE_TO_BRUSH_STATION", from_command=from_command)
         else:
             # T1右喷嘴
             logger.info("[_prepare_load] Running T1, MOVE_TO_BRUSH_STATION, MOVE_RIGHT_PRELOAD_POSITION")
-            self.gcode.run_script_from_command("T1 MOVE_Z=0")
-            self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
+            self._run_gcode("T1 MOVE_Z=0", from_command=from_command)
+            self._run_gcode("MOVE_TO_BRUSH_STATION", from_command=from_command)
 
         # 激活对应的挤出机
         logger.info("[_prepare_load] Calling PREPARE_LOAD_UNLOAD_NOZZLE")
-        self.gcode.run_script_from_command("PREPARE_LOAD_UNLOAD_NOZZLE")
-        self._sync_print_stats_load_unload("load_unload")
+        self._run_gcode("PREPARE_LOAD_UNLOAD_NOZZLE", from_command=from_command)
+        self._sync_print_stats_load_unload("load_unload", from_command=from_command)
         logger.info("[_prepare_load] Completed")
 
-    def _prepare_unload(self):
+    def _prepare_unload(self, from_command=False):
         """
         准备出料宏
 
@@ -1959,7 +1976,7 @@ class LoadUnloadHandler:
             # 如果未归零，先归零
             if self._print_stats_state_before_load_unload == "standby":
                 if "xyz" not in toolhead.get_status(eventtime)['homed_axes']:
-                    self.gcode.run_script_from_command("G28 S1")
+                    self._run_gcode("G28 S1", from_command=from_command)
             elif self._print_stats_state_before_load_unload == "paused":
                 v_sd = self.printer.lookup_object('virtual_sdcard', None)
                 init_info = getattr(v_sd, 'powerloss_init_info', None) if v_sd else None
@@ -1971,25 +1988,25 @@ class LoadUnloadHandler:
                         left_nozzle_temp = left_nozzle_temp - 50
                         if left_nozzle_temp < 180:
                             left_nozzle_temp = 180
-                        self.gcode.run_script_from_command("M2800")
-                        self.gcode.run_script_from_command("M104 S%.1f T0" % left_nozzle_temp)
+                        self._run_gcode("M2800", from_command=from_command)
+                        self._run_gcode("M104 S%.1f T0" % left_nozzle_temp, from_command=from_command)
                     if right_nozzle_temp is not None:
                         right_nozzle_temp = right_nozzle_temp - 50
                         if right_nozzle_temp < 180:
                             right_nozzle_temp = 180
-                        self.gcode.run_script_from_command("M104 S%.1f T1" % right_nozzle_temp)
+                        self._run_gcode("M104 S%.1f T1" % right_nozzle_temp, from_command=from_command)
                     
                     if left_nozzle_temp is not None:
-                        self.gcode.run_script_from_command("M109 S%.1f T0" % left_nozzle_temp)
+                        self._run_gcode("M109 S%.1f T0" % left_nozzle_temp, from_command=from_command)
                     if right_nozzle_temp is not None:
-                        self.gcode.run_script_from_command("M109 S%.1f T1" % right_nozzle_temp)
+                        self._run_gcode("M109 S%.1f T1" % right_nozzle_temp, from_command=from_command)
                 else:
                     logger.info("[_prepare_unload] powerloss_init_info does not exist")
                 if "xy" not in toolhead.get_status(eventtime)['homed_axes']:
-                    self.gcode.run_script_from_command("G28 XY")
+                    self._run_gcode("G28 XY", from_command=from_command)
             else:
                 if "xy" not in toolhead.get_status(eventtime)['homed_axes']:
-                    self.gcode.run_script_from_command("G28 XY")
+                    self._run_gcode("G28 XY", from_command=from_command)
         
             # 平台下降30mm
             th_status = toolhead.get_status(eventtime)
@@ -1997,23 +2014,23 @@ class LoadUnloadHandler:
                 move_z = self.load_unload_z
                 current_z = toolhead.get_position()[2]
                 if move_z > current_z:
-                    self.gcode.run_script_from_command(f"G1 Z{move_z} F600")
+                    self._run_gcode(f"G1 Z{move_z} F600", from_command=from_command)
 
             # 根据喷嘴选择移动到预装载位置
             nozzle = self.load_unload_nozzle
             if nozzle == 0:
                 # T0左喷嘴
-                self.gcode.run_script_from_command("T0 MOVE_Z=0")
-                self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
+                self._run_gcode("T0 MOVE_Z=0", from_command=from_command)
+                self._run_gcode("MOVE_TO_BRUSH_STATION", from_command=from_command)
             else:
                 # T1右喷嘴
-                self.gcode.run_script_from_command("T1 MOVE_Z=0")
-                self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
+                self._run_gcode("T1 MOVE_Z=0", from_command=from_command)
+                self._run_gcode("MOVE_TO_BRUSH_STATION", from_command=from_command)
 
         # 激活对应的挤出机
-        self.gcode.run_script_from_command("PREPARE_LOAD_UNLOAD_NOZZLE")
-        self._sync_print_stats_load_unload("load_unload")
-    def _preloading_retract_filament(self):
+        self._run_gcode("PREPARE_LOAD_UNLOAD_NOZZLE", from_command=from_command)
+        self._sync_print_stats_load_unload("load_unload", from_command=from_command)
+    def _preloading_retract_filament(self, from_command=False):
         """
         预挤出回抽耗材
 
@@ -2022,24 +2039,24 @@ class LoadUnloadHandler:
         # 退料模式参数，P1通道使用专门的参数
         index = self.load_unload_index
         if index == Channel.P1:
-            self.gcode.run_script_from_command("M83")
-            self.gcode.run_script_from_command("LEFT_NOZZLE_V_PRELOADING_RETRACT")
+            self._run_gcode("M83", from_command=from_command)
+            self._run_gcode("LEFT_NOZZLE_V_PRELOADING_RETRACT", from_command=from_command)
         elif index == Channel.P2:
-            self.gcode.run_script_from_command("M83")
-            self.gcode.run_script_from_command("RIGHT_NOZZLE_PRELOADING_RETRACT")
+            self._run_gcode("M83", from_command=from_command)
+            self._run_gcode("RIGHT_NOZZLE_PRELOADING_RETRACT", from_command=from_command)
 
         # 预挤出耗材
-        # self.gcode.run_script_from_command("G92 E0")
-        # self.gcode.run_script_from_command(f"G1 E{preloading_filament_e} F{preloading_filament_speed}")
+        # self._run_gcode("G92 E0")
+        # self._run_gcode(f"G1 E{preloading_filament_e} F{preloading_filament_speed}")
         # 回抽耗材
-        # self.gcode.run_script_from_command("G92 E0")
-        # self.gcode.run_script_from_command(f"G1 E{retract_e} F{retract_speed}")
+        # self._run_gcode("G92 E0")
+        # self._run_gcode(f"G1 E{retract_e} F{retract_speed}")
 
         # # 退料模式额外等待3秒
         # if self.operation_mode == OperationMode.UNLOADING:
-        #     self.gcode.run_script_from_command("G4 P3000")
+        #     self._run_gcode("G4 P3000")
 
-    def _clean_nozzle(self):
+    def _clean_nozzle(self, from_command=False):
         """
         自动擦嘴逻辑（Python版本，替代原cfg中的CLEAN_NOZZLE宏）
 
@@ -2075,34 +2092,34 @@ class LoadUnloadHandler:
 
         if nozzle == 0:
             # T0左喷嘴清理流程
-            self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
-            self.gcode.run_script_from_command(f"M104 T0 S{cooling_temp:.0f}")
-            self.gcode.run_script_from_command("M400")
-            self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT")
-            self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
-            self.gcode.run_script_from_command("MOVE_LEFT_COOLING_POSITION")
-            self.gcode.run_script_from_command("M106 P2 S255")
-            self.gcode.run_script_from_command(f"M109 T0 S{cooling_temp:.0f}")
-            self.gcode.run_script_from_command("M106 P2 S0")
-            self.gcode.run_script_from_command("MOVE_LEFT_BRUSH_POSITION")
-            self.gcode.run_script_from_command("BRUSH_NOZZLE")
-            self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
+            self._run_gcode("MOVE_TO_BRUSH_STATION", from_command=from_command)
+            self._run_gcode(f"M104 T0 S{cooling_temp:.0f}", from_command=from_command)
+            self._run_gcode("M400", from_command=from_command)
+            self._run_gcode("COOLLING_WASTE_FILAMENT", from_command=from_command)
+            self._run_gcode("RELEASE_WASTE_FILAMENT", from_command=from_command)
+            self._run_gcode("MOVE_LEFT_COOLING_POSITION", from_command=from_command)
+            self._run_gcode("M106 P2 S255", from_command=from_command)
+            self._run_gcode(f"M109 T0 S{cooling_temp:.0f}", from_command=from_command)
+            self._run_gcode("M106 P2 S0", from_command=from_command)
+            self._run_gcode("MOVE_LEFT_BRUSH_POSITION", from_command=from_command)
+            self._run_gcode("BRUSH_NOZZLE", from_command=from_command)
+            self._run_gcode("MOVE_TO_BRUSH_STATION", from_command=from_command)
         else:
             # T1右喷嘴清理流程
-            # self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
-            self.gcode.run_script_from_command(f"M104 T1 S{cooling_temp:.0f}")
-            self.gcode.run_script_from_command("M400")
-            self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT")
-            self.gcode.run_script_from_command("RELEASE_WASTE_FILAMENT")
-            self.gcode.run_script_from_command("MOVE_RIGHT_COOLING_POSITION")
-            self.gcode.run_script_from_command("M106 P1 S255")
-            self.gcode.run_script_from_command(f"M109 T1 S{cooling_temp:.0f}")
-            self.gcode.run_script_from_command("M106 P1 S0")
-            self.gcode.run_script_from_command("MOVE_RIGHT_BRUSH_POSITION")
-            self.gcode.run_script_from_command("BRUSH_NOZZLE")
-            self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
+            # self._run_gcode("MOVE_TO_BRUSH_STATION")
+            self._run_gcode(f"M104 T1 S{cooling_temp:.0f}", from_command=from_command)
+            self._run_gcode("M400", from_command=from_command)
+            self._run_gcode("COOLLING_WASTE_FILAMENT", from_command=from_command)
+            self._run_gcode("RELEASE_WASTE_FILAMENT", from_command=from_command)
+            self._run_gcode("MOVE_RIGHT_COOLING_POSITION", from_command=from_command)
+            self._run_gcode("M106 P1 S255", from_command=from_command)
+            self._run_gcode(f"M109 T1 S{cooling_temp:.0f}", from_command=from_command)
+            self._run_gcode("M106 P1 S0", from_command=from_command)
+            self._run_gcode("MOVE_RIGHT_BRUSH_POSITION", from_command=from_command)
+            self._run_gcode("BRUSH_NOZZLE", from_command=from_command)
+            self._run_gcode("MOVE_TO_BRUSH_STATION", from_command=from_command)
 
-    def _finish_loadunload(self):
+    def _finish_loadunload(self, from_command=False):
         """
         进出料流程完成宏（流程完成）
 
@@ -2133,25 +2150,25 @@ class LoadUnloadHandler:
             self._stop_process_timer()
             self._stop_temp_timer()
             self._stop_timeout_timer()
-            self._restore_idle_timeout()
+            self._restore_idle_timeout(from_command=from_command)
             self.gcode.respond_info(f"[{channel_name} LOAD] STATE:41 AUTO_CLEANING")
 
             # 根据通道调用清理逻辑
             if index == Channel.F:
-                self.gcode.run_script_from_command("G1 Y100 F4000")
-                self._clean_nozzle()
+                self._run_gcode("G1 Y100 F4000", from_command=from_command)
+                self._clean_nozzle(from_command=from_command)
             else:
-                self._clean_nozzle()
+                self._clean_nozzle(from_command=from_command)
 
             # 清理完成后才设置 IDLE，防止清理期间被误判为空闲
             self.operation_mode = OperationMode.IDLE
             self.load_step = State.FINISHED
-            self._sync_print_stats_load_unload("standby")
+            self._sync_print_stats_load_unload("standby", from_command=from_command)
             self.gcode.respond_info(f"[{channel_name} LOAD] STATE:90 FINISHED")
 
             # 进料完成后关闭加热器
-            self.gcode.run_script_from_command("M104 T0 S0")
-            self.gcode.run_script_from_command("M104 T1 S0")
+            self._run_gcode("M104 T0 S0", from_command=from_command)
+            self._run_gcode("M104 T1 S0", from_command=from_command)
 
         elif self.operation_mode == OperationMode.UNLOADING:
             # 卸料完成：先停定时器和执行收尾动作，最后才设 IDLE
@@ -2160,32 +2177,32 @@ class LoadUnloadHandler:
             self._stop_process_timer()
             self._stop_temp_timer()
             self._stop_timeout_timer()
-            self._restore_idle_timeout()
+            self._restore_idle_timeout(from_command=from_command)
 
             # 恢复最低挤出温度限制
-            self._restore_f_filament_sensor_debounce()
-            self.gcode.run_script_from_command("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=180")
+            self._restore_f_filament_sensor_debounce(from_command=from_command)
+            self._run_gcode("SET_MIN_EXTRUDE_TEMP HEATER=extruder TEMP=180", from_command=from_command)
 
             # 等待所有运动完成
-            self.gcode.run_script_from_command("M400")
+            self._run_gcode("M400", from_command=from_command)
 
             # 收尾动作完成后才设置 IDLE
             self.operation_mode = OperationMode.IDLE
-            self._sync_print_stats_load_unload("standby")
+            self._sync_print_stats_load_unload("standby", from_command=from_command)
             self.gcode.respond_info(f"[{channel_name} UNLOAD] STATE:90 FINISHED")
 
             # 关闭加热器
-            self.gcode.run_script_from_command("M104 T0 S0")
-            self.gcode.run_script_from_command("M104 T1 S0")
+            self._run_gcode("M104 T0 S0", from_command=from_command)
+            self._run_gcode("M104 T1 S0", from_command=from_command)
 
             # P2通道释放废料
             if index == Channel.P2:
-                self.gcode.run_script_from_command("COOLLING_WASTE_FILAMENT")
-                self.gcode.run_script_from_command("CLEAN_NOZZLE")
-                self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
+                self._run_gcode("COOLLING_WASTE_FILAMENT", from_command=from_command)
+                self._run_gcode("CLEAN_NOZZLE", from_command=from_command)
+                self._run_gcode("MOVE_TO_BRUSH_STATION", from_command=from_command)
             elif index == Channel.P1:
-                self.gcode.run_script_from_command("CLEAN_NOZZLE")
-                self.gcode.run_script_from_command("MOVE_TO_BRUSH_STATION")
+                self._run_gcode("CLEAN_NOZZLE", from_command=from_command)
+                self._run_gcode("MOVE_TO_BRUSH_STATION", from_command=from_command)
 
 
 # ============================================================
