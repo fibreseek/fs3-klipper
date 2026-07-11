@@ -17,7 +17,9 @@ VALID_STATES = (
 )
 
 # 内部 note_*、SET_PRINT_STATS_INFO STATE=、SET_PRINT_*_STATE 共用。
-# 与状态机流转图一致；paused <-> load_unload 表示暂停时可进退料，结束后可回到 paused。
+# 与状态机流转图一致；paused -> load_unload 在状态机上允许，但 load_unload.py
+# 在 paused 下进退料刻意不切换，保持 paused，结束后仍为 paused。
+# busy -> load_unload：空闲时 G-code 占用会自动 busy，进退料需能抢占进入。
 # printing -> paused 与内部 note_pause 一致；precheck -> printing 对应 note_start 跳过 preprinting 的边界情况。
 # paused -> preprinting 用于断电恢复 PREPARE_RECOVER_PRINT_FILE；paused -> standby 用于清除断电记录等。
 # precheck/preprinting -> standby/cancelled 供正式打印前中止作业。
@@ -45,7 +47,7 @@ STATE_TRANSITIONS = {
     "load_unload": frozenset({"standby", "paused", "error"}),
     "calibration": frozenset({"standby", "error"}),
     "maintenance": frozenset({"standby", "error"}),
-    "busy": frozenset({"standby", "error"}),
+    "busy": frozenset({"standby", "load_unload", "error"}),
 }
 
 class PrintStats:
