@@ -67,7 +67,8 @@ class MySerial:
 
         self.enabled = config.getboolean('enable', True)
         self._temp_paused = False
-        self.poll_armed = False
+        # 开机默认武装（等同 TENSION_SENSOR_POLL ENABLE=1）；真正采样仍靠 START
+        self.poll_armed = self.enabled
         self.polling_enabled = False
         self.polling_log_enabled = False
         self.jam_detection_enabled = True
@@ -115,7 +116,8 @@ class MySerial:
             'TENSION_SENSOR_POLL', self.cmd_FORCE_SENSOR_POLL,
             desc=(
                 "TENSION_SENSOR_POLL ENABLE=<0|1> [TANGLING_DETECT=<0|1>]: "
-                "arm/disarm only (no sampling); tangling detect default off"
+                "arm/disarm only (no sampling); armed by default at boot; "
+                "jam detect default on, tangling detect default off"
             ),
         )
         self.gcode.register_command(
@@ -1044,7 +1046,7 @@ class MySerial:
             return
         if not self.poll_armed:
             gcmd.respond_info(
-                "ignored: not armed (run TENSION_SENSOR_POLL ENABLE=1 first)"
+                "ignored: not armed (run TENSION_SENSOR_POLL ENABLE=1)"
             )
             return
         self._start_detection(gcmd)
@@ -1059,22 +1061,31 @@ class MySerial:
             gcmd.respond_info(
                 "Usage: TENSION_SENSOR_POLL ENABLE=<0|1> "
                 "[TANGLING_DETECT=<0|1>] "
-                "(arm only; use TENSION_SENSOR_START to begin sampling; "
-                "tangling detect default off)"
+                "(arm only, default armed at boot; "
+                "use TENSION_SENSOR_START to begin sampling; "
+                "jam detect default on, tangling detect default off)"
             )
             gcmd.respond_info(
                 f"Armed: {self.poll_armed} | "
+                f"Jam detection: {self.jam_detection_enabled} | "
                 f"Tangling detection: {self.tangling_detection_enabled}"
             )
             return
 
         if enable:
+            # 仅武装：堵料默认开，缠料默认关；真正采样/检测仍靠 TENSION_SENSOR_START
             tangling_detect = gcmd.get_int('TANGLING_DETECT', 0)
+            self.jam_detection_enabled = True
             self.tangling_detection_enabled = (tangling_detect == 1)
             self.poll_armed = True
             gcmd.respond_info(
                 "Tension sensor armed. Run TENSION_SENSOR_START to begin "
                 "polling/detection."
+            )
+            gcmd.respond_info(
+                f"Jam detection: "
+                f"{'ON' if self.jam_detection_enabled else 'OFF'} "
+                f"(starts on TENSION_SENSOR_START)"
             )
             gcmd.respond_info(
                 f"Tangling detection: "
