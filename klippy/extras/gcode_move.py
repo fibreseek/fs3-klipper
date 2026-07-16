@@ -4,6 +4,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
+import toolhead
 
 class GCodeMove:
     def __init__(self, config):
@@ -126,31 +127,17 @@ class GCodeMove:
             self.last_position = self.position_with_transform()
     
     # G-Code movement commands
-    # extruder carbon fibre
-    # extruder1 plastics
-    # extruder2 carbon fibre adhesive
-    # mode 0: E 1: UV(trapq=V) 2: U 3: V
-    def aniso_extruder_switch(self, gcmd):
-        params = gcmd.get_command_parameters()
-        
-        if 'E' in params:
-            self.printer.send_event("gcode:move_extruder", 'extruder1', float(params['E']), self.absolute_extrude)
-        elif 'U' in params:
-            if self.absolute_extrude:
-                raise gcmd.error("M83 MODE ONLY!")
-
-            self.printer.send_event("gcode:move_extruder", 'extruder2', float(params['U']), self.absolute_extrude)
-            if 'V' in params:
-                self.printer.send_event("gcode:move_extruder", 'extruder', float(params['V']), self.absolute_extrude)         
-        elif 'V' in params: 
-            if self.absolute_extrude:
-                raise gcmd.error("M83 MODE ONLY!")
-            self.printer.send_event("gcode:move_extruder", 'extruder', float(params['V']), self.absolute_extrude)
+    def _get_active_extruder_name(self):
+        extruder = self.printer.lookup_object('toolhead').get_extruder()
+        name = extruder.get_name()
+        if not name:
+            raise self.printer.command_error("Extruder not configured")
+        return name
 
     def cmd_G1(self, gcmd):
         # Move
-        self.aniso_extruder_switch(gcmd)
         params = gcmd.get_command_parameters()
+        material_axes = []
         try:
             for pos, axis in enumerate('XYZ'):
                 if axis in params:
@@ -165,7 +152,10 @@ class GCodeMove:
                         move_pos = self._get_gcode_position()
                         # gcmd.respond_raw("Z move to %.3f" % (move_pos[pos],))
                         self.printer.send_event("axisz:move",(move_pos[pos]))
+            if 'E' in params and ('U' in params or 'V' in params):
+                raise gcmd.error("E cannot be used with U/V direct UV moves")
             if 'E' in params:
+                old_e_pos = self.last_position[3]
                 v = float(params['E']) * self.extrude_factor
                 if not self.absolute_coord or not self.absolute_extrude:
                     # value relative to position of last move
@@ -173,22 +163,39 @@ class GCodeMove:
                 else:
                     # value relative to base coordinate position
                     self.last_position[3] = v + self.base_position[3]
+                material_axes.append(toolhead.MaterialMove(
+                    self._get_active_extruder_name(),
+                    self.last_position[3] - old_e_pos))
             # UV 同移）
             if 'U' in params and 'V' in params:
+                if self.absolute_extrude:
+                    raise gcmd.error("M83 MODE ONLY!")
+                u_val = float(params['U']) * self.extrude_factor
+                if u_val < 0.:
+                    raise gcmd.error("Direct UV does not support negative U")
                 val = float(params['V']) * self.extrude_factor
                 if not self.absolute_coord or not self.absolute_extrude:
                     self.last_position[3] += val
                 else:
                     self.last_position[3] = val + self.base_position[3]
+                material_axes.append(toolhead.MaterialMove('extruder', val))
+                material_axes.append(toolhead.MaterialMove('extruder2', u_val))
             elif 'U' in params:
+                if self.absolute_extrude:
+                    raise gcmd.error("M83 MODE ONLY!")
                 val = float(params['U']) * self.extrude_factor
+                if val < 0.:
+                    raise gcmd.error("Direct UV does not support negative U")
                 if not self.absolute_coord or not self.absolute_extrude:
                     # value relative to position of last move
                     self.last_position[3] += val
                 else:
                     # value relative to base coordinate position
                     self.last_position[3] = val + self.base_position[3]
+                material_axes.append(toolhead.MaterialMove('extruder2', val))
             elif 'V' in params:
+                if self.absolute_extrude:
+                    raise gcmd.error("M83 MODE ONLY!")
                 val = float(params['V']) * self.extrude_factor
                 if not self.absolute_coord or not self.absolute_extrude:
                     # value relative to position of last move
@@ -196,6 +203,7 @@ class GCodeMove:
                 else:
                     # value relative to base coordinate position
                     self.last_position[3] = val + self.base_position[3]
+                material_axes.append(toolhead.MaterialMove('extruder', val))
             if 'F' in params:
                 gcode_speed = float(params['F'])
                 if gcode_speed <= 0.:
@@ -205,7 +213,7 @@ class GCodeMove:
         except ValueError as e:
             raise gcmd.error("Unable to parse move '%s'"
                              % (gcmd.get_commandline(),))
-        self.move_with_transform(self.last_position, self.speed)
+        self.move_with_transform(self.last_position, self.speed, material_axes)
     # G-Code coordinate manipulation
     def cmd_G20(self, gcmd):
         # Set units to inches

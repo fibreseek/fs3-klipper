@@ -440,9 +440,22 @@ class BedMesh:
             final_z_adj = factor * z_adj + self.fade_target
             self.last_position[:] = [x, y, z - final_z_adj] + cur_pos[3:]
         return list(self.last_position)
-    def move(self, newpos, speed):
+    def _scale_material_axes(self, material_axes, ratio):
+        if not material_axes:
+            return material_axes
+        return [m.scaled(ratio) for m in material_axes]
+    def move(self, newpos, speed, material_axes=None):
         factor = self.get_z_factor(newpos[2])
-        if self.z_mesh is None or not factor:
+        if (self.z_mesh is not None and factor
+            and newpos[:3] == self.last_position[:3]):
+            # A pure extrusion/material move must retain the mesh-adjusted
+            # physical XYZ position.  Reusing the raw G-Code Z here creates a
+            # tiny spatial move that can incorrectly drive material velocity
+            # up to the extruder limit.
+            curpos = self.toolhead.get_position()
+            self.toolhead.move(list(curpos[:3]) + newpos[3:], speed,
+                               material_axes)
+        elif self.z_mesh is None or not factor:
             # No mesh calibrated, or mesh leveling phased out.
             x, y, z = newpos[:3]
             if self.log_fade_complete:
@@ -450,13 +463,28 @@ class BedMesh:
                 logging.info(
                     "bed_mesh fade complete: Current Z: %.4f fade_target: %.4f "
                     % (z, self.fade_target))
-            self.toolhead.move([x, y, z + self.fade_target] + newpos[3:], speed)
+            self.toolhead.move([x, y, z + self.fade_target] + newpos[3:],
+                               speed, material_axes)
         else:
+            prev_split_pos = list(self.last_position)
             self.splitter.build_move(self.last_position, newpos, factor)
             while not self.splitter.traverse_complete:
                 split_move = self.splitter.split()
                 if split_move:
-                    self.toolhead.move(split_move, speed)
+                    # Bed mesh only splits XY moves.  Preserve the original
+                    # XY interpolation fraction; compensated Z must not
+                    # change the commanded material amount.
+                    ratio = 0.
+                    for axis in (0, 1):
+                        total_delta = newpos[axis] - self.last_position[axis]
+                        if total_delta:
+                            ratio = ((split_move[axis] - prev_split_pos[axis])
+                                     / total_delta)
+                            break
+                    self.toolhead.move(
+                        split_move, speed,
+                        self._scale_material_axes(material_axes, ratio))
+                    prev_split_pos = list(split_move)
                 else:
                     raise self.gcode.error(
                         "Mesh Leveling: Error splitting move ")

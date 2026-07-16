@@ -98,7 +98,7 @@ class ExcludeObject:
             self.last_position[i] = pos[i] + offset[i]
         return list(self.last_position)
 
-    def _normal_move(self, newpos, speed):
+    def _normal_move(self, newpos, speed, material_axes=None):
         offset = self._get_extrusion_offsets()
 
         if self.initial_extrusion_moves > 0 and \
@@ -139,7 +139,7 @@ class ExcludeObject:
         tx_pos = newpos[:]
         for i in range(4):
             tx_pos[i] = newpos[i] - offset[i]
-        self.next_transform.move(tx_pos, speed)
+        self.next_transform.move(tx_pos, speed, material_axes)
 
     def _ignore_move(self, newpos, speed):
         offset = self._get_extrusion_offsets()
@@ -154,7 +154,7 @@ class ExcludeObject:
         self.in_excluded_region = True
         self._ignore_move(newpos, speed)
 
-    def _move_from_excluded_region(self, newpos, speed):
+    def _move_from_excluded_region(self, newpos, speed, material_axes=None):
         self.in_excluded_region = False
 
         # This adjustment value is used to compensate for any retraction
@@ -162,7 +162,7 @@ class ExcludeObject:
         self.extruder_adj = self.max_position_excluded \
             - self.last_position_excluded[3] \
             - (self.max_position_extruded - self.last_position_extruded[3])
-        self._normal_move(newpos, speed)
+        self._normal_move(newpos, speed, material_axes)
 
     def _test_in_excluded_region(self):
         # Inside cancelled object
@@ -177,7 +177,7 @@ class ExcludeObject:
         }
         return status
 
-    def move(self, newpos, speed):
+    def move(self, newpos, speed, material_axes=None):
         move_in_excluded_region = self._test_in_excluded_region()
         self.last_speed = speed
 
@@ -188,9 +188,9 @@ class ExcludeObject:
                 self._move_into_excluded_region(newpos, speed)
         else:
             if self.in_excluded_region:
-                self._move_from_excluded_region(newpos, speed)
+                self._move_from_excluded_region(newpos, speed, material_axes)
             else:
-                self._normal_move(newpos, speed)
+                self._normal_move(newpos, speed, material_axes)
 
     cmd_EXCLUDE_OBJECT_START_help = "Marks the beginning the current object" \
                                     " as labeled"

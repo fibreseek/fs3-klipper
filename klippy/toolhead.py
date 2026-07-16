@@ -10,12 +10,24 @@ import mcu, chelper, kinematics.extruder
 #   mm/second), _v2 is velocity squared (mm^2/s^2), _t is time (in
 #   seconds), _r is ratio (scalar between 0.0 and 1.0)
 
+class MaterialMove:
+    __slots__ = ('extruder_name', 'distance')
+    def __init__(self, extruder_name, distance):
+        self.extruder_name = extruder_name
+        self.distance = distance
+    def scaled(self, ratio):
+        return MaterialMove(self.extruder_name, self.distance * ratio)
+    def __repr__(self):
+        return "MaterialMove(%r, %r)" % (self.extruder_name, self.distance)
+
 # Class to track each move request
 class Move:
-    def __init__(self, toolhead, start_pos, end_pos, speed):
+    def __init__(self, toolhead, start_pos, end_pos, speed,
+                 material_axes=None):
         self.toolhead = toolhead
         self.start_pos = tuple(start_pos)
         self.end_pos = tuple(end_pos)
+        self.material_axes = list(material_axes or [])
         self.accel = toolhead.max_accel
         self.junction_deviation = toolhead.junction_deviation
         self.timing_callbacks = []
@@ -24,11 +36,15 @@ class Move:
         self.axes_d = axes_d = [end_pos[i] - start_pos[i] for i in (0, 1, 2, 3)]
         self.move_d = move_d = math.sqrt(sum([d*d for d in axes_d[:3]]))
         if move_d < .000000001:
-            # Extrude only move
+            # Extrude/material only move
+            material_move_d = 0.
+            if self.material_axes:
+                material_move_d = max([abs(m.distance)
+                                       for m in self.material_axes])
             self.end_pos = (start_pos[0], start_pos[1], start_pos[2],
                             end_pos[3])
             axes_d[0] = axes_d[1] = axes_d[2] = 0.
-            self.move_d = move_d = abs(axes_d[3])
+            self.move_d = move_d = max(abs(axes_d[3]), material_move_d)
             inv_move_d = 0.
             if move_d:
                 inv_move_d = 1. / move_d
@@ -68,8 +84,18 @@ class Move:
     def calc_junction(self, prev_move):
         if not self.is_kinematic_move or not prev_move.is_kinematic_move:
             return
-        # Allow extruder to calculate its maximum junction
-        extruder_v2 = self.toolhead.extruder.calc_junction(prev_move, self)
+        # Allow extruders to calculate maximum junctions.
+        extruder_v2 = self.max_cruise_v2
+        if not self.material_axes and not prev_move.material_axes:
+            extruder_v2 = self.toolhead.extruder.calc_junction(prev_move, self)
+        material_names = set([m.extruder_name for m in self.material_axes])
+        material_names.update([m.extruder_name for m in prev_move.material_axes])
+        for extruder_name in material_names:
+            extruder = self.toolhead.lookup_material_extruder(
+                extruder_name)
+            extruder_v2 = min(
+                extruder_v2, extruder.calc_material_junction(
+                    prev_move, self, extruder_name))
         max_start_v2 = min(extruder_v2, self.max_cruise_v2,
                            prev_move.max_cruise_v2, prev_move.next_junction_v2,
                            prev_move.max_start_v2 + prev_move.delta_v2)
@@ -260,6 +286,7 @@ class ToolHead:
         self.trapq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
         self.trapq_append = ffi_lib.trapq_append
         self.trapq_finalize_moves = ffi_lib.trapq_finalize_moves
+        self.material_extruders = {}
         self.step_generators = []
         # Create kinematics class
         gcode = self.printer.lookup_object('gcode')
@@ -308,6 +335,10 @@ class ToolHead:
         free_time = sg_flush_time - self.kin_flush_delay
         self.trapq_finalize_moves(self.trapq, free_time, clear_history_time)
         self.extruder.update_move_time(free_time, clear_history_time)
+        active_name = self.extruder.get_name()
+        for name, extruder in list(self.material_extruders.items()):
+            if name != active_name:
+                extruder.update_move_time(free_time, clear_history_time)
         # Flush stepcompress and mcu steppersync
         for m in self.all_mcus:
             m.flush_moves(flush_time, clear_history_time)
@@ -352,8 +383,18 @@ class ToolHead:
                     move.start_pos[0], move.start_pos[1], move.start_pos[2],
                     move.axes_r[0], move.axes_r[1], move.axes_r[2],
                     move.start_v, move.cruise_v, move.accel)
-            if move.axes_d[3]:
+            if move.axes_d[3] and not move.material_axes:
                 self.extruder.move(next_move_time, move)
+            for material in move.material_axes:
+                if not material.distance:
+                    continue
+                extruder = self.lookup_material_extruder(
+                    material.extruder_name)
+                extruder.move_material(next_move_time, move,
+                                       material.distance)
+                self.printer.send_event("gcode:move_extruder",
+                                        material.extruder_name,
+                                        material.distance, False)
             next_move_time = (next_move_time + move.accel_t
                               + move.cruise_t + move.decel_t)
             for cb in move.timing_callbacks:
@@ -467,14 +508,30 @@ class ToolHead:
         last_move = self.lookahead.get_last()
         if last_move is not None:
             last_move.limit_next_junction_speed(speed)
-    def move(self, newpos, speed):
-        move = Move(self, self.commanded_pos, newpos, speed)
+    def lookup_material_extruder(self, extruder_name):
+        extruder = self.material_extruders.get(extruder_name)
+        if extruder is not None:
+            return extruder
+        extruder = self.printer.lookup_object(extruder_name, None)
+        if (extruder is None
+            or not isinstance(extruder, kinematics.extruder.PrinterExtruder)):
+            raise self.printer.command_error(
+                "'%s' is not a valid material extruder." % (extruder_name,))
+        self.material_extruders[extruder_name] = extruder
+        return extruder
+    def move(self, newpos, speed, material_axes=None):
+        move = Move(self, self.commanded_pos, newpos, speed, material_axes)
         if not move.move_d:
             return
         if move.is_kinematic_move:
             self.kin.check_move(move)
-        if move.axes_d[3]:
+        if move.axes_d[3] and material_axes is None:
             self.extruder.check_move(move)
+        for material in move.material_axes:
+            if not material.distance:
+                continue
+            extruder = self.lookup_material_extruder(material.extruder_name)
+            extruder.check_material_move(move, material.distance)
         self.commanded_pos[:] = move.end_pos
         want_flush = self.lookahead.add_move(move)
         if want_flush:

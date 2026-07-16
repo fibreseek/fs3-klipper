@@ -49,8 +49,6 @@ class VirtualSD:
         self.variables = config.getsection('save_variables')
         # Precompile regex patterns for performance
         self.gcode_pattern = re.compile(r'^\s*G[01]\b')
-        self.p_pattern = re.compile(r'P([\d\.]+)')
-        self.p_decimal_comma_pattern = re.compile(r'P(\d+),(\d+)\b')
         self.u_pattern = re.compile(r'\bU[\d\.\-]+\b')
         self.v_pattern = re.compile(r'\bV[\d\.\-]+\b')
         self.f_pattern = re.compile(r'\bF([\d\.]+)\b')
@@ -58,8 +56,6 @@ class VirtualSD:
         self.material_axis_pattern = re.compile(r'[EUV]\s*[+\-]?(?:\d|\.)', re.IGNORECASE)
         self.extrude_restart_comment_pattern = re.compile(
             r';\s*Extrude\s+restart\b', re.IGNORECASE)
-        self.uv_mode = 0 # 0: none, 1: UV, 2: U, 3: V
-        self.uv_p_value = 0.0 # UV p value
         # Register commands
         self.gcode = self.printer.lookup_object('gcode')
         for cmd in ['M20', 'M21', 'M23', 'M24', 'M25', 'M26', 'M27', 'M39']:
@@ -253,8 +249,6 @@ class VirtualSD:
         self.file_position = self.file_size = 0
         # 新文件、重置文件和断电恢复重新加载文件都从未发生材料运动开始。
         self.has_started_material_move = False
-        self.uv_mode = 0
-        self.uv_p_value = 0.0
         self.extruder_switch_detected = False
         self.powerloss_file_exist = False
         self.powerloss_init_info = None
@@ -1125,8 +1119,8 @@ class VirtualSD:
                 break
 
     def handle_extruder_mode(self, lines):
-        """Process lines and insert extruder mode commands.
-        Inserted commands are tuples (line, is_injected, raw_len) where:
+        """Process sdcard lines without injecting UV mode commands.
+        Returned commands are tuples (line, is_injected, raw_len) where:
         - is_injected=True means the line should not count towards file_position.
         - raw_len is the original file line byte-length (without newline) used
           to advance file_position safely even if line text is rewritten.
@@ -1137,7 +1131,6 @@ class VirtualSD:
         gcode_pattern = self.gcode_pattern
         u_pattern = self.u_pattern
         v_pattern = self.v_pattern
-        p_pattern = self.p_pattern
         
         for line in lines:
             # Skip comments early
@@ -1156,36 +1149,6 @@ class VirtualSD:
                 and u_pattern.search(original_line)
                 and self.extrude_restart_comment_pattern.search(original_line)
             )
-            
-            # Only process G0/G1 commands with U/V parameters
-            if gcode_pattern.match(original_line):
-                # Check for U and V parameters in one pass
-                has_u = u_pattern.search(original_line)
-                has_v = v_pattern.search(original_line)
-                
-                if has_u and has_v:
-                    # Both U and V present
-                    line = self.p_decimal_comma_pattern.sub(r'P\1.\2', line)
-                    p_match = p_pattern.search(line)
-                    p_value = float(p_match.group(1)) if p_match else 0
-                    if self.uv_mode != 1:
-                        self.uv_mode = 1
-                        self.uv_p_value = p_value
-                        processed_lines.append((f"SET_EXTRUDER_MODE S=1 P={p_value}", True, None))  # Injected
-                    else:
-                        if p_value != self.uv_p_value:
-                            self.uv_p_value = p_value
-                            processed_lines.append((f"SET_EXTRUDER_MODE S=1 P={p_value}", True, None))  # Injected
-                elif has_u:
-                    # Only U present
-                    if self.uv_mode != 2:
-                        self.uv_mode = 2
-                        processed_lines.append(("SET_EXTRUDER_MODE S=0", True, None))  # Injected
-                elif has_v:
-                    # Only V present
-                    if self.uv_mode != 3:
-                        self.uv_mode = 3
-                        processed_lines.append(("SET_EXTRUDER_MODE S=2", True, None))  # Injected
             
             # Adjust speed for stealthchop if applicable
             if self.stealthchop > 100 and not is_extrude_restart:
@@ -1435,13 +1398,9 @@ class VirtualSD:
             self.print_stats.note_error(error_message)
             self.print_stats.note_standby()
         elif self.current_file is not None:
-            self.uv_mode = 0
-            self.uv_p_value = 0.0
             self.is_start_move = False
             logging.info("SD card print paused")
         else:
-            self.uv_mode = 0
-            self.uv_p_value = 0.0
             self.is_start_move = False
             self.has_started_material_move = False
             self.print_stats.note_complete()
