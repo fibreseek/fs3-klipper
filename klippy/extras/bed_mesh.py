@@ -1476,7 +1476,31 @@ class BedMeshCalibrate:
                 self._reset_temp_sampling_session()
                 self._reset_temp_csv_session()
             reactor = self.printer.get_reactor()
-            self._get_temp_comp().fit(reactor, clean)
+            temp_cpst = self._get_temp_comp()
+            sample_shapes = []
+            for sample in temp_cpst.val_z:
+                try:
+                    rows = len(sample)
+                    cols = len(sample[0]) if rows else 0
+                    sample_shapes.append("%dx%d" % (rows, cols))
+                except Exception:
+                    sample_shapes.append("unavailable")
+            sample_count = len(temp_cpst.val_z)
+            expected_sample_count = temp_cpst.n_t
+            sample_temps = [float(temp) for temp in temp_cpst.val_t]
+            logging.info(
+                "[BED_MESH_TEMP] fitting temperature model: "
+                "samples=%d/%d shapes=%s temperatures=%s",
+                sample_count, expected_sample_count, sample_shapes, sample_temps)
+            try:
+                temp_cpst.fit(reactor, clean)
+            except Exception:
+                logging.exception(
+                    "[BED_MESH_TEMP] temperature model fit failed: "
+                    "samples=%d/%d shapes=%s temperatures=%s",
+                    sample_count, expected_sample_count,
+                    sample_shapes, sample_temps)
+                raise
 
     def probe_finalize(self, offsets, positions):
         z_offset = offsets[2]
