@@ -50,6 +50,7 @@ class VirtualSD:
         # Precompile regex patterns for performance
         self.gcode_pattern = re.compile(r'^\s*G[01]\b')
         self.p_pattern = re.compile(r'P([\d\.]+)')
+        self.p_decimal_comma_pattern = re.compile(r'P(\d+),(\d+)\b')
         self.u_pattern = re.compile(r'\bU[\d\.\-]+\b')
         self.v_pattern = re.compile(r'\bV[\d\.\-]+\b')
         self.f_pattern = re.compile(r'\bF([\d\.]+)\b')
@@ -1164,7 +1165,8 @@ class VirtualSD:
                 
                 if has_u and has_v:
                     # Both U and V present
-                    p_match = p_pattern.search(original_line)
+                    line = self.p_decimal_comma_pattern.sub(r'P\1.\2', line)
+                    p_match = p_pattern.search(line)
                     p_value = float(p_match.group(1)) if p_match else 0
                     if self.uv_mode != 1:
                         self.uv_mode = 1
