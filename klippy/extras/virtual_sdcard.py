@@ -53,6 +53,8 @@ class VirtualSD:
         self.u_pattern = re.compile(r'\bU[\d\.\-]+\b')
         self.v_pattern = re.compile(r'\bV[\d\.\-]+\b')
         self.f_pattern = re.compile(r'\bF([\d\.]+)\b')
+        # 首次材料运动同时兼容普通 E 轴和本机共挤使用的 U/V 轴；匹配前会剥离注释。
+        self.material_axis_pattern = re.compile(r'[EUV]\s*[+\-]?(?:\d|\.)', re.IGNORECASE)
         self.extrude_restart_comment_pattern = re.compile(
             r';\s*Extrude\s+restart\b', re.IGNORECASE)
         self.uv_mode = 0 # 0: none, 1: UV, 2: U, 3: V
@@ -94,6 +96,8 @@ class VirtualSD:
         self.printed_pos_z = 0
         self.powerloss_record_time = self.reactor.monotonic()
         self.is_start_move = False
+        # 当前加载的 SD 执行段是否曾发生过 E/U/V 材料轴运动；暂停时保持，用于状态订阅恢复。
+        self.has_started_material_move = False
         self.powerloss_progress = powerloss_progress.setup_powerloss_progress(POWERLOSS_FILE_NAME, 5)
         self.is_recover_print = False
         self.powerloss_file_exist = self.powerloss_progress.check_powerloss_file()
@@ -195,6 +199,7 @@ class VirtualSD:
             'file_position': self.file_position,
             'file_size': self.file_size,
             'is_start_move': self.is_start_move,
+            'has_started_material_move': self.has_started_material_move,
             'powerloss_file_exist': self.powerloss_file_exist,
         }
     def file_path(self):
@@ -234,6 +239,8 @@ class VirtualSD:
         self.powerloss_file_exist = False
         self.powerloss_init_info = None
         self.powerloss_progress.clear_record()
+        # 取消代表当前加载的 SD 执行段结束，清除历史材料运动状态。
+        self.has_started_material_move = False
     # G-Code commands
     def cmd_error(self, gcmd):
         raise gcmd.error("Printer is not supported command: %s" % gcmd.command)
@@ -243,6 +250,8 @@ class VirtualSD:
             self.current_file.close()
             self.current_file = None
         self.file_position = self.file_size = 0
+        # 新文件、重置文件和断电恢复重新加载文件都从未发生材料运动开始。
+        self.has_started_material_move = False
         self.uv_mode = 0
         self.uv_p_value = 0.0
         self.extruder_switch_detected = False
@@ -448,6 +457,8 @@ class VirtualSD:
             gcmd.respond_raw("warning : Ivalide file type!" % filename)
             return
         self.print_progress = 0
+        # M39 旧式恢复路径不经过 _reset_file()，需显式开启新的执行段。
+        self.has_started_material_move = False
         self.sdcard_dirname = os.path.normpath(files[0])
         self._load_file(gcmd, files[1], check_subdirs=True)
         if '*' in command_line:
@@ -1358,10 +1369,16 @@ class VirtualSD:
                     # Add a minimal delay after executing G-code to prevent "Timer too close" errors
                     # Reduced from 1ms to 0.1ms to avoid stuttering during printing
                     self.reactor.pause(self.reactor.monotonic() + 0.0001)  # 0.1ms delay
-                if not self.is_start_move and (line.startswith('G1') or line.startswith('G0')) :
+                # 仅首个包含材料轴 E/U/V 的 G0/G1 视为真正开始打印；
+                # 纯 XY/Z 移动、归零和擦嘴动作不会过早放开暂停/断电续打流程。
+                move_line = line.split(';', 1)[0]
+                is_linear_move = move_line.lstrip().upper().startswith(('G0', 'G1'))
+                if (not self.is_start_move and is_linear_move
+                        and self.material_axis_pattern.search(move_line)):
                     self.gcode.respond_raw("[SDCARD_PRINT_FILE] Print move start: %s"%(line))
                     self.printer.send_event("virtual_sdcard:move_start", line)
                     self.is_start_move = True
+                    self.has_started_material_move = True
             except self.gcode.error as e:
                 error_message = str(e)
                 try:
@@ -1412,6 +1429,7 @@ class VirtualSD:
         self.work_timer = None
         self.cmd_from_sd = False
         if error_message is not None:
+            self.has_started_material_move = False
             self.print_stats.note_error(error_message)
             self.print_stats.note_standby()
         elif self.current_file is not None:
@@ -1423,6 +1441,7 @@ class VirtualSD:
             self.uv_mode = 0
             self.uv_p_value = 0.0
             self.is_start_move = False
+            self.has_started_material_move = False
             self.print_stats.note_complete()
             logging.info("SD card print completed")
         return self.reactor.NEVER
