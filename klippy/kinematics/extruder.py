@@ -215,22 +215,23 @@ class PrinterExtruder:
         self.extruder_stepper.stepper.set_position([self.last_position, 0., 0.])
         self.extruder_stepper.stepper.set_trapq(self.trapq)
         self.extruder_stepper.motion_queue = self.name
-    def check_move(self, move):
-        axis_r = move.axes_r[3]
+    def _check_move_distance(self, move, e_distance):
+        # E 与 U/V 共用的挤出校验：只在“取多少挤出距离”上有差异
         if not self.heater.can_extrude:
             min_extrude_temp = self.heater.get_min_extrude_temp()
             raise self.printer.command_error(
                 "Please set the temperature to above %.1f℃ before extrusion." % (min_extrude_temp,))
+        axis_r = e_distance / move.move_d
         if (not move.axes_d[0] and not move.axes_d[1]) or axis_r < 0.:
             # Extrude only move (or retraction move) - limit accel and velocity
-            if abs(move.axes_d[3]) > self.max_e_dist:
+            if abs(e_distance) > self.max_e_dist:
                 raise self.printer.command_error(
                     "The single extrusion length must be less than %.3fmm." % (self.max_e_dist,))
             inv_extrude_r = 1. / abs(axis_r)
             move.limit_speed(self.max_e_velocity * inv_extrude_r,
                              self.max_e_accel * inv_extrude_r)
         elif axis_r > self.max_extrude_ratio:
-            if move.axes_d[3] <= self.nozzle_diameter * self.max_extrude_ratio:
+            if e_distance <= self.nozzle_diameter * self.max_extrude_ratio:
                 # Permit extrusion if amount extruded is tiny
                 return
             area = axis_r * self.filament_area
@@ -238,60 +239,41 @@ class PrinterExtruder:
                           axis_r, self.max_extrude_ratio, area, move.move_d)
             raise self.printer.command_error(
                 "Move exceeds maximum extrusion (%.3fmm^2 vs %.3fmm^2)" % (area, self.max_extrude_ratio * self.filament_area))
+    def check_move(self, move):
+        # 活动挤出机：挤出距离取自位置向量的 E 分量
+        self._check_move_distance(move, move.axes_d[3])
     def check_material_move(self, move, material_distance):
+        # 材料轴（U/V 或经 material_axes 的 E）：挤出距离由调用方给出
         if not material_distance:
             return
         if self.extruder_stepper is None:
             raise self.printer.command_error(
                 "Extruder '%s' does not have a stepper." % (self.name,))
         self.ensure_own_motion_queue()
-        if not self.heater.can_extrude:
-            min_extrude_temp = self.heater.get_min_extrude_temp()
-            raise self.printer.command_error(
-                "Please set the temperature to above %.1f℃ before extrusion." % (min_extrude_temp,))
-        axis_r = material_distance / move.move_d
-        if (not move.axes_d[0] and not move.axes_d[1]) or axis_r < 0.:
-            if abs(material_distance) > self.max_e_dist:
-                raise self.printer.command_error(
-                    "The single extrusion length must be less than %.3fmm." % (self.max_e_dist,))
-            inv_extrude_r = 1. / abs(axis_r)
-            move.limit_speed(self.max_e_velocity * inv_extrude_r,
-                             self.max_e_accel * inv_extrude_r)
-        elif axis_r > self.max_extrude_ratio:
-            if material_distance <= self.nozzle_diameter * self.max_extrude_ratio:
-                return
-            area = axis_r * self.filament_area
-            logging.debug("Overextrude: %s vs %s (area=%.3f dist=%.3f)",
-                          axis_r, self.max_extrude_ratio, area, move.move_d)
-            raise self.printer.command_error(
-                "Move exceeds maximum extrusion (%.3fmm^2 vs %.3fmm^2)" % (area, self.max_extrude_ratio * self.filament_area))
-    def calc_junction(self, prev_move, move):
-        diff_r = move.axes_r[3] - prev_move.axes_r[3]
-        if diff_r:
-            return (self.instant_corner_v / abs(diff_r))**2
-        return move.max_cruise_v2
-    def calc_material_junction(self, prev_move, move, extruder_name):
-        prev_dist = 0.
-        for material in prev_move.material_axes:
-            if material.extruder_name == extruder_name:
-                prev_dist = material.distance
-                break
-        move_dist = 0.
+        self._check_move_distance(move, material_distance)
+    def _material_ratio(self, move, extruder_name):
+        # 取某挤出机在该 move 中的挤出比 = 挤出距离 / 运动距离
+        if not move.move_d:
+            return 0.
         for material in move.material_axes:
             if material.extruder_name == extruder_name:
-                move_dist = material.distance
-                break
-        prev_r = move_r = 0.
-        if prev_move.move_d:
-            prev_r = prev_dist / prev_move.move_d
-        if move.move_d:
-            move_r = move_dist / move.move_d
+                return material.distance / move.move_d
+        return 0.
+    def _junction_from_ratios(self, prev_r, move_r, move):
         diff_r = move_r - prev_r
         if diff_r:
             return (self.instant_corner_v / abs(diff_r))**2
         return move.max_cruise_v2
-    def move(self, print_time, move):
-        axis_r = move.axes_r[3]
+    def calc_junction(self, prev_move, move):
+        return self._junction_from_ratios(
+            prev_move.axes_r[3], move.axes_r[3], move)
+    def calc_material_junction(self, prev_move, move, extruder_name):
+        prev_r = self._material_ratio(prev_move, extruder_name)
+        move_r = self._material_ratio(move, extruder_name)
+        return self._junction_from_ratios(prev_r, move_r, move)
+    def _queue_move(self, print_time, move, e_distance, start_pos):
+        # E 与 U/V 共用的 trapq 入队：仅“挤出距离/起点”不同
+        axis_r = e_distance / move.move_d
         accel = move.accel * axis_r
         start_v = move.start_v * axis_r
         cruise_v = move.cruise_v * axis_r
@@ -301,23 +283,17 @@ class PrinterExtruder:
         # Queue movement (x is extruder movement, y is pressure advance flag)
         self.trapq_append(self.trapq, print_time,
                           move.accel_t, move.cruise_t, move.decel_t,
-                          move.start_pos[3], 0., 0.,
+                          start_pos, 0., 0.,
                           1., can_pressure_advance, 0.,
                           start_v, cruise_v, accel)
+    def move(self, print_time, move):
+        # 活动挤出机：起点用位置向量 E，结束位置绝对写回
+        self._queue_move(print_time, move, move.axes_d[3], move.start_pos[3])
         self.last_position = move.end_pos[3]
     def move_material(self, print_time, move, material_distance):
-        axis_r = material_distance / move.move_d
-        accel = move.accel * axis_r
-        start_v = move.start_v * axis_r
-        cruise_v = move.cruise_v * axis_r
-        can_pressure_advance = False
-        if axis_r > 0. and (move.axes_d[0] or move.axes_d[1]):
-            can_pressure_advance = True
-        self.trapq_append(self.trapq, print_time,
-                          move.accel_t, move.cruise_t, move.decel_t,
-                          self.last_position, 0., 0.,
-                          1., can_pressure_advance, 0.,
-                          start_v, cruise_v, accel)
+        # 材料轴：起点用自身跟踪位置，结束位置按增量累加
+        self._queue_move(print_time, move, material_distance,
+                         self.last_position)
         self.last_position += material_distance
     def find_past_position(self, print_time):
         if self.extruder_stepper is None:

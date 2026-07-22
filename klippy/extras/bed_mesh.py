@@ -488,10 +488,6 @@ class BedMesh:
             final_z_adj = factor * z_adj + self.fade_target
             self.last_position[:] = [x, y, z - final_z_adj] + cur_pos[3:]
         return list(self.last_position)
-    def _scale_material_axes(self, material_axes, ratio):
-        if not material_axes:
-            return material_axes
-        return [m.scaled(ratio) for m in material_axes]
     def move(self, newpos, speed, material_axes=None):
         factor = self.get_z_factor(newpos[2])
         if (self.z_mesh is not None and factor
@@ -514,25 +510,14 @@ class BedMesh:
             self.toolhead.move([x, y, z + self.fade_target] + newpos[3:],
                                speed, material_axes)
         else:
-            prev_split_pos = list(self.last_position)
-            self.splitter.build_move(self.last_position, newpos, factor)
+            # 材料切分由 MoveSplitter 按沿程比例完成，避免外部再算 ratio
+            self.splitter.build_move(self.last_position, newpos, factor,
+                                     material_axes)
             while not self.splitter.traverse_complete:
-                split_move = self.splitter.split()
-                if split_move:
-                    # Bed mesh only splits XY moves.  Preserve the original
-                    # XY interpolation fraction; compensated Z must not
-                    # change the commanded material amount.
-                    ratio = 0.
-                    for axis in (0, 1):
-                        total_delta = newpos[axis] - self.last_position[axis]
-                        if total_delta:
-                            ratio = ((split_move[axis] - prev_split_pos[axis])
-                                     / total_delta)
-                            break
-                    self.toolhead.move(
-                        split_move, speed,
-                        self._scale_material_axes(material_axes, ratio))
-                    prev_split_pos = list(split_move)
+                split_move, split_material = self.splitter.split()
+                if split_move is not None:
+                    # splitter 已按沿程比例切好该段材料，直接下发
+                    self.toolhead.move(split_move, speed, split_material)
                 else:
                     raise self.gcode.error(
                         "Mesh Leveling: Error splitting move ")
@@ -2209,7 +2194,7 @@ class MoveSplitter:
     def initialize(self, mesh, fade_offset):
         self.z_mesh = mesh
         self.fade_offset = fade_offset
-    def build_move(self, prev_pos, next_pos, factor):
+    def build_move(self, prev_pos, next_pos, factor, material_axes=None):
         self.prev_pos = tuple(prev_pos)
         self.next_pos = tuple(next_pos)
         self.current_pos = list(prev_pos)
@@ -2220,10 +2205,20 @@ class MoveSplitter:
         axes_d = [np - pp for np, pp in zip(self.next_pos, self.prev_pos)]
         self.total_move_length = math.sqrt(sum([d*d for d in axes_d[:3]]))
         self.axis_move = [not isclose(d, 0., abs_tol=1e-10) for d in axes_d]
+        # 本条指令的材料总量；按沿程比例 Δt 分摊给各切段
+        self.material_axes = list(material_axes or [])
+        self.prev_t = 0.
     def _calc_z_offset(self, pos):
         z = self.z_mesh.calc_z(pos[0], pos[1])
         offset = self.fade_offset
         return self.z_factor * (z - offset) + offset
+    def _take_material(self, t):
+        # 取出从上一段到当前沿程比例 t 之间应分摊的材料增量
+        if not self.material_axes:
+            return self.material_axes
+        delta = t - self.prev_t
+        self.prev_t = t
+        return [m.scaled(delta) for m in self.material_axes]
     def _set_next_move(self, distance_from_prev):
         t = distance_from_prev / self.total_move_length
         if t > 1. or t < 0.:
@@ -2235,6 +2230,7 @@ class MoveSplitter:
                 self.current_pos[i] = lerp(
                     t, self.prev_pos[i], self.next_pos[i])
     def split(self):
+        # 返回 (pos, material)；材料按沿程比例切分，终点段用 t=1 保证总量守恒
         if not self.traverse_complete:
             if self.axis_move[0] or self.axis_move[1]:
                 # X and/or Y axis move, traverse if necessary
@@ -2247,7 +2243,8 @@ class MoveSplitter:
                         self.z_offset = next_z
                         newpos = list(self.current_pos)
                         newpos[2] += self.z_offset
-                        return newpos
+                        t = self.distance_checked / self.total_move_length
+                        return newpos, self._take_material(t)
             # end of move reached
             self.current_pos[:] = self.next_pos
             self.z_offset = self._calc_z_offset(self.current_pos)
@@ -2255,10 +2252,11 @@ class MoveSplitter:
             # used again.
             self.current_pos[2] += self.z_offset
             self.traverse_complete = True
-            return self.current_pos
+            # 终点固定 t=1，无 XY 时也能拿到全部材料（避免 ratio=0 清零）
+            return self.current_pos, self._take_material(1.)
         else:
             # Traverse complete
-            return None
+            return None, None
 
 
 class ZMesh:
