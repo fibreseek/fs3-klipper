@@ -14,7 +14,14 @@ class QueueHandler(logging.Handler):
     def emit(self, record):
         try:
             # 保持原始消息，让QueueListener来格式化
-            record.msg = record.getMessage()
+            # Preserve exception text before clearing exc_info (otherwise
+            # logging.exception traces are silently dropped from klippy.log).
+            msg = record.getMessage()
+            if record.exc_info:
+                fmt = (self.formatter if self.formatter is not None
+                       else logging.Formatter())
+                msg = "%s\n%s" % (msg, fmt.formatException(record.exc_info))
+            record.msg = msg
             record.args = None
             record.exc_info = None
             self.queue.put_nowait(record)

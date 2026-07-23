@@ -648,7 +648,9 @@ class VirtualSD:
             return False
 
         if bed_mesh.load_runtime_mesh_snapshot():
-            gcmd.respond_raw("Loading recovery bed mesh runtime snapshot")
+            gcmd.respond_raw(
+                "Loading recovery bed mesh profile [%s]"
+                % ("runtime_active",))
             return True
 
         bed_temp = file_info.get('bed_temp')
