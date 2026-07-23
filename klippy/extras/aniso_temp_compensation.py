@@ -120,7 +120,13 @@ class AnisoTempCompensation:
             self.val_t[idx] = temp_now
 
         # 注意 matrix_p 是 (ny,nx) 形状的二维数组
-        self.val_z.append(matrix_p)
+        matrix = np.asarray(matrix_p, dtype=np.float32)
+        if matrix.ndim != 2 or matrix.shape != (self.n_y, self.n_x):
+            raise error(
+                "[TempComp] probed matrix shape %s does not match configured "
+                "(n_y,n_x)=(%d,%d)"
+                % (getattr(matrix, "shape", None), self.n_y, self.n_x))
+        self.val_z.append(matrix.tolist())
         self.built = False
         # logging.debug(f"cpst----\n{self.val_z}")
 
@@ -130,6 +136,16 @@ class AnisoTempCompensation:
         """
         # 清理回调函数
         self.clean_callback = callback
+        if len(self.val_z) != self.n_t:
+            raise error(
+                "[TempComp] fit requires %d samples, got %d"
+                % (self.n_t, len(self.val_z)))
+        for i, matrix_p in enumerate(self.val_z):
+            matrix = np.asarray(matrix_p, dtype=np.float32)
+            if matrix.ndim != 2 or matrix.shape != (self.n_y, self.n_x):
+                raise error(
+                    "[TempComp] sample %d shape %s != (%d,%d)"
+                    % (i, getattr(matrix, "shape", None), self.n_y, self.n_x))
 
         # 评估XYT外推需求
         ext_head_x = self.limit_x[0] < self.val_x[0]

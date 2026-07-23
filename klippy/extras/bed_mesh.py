@@ -727,11 +727,14 @@ class BedMeshCalibrate:
         self.gcode.register_command(
             'BED_MESH_TEMP_LOAD', self.cmd_BED_MESH_TEMP_LOAD)
     def _get_temp_comp(self):
+        # Temperature model is for the full configured bed mesh. Do not size it
+        # from mesh_config/mesh_min/max: those may still hold leftover adaptive
+        # sizes from a prior BED_MESH_CALIBRATE with PRINT_MIN/PRINT_MAX.
         if self.temp_cpst is None:
             self.temp_cpst = aniso_temp_compensation.AnisoTempCompensation(
-                self.mesh_min, self.mesh_max,
-                self.mesh_config['x_count'],
-                self.mesh_config['y_count'],
+                self.orig_config['mesh_min'], self.orig_config['mesh_max'],
+                self.orig_config['x_count'],
+                self.orig_config['y_count'],
                 root_config=self.config)
         return self.temp_cpst
     def _load_profile_mesh(self, profile_name):
@@ -1498,57 +1501,57 @@ class BedMeshCalibrate:
                 % (profile_name, target_temp))
     def cmd_BED_MESH_TEMP(self, gcmd):
         flag = gcmd.get_int('P', 0)
-        if flag == 0:
-            temps = self._parse_temp_list(gcmd)
-            temp_cpst = self._get_temp_comp()
-            temp_cpst.reset(val_t=temps)
-            self._start_temp_sampling_session(temps)
-            self._start_temp_csv_session(temps)
-        elif flag == 1:
-            temp_now = None
-            heater_bed = self.printer.lookup_object("heater_bed", None)
-            if heater_bed is not None: # ["target"]期望温度, ["temperature"]实测温度
-                temp_now = heater_bed.get_status(0)["temperature"]
+        try:
+            if flag == 0:
+                temps = self._parse_temp_list(gcmd)
+                # Force recreate so a leftover adaptive mesh_config cannot stick.
+                self.temp_cpst = None
+                temp_cpst = self._get_temp_comp()
+                temp_cpst.reset(val_t=temps)
+                self._start_temp_sampling_session(temps)
+                self._start_temp_csv_session(temps)
+            elif flag == 1:
+                temp_now = None
+                heater_bed = self.printer.lookup_object("heater_bed", None)
+                if heater_bed is not None: # ["target"]期望温度, ["temperature"]实测温度
+                    temp_now = heater_bed.get_status(0)["temperature"]
 
-            z_mesh = self.bedmesh.get_mesh()
-            if z_mesh is None:
-                logging.info("bed_mesh: temp sample skipped, no active mesh")
-                self._append_temp_csv_sample([], temp_now)
-                return
-            probed_matrix = z_mesh.get_probed_matrix()
-            self._get_temp_comp().receive(probed_matrix, temp_now)
-            self._append_temp_csv_sample(probed_matrix, temp_now)
-        elif flag == 2:
-            def clean():
-                self.temp_cpst = None # 使用完毕，及时释放内存
-                self._reset_temp_sampling_session()
-                self._reset_temp_csv_session()
-            reactor = self.printer.get_reactor()
-            temp_cpst = self._get_temp_comp()
-            sample_shapes = []
-            for sample in temp_cpst.val_z:
-                try:
-                    rows = len(sample)
-                    cols = len(sample[0]) if rows else 0
-                    sample_shapes.append("%dx%d" % (rows, cols))
-                except Exception:
-                    sample_shapes.append("unavailable")
-            sample_count = len(temp_cpst.val_z)
-            expected_sample_count = temp_cpst.n_t
-            sample_temps = [float(temp) for temp in temp_cpst.val_t]
-            logging.info(
-                "[BED_MESH_TEMP] fitting temperature model: "
-                "samples=%d/%d shapes=%s temperatures=%s",
-                sample_count, expected_sample_count, sample_shapes, sample_temps)
-            try:
-                temp_cpst.fit(reactor, clean)
-            except Exception:
-                logging.exception(
-                    "[BED_MESH_TEMP] temperature model fit failed: "
+                z_mesh = self.bedmesh.get_mesh()
+                if z_mesh is None:
+                    logging.info("bed_mesh: temp sample skipped, no active mesh")
+                    self._append_temp_csv_sample([], temp_now)
+                    return
+                probed_matrix = z_mesh.get_probed_matrix()
+                self._get_temp_comp().receive(probed_matrix, temp_now)
+                self._append_temp_csv_sample(probed_matrix, temp_now)
+            elif flag == 2:
+                def clean():
+                    self.temp_cpst = None # 使用完毕，及时释放内存
+                    self._reset_temp_sampling_session()
+                    self._reset_temp_csv_session()
+                reactor = self.printer.get_reactor()
+                temp_cpst = self._get_temp_comp()
+                sample_shapes = []
+                for sample in temp_cpst.val_z:
+                    try:
+                        rows = len(sample)
+                        cols = len(sample[0]) if rows else 0
+                        sample_shapes.append("%dx%d" % (rows, cols))
+                    except Exception:
+                        sample_shapes.append("unavailable")
+                sample_count = len(temp_cpst.val_z)
+                expected_sample_count = temp_cpst.n_t
+                sample_temps = [float(temp) for temp in temp_cpst.val_t]
+                logging.info(
+                    "[BED_MESH_TEMP] fitting temperature model: "
                     "samples=%d/%d shapes=%s temperatures=%s",
-                    sample_count, expected_sample_count,
-                    sample_shapes, sample_temps)
-                raise
+                    sample_count, expected_sample_count, sample_shapes, sample_temps)
+                temp_cpst.fit(reactor, clean)
+        except aniso_temp_compensation.error as e:
+            raise gcmd.error(str(e))
+        except Exception as e:
+            logging.exception("BED_MESH_TEMP P=%s failed", flag)
+            raise gcmd.error("BED_MESH_TEMP P=%s failed: %s" % (flag, e))
 
     def probe_finalize(self, offsets, positions):
         z_offset = offsets[2]
