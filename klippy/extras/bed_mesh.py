@@ -14,7 +14,10 @@ PROFILE_OPTIONS = {
     'x_count': int, 'y_count': int, 'mesh_x_pps': int, 'mesh_y_pps': int,
     'algo': str, 'tension': float
 }
-# 跨重启「当前激活网床」在 printer.cfg 中的固定 profile 名（替代原 npz 快照）
+# profile 命名契约：
+#   default        —— 双温完整校准保存的全床基准（calibration.cfg 写入）
+#   runtime_active —— 当前生效网床的跨重启快照（替代原 npz），续打恢复只认它
+BASELINE_PROFILE = "default"
 RUNTIME_ACTIVE_PROFILE = "runtime_active"
 
 class BedMeshError(Exception):
@@ -363,6 +366,11 @@ class BedMesh:
     def _persist_config_no_restart(self):
         """将 pending 配置写入 printer.cfg，不重启（SAVE_CONFIG R=0）。"""
         try:
+            # SAVE_CONFIG 主线程拼装配置会阻塞 reactor；落盘前先等运动结束。
+            # 额外 dwell 很小幅预留 MCU 调度缓冲，避免与最后的步序重叠。
+            toolhead = self.printer.lookup_object('toolhead')
+            toolhead.wait_moves()
+            toolhead.dwell(0.05)
             self.gcode.run_script_from_command("SAVE_CONFIG R=0\n")
             return True
         except Exception:
@@ -1297,12 +1305,19 @@ class BedMeshCalibrate:
         logging.info(
             "bed_mesh: fast bed mesh fallback to recalibrate, reason=%s",
             reason)
+        # 强制 PROFILE=runtime_active：既避免覆盖校准全床基准 default，
+        # 也不再引入只写不读的中间名（原 model_leveling）。
+        # probe_finalize 的自动 save_profile 只写 pending，
+        # 由结尾 save_runtime_mesh_snapshot 统一 SAVE_CONFIG 落盘一次；
+        # 落盘前先抬升并 M400，避免与 Z 运动重叠导致 Timer too close。
+        params = dict(gcmd.get_command_parameters())
+        params['PROFILE'] = RUNTIME_ACTIVE_PROFILE
+        param_str = ' '.join('%s=%s' % (k.upper(), v) for k, v in params.items())
         self.gcode.run_script_from_command(
             "BED_MESH_CLEAR\n"
-            f"BED_MESH_CALIBRATE {gcmd.get_raw_command_parameters()}\n"
-            "BED_MESH_PROFILE SAVE=model_leveling\n"
-            "BED_MESH_PROFILE LOAD=model_leveling\n"
+            f"BED_MESH_CALIBRATE {param_str}\n"
             "G1 Z10 F600\n"
+            "M400\n"
         )
         self.bedmesh.save_runtime_mesh_snapshot()
 
