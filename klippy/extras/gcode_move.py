@@ -51,6 +51,9 @@ class GCodeMove:
         self.base_position = [0.0, 0.0, 0.0, 0.0]
         self.last_position = [0.0, 0.0, 0.0, 0.0]
         self.homing_position = [0.0, 0.0, 0.0, 0.0]
+        # U/V 是独立材料坐标；E 继续复用 Klipper 原有的索引 3，避免维护两份 E 状态。
+        self.material_last_position = {'U': 0.0, 'V': 0.0}
+        self.material_base_position = {'U': 0.0, 'V': 0.0}
         self.speed = 25.
         self.speed_factor = 1. / 60.
         self.extrude_factor = 1.
@@ -85,8 +88,16 @@ class GCodeMove:
                      self.extrude_factor, self.speed)
     def _handle_activate_extruder(self):
         self.reset_last_position()
+        # 激活挤出机沿用原生行为把倍率恢复为 100%，同时保持 U/V 逻辑坐标不跳变。
+        old_material_positions = {
+            axis: self._get_material_gcode_position(axis) for axis in 'UV'
+        }
         self.extrude_factor = 1.
         self.base_position[3] = self.last_position[3]
+        for axis in 'UV':
+            self._set_material_base_position(
+                axis, self._get_material_last_position(axis)
+                - old_material_positions[axis])
     def _handle_home_rails_end(self, homing_state, rails):
         self.reset_last_position()
         for axis in homing_state.get_axes():
@@ -106,6 +117,39 @@ class GCodeMove:
         p = [lp - bp for lp, bp in zip(self.last_position, self.base_position)]
         p[3] /= self.extrude_factor
         return p
+    def _get_material_last_position(self, axis):
+        # 统一材料轴访问入口：E 沿用原生位置，U/V 使用各自独立位置。
+        if axis == 'E':
+            return self.last_position[3]
+        return self.material_last_position[axis]
+    def _set_material_last_position(self, axis, position):
+        if axis == 'E':
+            self.last_position[3] = position
+        else:
+            self.material_last_position[axis] = position
+    def _get_material_base_position(self, axis):
+        if axis == 'E':
+            return self.base_position[3]
+        return self.material_base_position[axis]
+    def _set_material_base_position(self, axis, position):
+        if axis == 'E':
+            self.base_position[3] = position
+        else:
+            self.material_base_position[axis] = position
+    def _get_material_gcode_position(self, axis):
+        return ((self._get_material_last_position(axis)
+                 - self._get_material_base_position(axis))
+                / self.extrude_factor)
+    def _resolve_material_position(self, axis, value):
+        # 将 M82/M83 下的目标值统一换算成本次实际材料运动增量。
+        last_position = self._get_material_last_position(axis)
+        scaled_value = value * self.extrude_factor
+        if not self.absolute_coord or not self.absolute_extrude:
+            target_position = last_position + scaled_value
+        else:
+            target_position = (scaled_value
+                               + self._get_material_base_position(axis))
+        return target_position, target_position - last_position
     def _get_gcode_speed(self):
         return self.speed / self.speed_factor
     def _get_gcode_speed_override(self):
@@ -121,6 +165,11 @@ class GCodeMove:
             'homing_origin': self.Coord(*self.homing_position),
             'position': self.Coord(*self.last_position),
             'gcode_position': self.Coord(*move_position),
+            # 为宏和恢复流程提供 E/U/V 的只读逻辑坐标。
+            'material_gcode_position': {
+                axis.lower(): self._get_material_gcode_position(axis)
+                for axis in 'EUV'
+            },
         }
     def reset_last_position(self):
         if self.is_printer_ready:
@@ -134,10 +183,18 @@ class GCodeMove:
             raise self.printer.command_error("Extruder not configured")
         return name
 
+    def _get_material_extruder_name(self, axis):
+        if axis == 'E':
+            return self._get_active_extruder_name()
+        if axis == 'U':
+            return 'extruder2'
+        return 'extruder'
+
     def cmd_G1(self, gcmd):
         # Move
         params = gcmd.get_command_parameters()
         material_axes = []
+        pending_material_positions = {}
         try:
             for pos, axis in enumerate('XYZ'):
                 if axis in params:
@@ -154,56 +211,19 @@ class GCodeMove:
                         self.printer.send_event("axisz:move",(move_pos[pos]))
             if 'E' in params and ('U' in params or 'V' in params):
                 raise gcmd.error("E cannot be used with U/V direct UV moves")
-            if 'E' in params:
-                old_e_pos = self.last_position[3]
-                v = float(params['E']) * self.extrude_factor
-                if not self.absolute_coord or not self.absolute_extrude:
-                    # value relative to position of last move
-                    self.last_position[3] += v
-                else:
-                    # value relative to base coordinate position
-                    self.last_position[3] = v + self.base_position[3]
+            for axis in 'EUV':
+                if axis not in params:
+                    continue
+                target_position, distance = self._resolve_material_position(
+                    axis, float(params[axis]))
                 material_axes.append(toolhead.MaterialMove(
-                    self._get_active_extruder_name(),
-                    self.last_position[3] - old_e_pos))
-            # UV 同移）
-            if 'U' in params and 'V' in params:
-                if self.absolute_extrude:
-                    raise gcmd.error("M83 MODE ONLY!")
-                u_val = float(params['U']) * self.extrude_factor
-                if u_val < 0.:
-                    raise gcmd.error("Direct UV does not support negative U")
-                val = float(params['V']) * self.extrude_factor
-                if not self.absolute_coord or not self.absolute_extrude:
-                    self.last_position[3] += val
+                    self._get_material_extruder_name(axis), distance))
+                if axis == 'E':
+                    # E 位于 toolhead 的原生位置向量中，移动前仍需写入目标位置。
+                    self._set_material_last_position(axis, target_position)
                 else:
-                    self.last_position[3] = val + self.base_position[3]
-                material_axes.append(toolhead.MaterialMove('extruder', val))
-                material_axes.append(toolhead.MaterialMove('extruder2', u_val))
-            elif 'U' in params:
-                if self.absolute_extrude:
-                    raise gcmd.error("M83 MODE ONLY!")
-                val = float(params['U']) * self.extrude_factor
-                if val < 0.:
-                    raise gcmd.error("Direct UV does not support negative U")
-                if not self.absolute_coord or not self.absolute_extrude:
-                    # value relative to position of last move
-                    self.last_position[3] += val
-                else:
-                    # value relative to base coordinate position
-                    self.last_position[3] = val + self.base_position[3]
-                material_axes.append(toolhead.MaterialMove('extruder2', val))
-            elif 'V' in params:
-                if self.absolute_extrude:
-                    raise gcmd.error("M83 MODE ONLY!")
-                val = float(params['V']) * self.extrude_factor
-                if not self.absolute_coord or not self.absolute_extrude:
-                    # value relative to position of last move
-                    self.last_position[3] += val
-                else:
-                    # value relative to base coordinate position
-                    self.last_position[3] = val + self.base_position[3]
-                material_axes.append(toolhead.MaterialMove('extruder', val))
+                    # U/V 仅在运动层接受本条命令后提交，失败时不能污染绝对坐标。
+                    pending_material_positions[axis] = target_position
             if 'F' in params:
                 gcode_speed = float(params['F'])
                 if gcode_speed <= 0.:
@@ -214,6 +234,8 @@ class GCodeMove:
             raise gcmd.error("Unable to parse move '%s'"
                              % (gcmd.get_commandline(),))
         self.move_with_transform(self.last_position, self.speed, material_axes)
+        for axis, position in pending_material_positions.items():
+            self._set_material_last_position(axis, position)
     # G-Code coordinate manipulation
     def cmd_G20(self, gcmd):
         # Set units to inches
@@ -236,13 +258,23 @@ class GCodeMove:
     def cmd_G92(self, gcmd):
         # Set position
         offsets = [ gcmd.get_float(a, None) for a in 'XYZE' ]
+        material_offsets = {
+            axis: gcmd.get_float(axis, None) for axis in 'UV'
+        }
         for i, offset in enumerate(offsets):
             if offset is not None:
                 if i == 3:
                     offset *= self.extrude_factor
                 self.base_position[i] = self.last_position[i] - offset
-        if offsets == [None, None, None, None]:
+        for axis, offset in material_offsets.items():
+            if offset is not None:
+                self._set_material_base_position(
+                    axis, self._get_material_last_position(axis)
+                    - offset * self.extrude_factor)
+        if (offsets == [None, None, None, None]
+                and all(offset is None for offset in material_offsets.values())):
             self.base_position = list(self.last_position)
+            self.material_base_position = dict(self.material_last_position)
     def cmd_M114(self, gcmd):
         # Get Current Position
         p = self._get_gcode_position()
@@ -258,6 +290,11 @@ class GCodeMove:
         last_e_pos = self.last_position[3]
         e_value = (last_e_pos - self.base_position[3]) / self.extrude_factor
         self.base_position[3] = last_e_pos - e_value * new_extrude_factor
+        for axis in 'UV':
+            last_position = self._get_material_last_position(axis)
+            gcode_position = self._get_material_gcode_position(axis)
+            self._set_material_base_position(
+                axis, last_position - gcode_position * new_extrude_factor)
         self.extrude_factor = new_extrude_factor
     cmd_SET_GCODE_OFFSET_help = "Set a virtual offset to g-code positions"
     def cmd_SET_GCODE_OFFSET(self, gcmd):
@@ -287,6 +324,8 @@ class GCodeMove:
             'absolute_extrude': self.absolute_extrude,
             'base_position': list(self.base_position),
             'last_position': list(self.last_position),
+            'material_base_position': dict(self.material_base_position),
+            'material_last_position': dict(self.material_last_position),
             'homing_position': list(self.homing_position),
             'speed': self.speed, 'speed_factor': self.speed_factor,
             'extrude_factor': self.extrude_factor,
@@ -308,6 +347,16 @@ class GCodeMove:
         # Restore the relative E position
         e_diff = self.last_position[3] - state['last_position'][3]
         self.base_position[3] += e_diff
+        # 保留暂停期间 U/V 已发生的真实运动，仅恢复暂停前的逻辑坐标。
+        saved_material_last = state.get(
+            'material_last_position', self.material_last_position)
+        saved_material_base = state.get(
+            'material_base_position', self.material_base_position)
+        for axis in 'UV':
+            material_diff = (self.material_last_position[axis]
+                             - saved_material_last[axis])
+            self.material_base_position[axis] = (
+                saved_material_base[axis] + material_diff)
         # Move the toolhead back if requested
         if gcmd.get_int('MOVE', 0):
             speed = gcmd.get_float('MOVE_SPEED', self.speed, above=0.)

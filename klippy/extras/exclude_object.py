@@ -142,6 +142,7 @@ class ExcludeObject:
         self.next_transform.move(tx_pos, speed, material_axes)
 
     def _ignore_move(self, newpos, speed):
+        # 被排除的移动只记录偏移、不下发到 toolhead，故无需接收 material_axes
         offset = self._get_extrusion_offsets()
         for i in range(3):
             offset[i] = newpos[i] - self.last_position_extruded[i]
@@ -182,6 +183,8 @@ class ExcludeObject:
         self.last_speed = speed
 
         if move_in_excluded_region:
+            # 排除区内的移动不会转发给下一级 transform，因此这里刻意不传
+            # material_axes：该段挤出（含 U/V）随整条 move 一起被丢弃。
             if self.in_excluded_region:
                 self._ignore_move(newpos, speed)
             else:

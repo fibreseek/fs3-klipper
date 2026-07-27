@@ -586,13 +586,21 @@ class VirtualSD:
                 scan_x = self.powerloss_info.get('x_position')
                 scan_y = self.powerloss_info.get('y_position')
                 scan_e = self.powerloss_info.get('extrusion')
+                scan_material = self.powerloss_info.get('material_positions', {})
                 scan_mode = self.powerloss_info.get('extrusion_mode')
+                scan_factor = self.powerloss_info.get('extrude_factor')
                 gcmd.respond_raw(
-                    "[POWERLOSS][SCAN] stop_byte=%d XY=(%s,%s) E=%s mode=%s"
-                    % (powerloss_position, scan_x, scan_y, scan_e, scan_mode))
+                    "[POWERLOSS][SCAN] stop_byte=%d XY=(%s,%s)"
+                    " E=%s U=%s V=%s mode=%s factor=%s"
+                    % (powerloss_position, scan_x, scan_y, scan_e,
+                       scan_material.get('U'), scan_material.get('V'),
+                       scan_mode, scan_factor))
                 logging.info(
-                    "virtual_sdcard recover scan: stop_byte=%d x=%s y=%s e=%s mode=%s",
-                    powerloss_position, scan_x, scan_y, scan_e, scan_mode)
+                    "virtual_sdcard recover scan: stop_byte=%d x=%s y=%s"
+                    " e=%s u=%s v=%s mode=%s factor=%s",
+                    powerloss_position, scan_x, scan_y, scan_e,
+                    scan_material.get('U'), scan_material.get('V'),
+                    scan_mode, scan_factor)
                 break
             elif status == 'failed':
                 error = scan_result.get('error', 'Unknown error')
@@ -702,19 +710,10 @@ class VirtualSD:
         new_powerloss_z = powerloss_z
         mesh_profile_loaded = False
         
-        # Apply extrusion mode (M82/M83)
-        extrusion_mode = file_info.get('extrusion_mode')
-        if extrusion_mode == 'absolute':
-            gcode_script.append("M82")
-        elif extrusion_mode == 'relative':
-            gcode_script.append("M83")
-        
-        # Apply movement mode (G90/G91)
-        movement_mode = file_info.get('movement_mode')
-        if movement_mode == 'absolute':
-            gcode_script.append("G90")
-        elif movement_mode == 'relative':
-            gcode_script.append("G91")
+        # 准备、归位和清洗均使用确定的相对材料模式与绝对空间坐标；
+        # 文件在断点处的真实模式会在所有维护动作结束后统一恢复。
+        gcode_script.append("M83")
+        gcode_script.append("G90")
 
         current_tool = file_info.get('current_tool', 0)
         
@@ -961,16 +960,10 @@ class VirtualSD:
         gcode_script.append("CLEAN_NOZZLE")
         gcode_script.append("MOVE_OUT_BRUSH_STATION")
 
-        # 与 PREPARE 阶段、换刀/清洗宏可能再次改变 M82/M83；必须在回到断点 XY 前与扫描一致。
-        # 扫描中的 extrusion 在「断点字节之前」按 M82 累计 E 更新；若此处仍为 M83，
-        # 则首行 G1 的 E 会被当成相对增量，与切片绝对 E 不符，易误报 maximum extrusion。
-        extrusion_mode = file_info.get('extrusion_mode')
-        if extrusion_mode == 'relative':
-            gcode_script.append("M83")
-        else:
-            gcode_script.append("M82")
-        
-        # Apply position (X, Y, Z, E) if available
+        # 恢复过程中的空间移动必须使用绝对坐标；文件原模式在末尾恢复。
+        gcode_script.append("G90")
+
+        # Apply position (X, Y, Z) if available
         x_position = file_info.get('x_position')
         y_position = file_info.get('y_position')
         z_height = file_info.get('z_height')
@@ -990,17 +983,31 @@ class VirtualSD:
             gcode_script.append("G1 Z%.3f F600" % z_height)
             self.printed_pos_z = z_height
 
-        # 同步挤出机坐标：扫描得到的 extrusion 为断点前行末的 E（与当前 M82/M83 语义一致）。
-        # 绝对挤出（M82）下为下一行执行前的累计 E，必须 G92；相对挤出（M83）下 E 为增量，勿用绝对 G92。
-        saved_e = file_info.get('extrusion')
+        # 右喷嘴预挤出属于恢复维护动作，固定使用相对材料模式。
         if current_tool == 1:
-            # 相对挤出 12mm，避免在绝对模式下把 E 设为 12 破坏与切片文件的同步
             gcode_script.append("M83")
             gcode_script.append("G1 E12 F600")
-            if extrusion_mode != 'relative':
-                gcode_script.append("M82")
-        if saved_e is not None and extrusion_mode != 'relative':
-            gcode_script.append("G92 E%.5f" % (saved_e,))
+
+        # 所有维护运动结束后，先恢复倍率，再一次同步 E/U/V 逻辑坐标。
+        extrude_factor = file_info.get('extrude_factor', 1.0)
+        gcode_script.append("M221 S%.5f" % (float(extrude_factor) * 100.0,))
+        material_positions = dict(file_info.get('material_positions') or {})
+        if 'E' not in material_positions:
+            material_positions['E'] = file_info.get('extrusion', 0.0)
+        position_parts = []
+        for axis in 'EUV':
+            position = material_positions.get(axis)
+            if position is not None:
+                position_parts.append("%s%.5f" % (axis, float(position)))
+        if position_parts:
+            gcode_script.append("G92 " + " ".join(position_parts))
+
+        # 最后恢复断点处的材料模式，保证下一条源文件命令按原语义执行。
+        extrusion_mode = file_info.get('extrusion_mode')
+        if extrusion_mode == 'relative':
+            gcode_script.append("M83")
+        else:
+            gcode_script.append("M82")
 
         # Apply feedrate (print speed)
         feedrate = file_info.get('feedrate')
@@ -1008,6 +1015,11 @@ class VirtualSD:
             gcode_script.append("G1 F%.1f" % feedrate)
         
         gcode_script.append("M400")
+        movement_mode = file_info.get('movement_mode')
+        if movement_mode == 'relative':
+            gcode_script.append("G91")
+        else:
+            gcode_script.append("G90")
         gcode_script.append("M118 [POWERLOSS] Recover print finished.")
         
         # Execute all gcode commands
