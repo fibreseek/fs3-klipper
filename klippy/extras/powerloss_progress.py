@@ -8,7 +8,17 @@ try:
 except ImportError:
     import Queue as queue
 import threading
-import logging, time, json, os
+import logging, time, json, os, re
+
+# 切片头部 "; PRINTING_MODE: xxx" 到打印模式数值的映射，与 Moonraker
+# klippy_apis._parse_print_mode() 保持一致
+PRINTING_MODE_MAP = {
+    "Plastic Only": 0,            # 高速模式
+    "Plastic and Composite": 1,   # 高强度模式
+    "Composite Only": 2,          # 超强模式
+}
+PRINTING_MODE_UNKNOWN = -1
+PRINTING_MODE_RE = re.compile(r'^\s*;\s*PRINTING_MODE:\s*(.+)$', re.IGNORECASE)
 
 class PowerlossProgress():
     def __init__(self, prefix, max_file_num = 1):
@@ -56,6 +66,9 @@ class PowerlossProgress():
             'scanned_bytes': 0,       # Total bytes scanned (may be less than file_size if stop_byte is used)
             'total_layer': None,
             'current_layer': None,
+            # 文件头 "; PRINTING_MODE:" 解析出的打印模式，-1 表示未知
+            'printing_mode': PRINTING_MODE_UNKNOWN,
+            'printing_mode_name': None,
         }
 
     def exit(self):
@@ -244,6 +257,20 @@ class PowerlossProgress():
             return ''
         return line_bytes.decode('utf-8', errors='replace').strip()
 
+    def _parse_comment_line(self, line, info):
+        """Parse a header comment line. Currently only "; PRINTING_MODE: xxx"."""
+        if 'PRINTING_MODE' not in line:
+            return
+        match = PRINTING_MODE_RE.match(line)
+        if match is None:
+            return
+        mode_name = match.group(1).strip()
+        mode = PRINTING_MODE_MAP.get(mode_name, PRINTING_MODE_UNKNOWN)
+        if mode == PRINTING_MODE_UNKNOWN:
+            logging.warning("Unrecognized PRINTING_MODE: '%s'" % mode_name)
+        info['printing_mode'] = mode
+        info['printing_mode_name'] = mode_name
+
     def scan_print_file_info(self, stop_byte=None):
         """Scan the current print file and extract gcode information.
         
@@ -278,6 +305,8 @@ class PowerlossProgress():
         info['movement_mode'] = 'absolute'
         info['gcode_lines'] = 0
         info['scanned_bytes'] = 0
+        info['printing_mode'] = PRINTING_MODE_UNKNOWN
+        info['printing_mode_name'] = None
         try:
             file_size = os.path.getsize(self.current_print_file)
             info['file_size'] = file_size
@@ -318,7 +347,10 @@ class PowerlossProgress():
                         line = self._decode_gcode_line_bytes(line_bytes)
                         
                         # Skip empty lines and comments
-                        if not line or line.startswith(';'):
+                        if not line:
+                            continue
+                        if line.startswith(';'):
+                            self._parse_comment_line(line, info)
                             continue
                         
                         info['gcode_lines'] += 1
@@ -672,6 +704,8 @@ class PowerlossProgress():
     def scan_init_paramaters_for_startup(self, stop_byte=2000):
         """Scan the print file for the latest bed and chamber temperature settings."""
         info = self.powerloss_info.copy()  # Start with existing info to preserve any previously extracted data
+        info['printing_mode'] = PRINTING_MODE_UNKNOWN
+        info['printing_mode_name'] = None
         try:
             file_size = os.path.getsize(self.current_print_file)
             if stop_byte > file_size:
@@ -694,7 +728,10 @@ class PowerlossProgress():
                         line_bytes, buffer = buffer.split(b'\n', 1)
                         line = self._decode_gcode_line_bytes(line_bytes)
                         
-                        if not line or line.startswith(';'):
+                        if not line:
+                            continue
+                        if line.startswith(';'):
+                            self._parse_comment_line(line, info)
                             continue
                         
                         self._parse_gcode_line(line, info)

@@ -715,6 +715,18 @@ class VirtualSD:
         gcode_script.append("M83")
         gcode_script.append("G90")
 
+        # 按 G-code 头部的 PRINTING_MODE 设置灯光模式，与 SDCARD_PRINT_FILE 宏一致
+        printing_mode = file_info.get(
+            'printing_mode', powerloss_progress.PRINTING_MODE_UNKNOWN)
+        if printing_mode in (0, 1, 2):
+            gcode_script.append("M2000 L1 S%d" % printing_mode)
+            gcmd.respond_raw("[POWERLOSS] Printing mode: %s (%d)"
+                             % (file_info.get('printing_mode_name'),
+                                printing_mode))
+        else:
+            gcmd.respond_raw("[POWERLOSS] Printing mode unknown, "
+                             "skip LED mode setup")
+
         current_tool = file_info.get('current_tool', 0)
         
         # Apply nozzle temperature
@@ -1020,6 +1032,8 @@ class VirtualSD:
             gcode_script.append("G91")
         else:
             gcode_script.append("G90")
+        # 恢复打印进度灯
+        gcode_script.append("M2000 L6")
         gcode_script.append("M118 [POWERLOSS] Recover print finished.")
         
         # Execute all gcode commands
