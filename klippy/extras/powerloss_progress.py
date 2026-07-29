@@ -8,7 +8,17 @@ try:
 except ImportError:
     import Queue as queue
 import threading
-import logging, time, json, os
+import logging, time, json, os, re
+
+# 切片头部 "; PRINTING_MODE: xxx" 到打印模式数值的映射，与 Moonraker
+# klippy_apis._parse_print_mode() 保持一致
+PRINTING_MODE_MAP = {
+    "Plastic Only": 0,            # 高速模式
+    "Plastic and Composite": 1,   # 高强度模式
+    "Composite Only": 2,          # 超强模式
+}
+PRINTING_MODE_UNKNOWN = -1
+PRINTING_MODE_RE = re.compile(r'^\s*;\s*PRINTING_MODE:\s*(.+)$', re.IGNORECASE)
 
 class PowerlossProgress():
     def __init__(self, prefix, max_file_num = 1):
@@ -40,7 +50,13 @@ class PowerlossProgress():
             'feedrate': None,         # Current print speed (F parameter)
             'x_position': None,       # Current X position
             'y_position': None,       # Current Y position
+            # 扫描器内部使用的空间轴机器位置和 G92 坐标偏移。
+            'spatial_last_positions': {'X': 0.0, 'Y': 0.0, 'Z': 0.0},
+            'spatial_base_positions': {'X': 0.0, 'Y': 0.0, 'Z': 0.0},
             'extrusion': None,        # Current extrusion value (E parameter)
+            # E/U/V 的逻辑材料坐标；断电恢复时用于同步绝对坐标。
+            'material_positions': {'E': 0.0, 'U': 0.0, 'V': 0.0},
+            'extrude_factor': 1.0,    # M221 extrusion factor
             'extrusion_mode': None,   # Extrusion mode: 'absolute' (M82) or 'relative' (M83)
             'movement_mode': None,    # Movement mode: 'absolute' (G90) or 'relative' (G91)
             'pressure_advance': {},   # Pressure advance settings
@@ -50,6 +66,9 @@ class PowerlossProgress():
             'scanned_bytes': 0,       # Total bytes scanned (may be less than file_size if stop_byte is used)
             'total_layer': None,
             'current_layer': None,
+            # 文件头 "; PRINTING_MODE:" 解析出的打印模式，-1 表示未知
+            'printing_mode': PRINTING_MODE_UNKNOWN,
+            'printing_mode_name': None,
         }
 
     def exit(self):
@@ -238,6 +257,20 @@ class PowerlossProgress():
             return ''
         return line_bytes.decode('utf-8', errors='replace').strip()
 
+    def _parse_comment_line(self, line, info):
+        """Parse a header comment line. Currently only "; PRINTING_MODE: xxx"."""
+        if 'PRINTING_MODE' not in line:
+            return
+        match = PRINTING_MODE_RE.match(line)
+        if match is None:
+            return
+        mode_name = match.group(1).strip()
+        mode = PRINTING_MODE_MAP.get(mode_name, PRINTING_MODE_UNKNOWN)
+        if mode == PRINTING_MODE_UNKNOWN:
+            logging.warning("Unrecognized PRINTING_MODE: '%s'" % mode_name)
+        info['printing_mode'] = mode
+        info['printing_mode_name'] = mode_name
+
     def scan_print_file_info(self, stop_byte=None):
         """Scan the current print file and extract gcode information.
         
@@ -258,7 +291,22 @@ class PowerlossProgress():
         # Initialize data structures to store extracted information
         # We store only the latest values for each parameter
 
-        info = self.powerloss_info.copy()  # Start with existing info to preserve any previously extracted data
+        info = self.powerloss_info.copy()  # Start with existing info to preserve non-coordinate startup data
+        # 每次都从 Klipper 的默认坐标状态重新扫描，禁止继承上一次扫描的材料位置。
+        info['material_positions'] = {'E': 0.0, 'U': 0.0, 'V': 0.0}
+        info['spatial_last_positions'] = {'X': 0.0, 'Y': 0.0, 'Z': 0.0}
+        info['spatial_base_positions'] = {'X': 0.0, 'Y': 0.0, 'Z': 0.0}
+        info['x_position'] = None
+        info['y_position'] = None
+        info['z_height'] = None
+        info['extrusion'] = 0.0
+        info['extrude_factor'] = 1.0
+        info['extrusion_mode'] = 'absolute'
+        info['movement_mode'] = 'absolute'
+        info['gcode_lines'] = 0
+        info['scanned_bytes'] = 0
+        info['printing_mode'] = PRINTING_MODE_UNKNOWN
+        info['printing_mode_name'] = None
         try:
             file_size = os.path.getsize(self.current_print_file)
             info['file_size'] = file_size
@@ -299,7 +347,10 @@ class PowerlossProgress():
                         line = self._decode_gcode_line_bytes(line_bytes)
                         
                         # Skip empty lines and comments
-                        if not line or line.startswith(';'):
+                        if not line:
+                            continue
+                        if line.startswith(';'):
+                            self._parse_comment_line(line, info)
                             continue
                         
                         info['gcode_lines'] += 1
@@ -444,6 +495,16 @@ class PowerlossProgress():
         elif command == 'M83':
             # Relative extrusion mode
             info['extrusion_mode'] = 'relative'
+
+        elif command == 'M221':
+            # 保存材料倍率；逻辑坐标本身仍按 G-code 原始数值累计。
+            if 'S' in params:
+                try:
+                    factor = float(params['S']) / 100.0
+                    if factor > 0.0:
+                        info['extrude_factor'] = factor
+                except ValueError:
+                    pass
         
         # Parse G90/G91 for movement mode
         elif command == 'G90':
@@ -452,29 +513,60 @@ class PowerlossProgress():
         elif command == 'G91':
             # Relative movement mode
             info['movement_mode'] = 'relative'
-        
+
+        elif command == 'G92':
+            # G92 只重设逻辑坐标，不产生材料运动。
+            material_positions = info.setdefault(
+                'material_positions', {'E': 0.0, 'U': 0.0, 'V': 0.0})
+            spatial_last = info.setdefault(
+                'spatial_last_positions', {'X': 0.0, 'Y': 0.0, 'Z': 0.0})
+            spatial_base = info.setdefault(
+                'spatial_base_positions', {'X': 0.0, 'Y': 0.0, 'Z': 0.0})
+            has_any_parameter = bool(params)
+            for axis in 'XYZ':
+                if axis not in params:
+                    continue
+                try:
+                    spatial_base[axis] = spatial_last[axis] - float(params[axis])
+                except ValueError:
+                    pass
+            for axis in 'EUV':
+                if axis not in params:
+                    continue
+                try:
+                    material_positions[axis] = float(params[axis])
+                except ValueError:
+                    pass
+            if not has_any_parameter:
+                for axis in 'XYZ':
+                    spatial_base[axis] = spatial_last[axis]
+                for axis in 'EUV':
+                    material_positions[axis] = 0.0
+            info['extrusion'] = material_positions['E']
+
         # Parse G0/G1/G00/G01 commands
         elif command in ['G0', 'G1', 'G00', 'G01']:
-            # Z height: G0 Z0.200 or G1 Z0.200
-            if 'Z' in params:
+            # XYZ 同样按 G90/G91 和 G92 偏移还原机器坐标，供断点回位使用。
+            spatial_last = info.setdefault(
+                'spatial_last_positions', {'X': 0.0, 'Y': 0.0, 'Z': 0.0})
+            spatial_base = info.setdefault(
+                'spatial_base_positions', {'X': 0.0, 'Y': 0.0, 'Z': 0.0})
+            is_relative_space = info.get('movement_mode') == 'relative'
+            for axis in 'XYZ':
+                if axis not in params:
+                    continue
                 try:
-                    z_height = float(params['Z'])
-                    info['z_height'] = z_height
-                except ValueError:
-                    pass
-            
-            # X and Y position
-            if 'X' in params:
-                try:
-                    x_pos = float(params['X'])
-                    info['x_position'] = x_pos
-                except ValueError:
-                    pass
-            
-            if 'Y' in params:
-                try:
-                    y_pos = float(params['Y'])
-                    info['y_position'] = y_pos
+                    value = float(params[axis])
+                    if is_relative_space:
+                        spatial_last[axis] += value
+                    else:
+                        spatial_last[axis] = value + spatial_base[axis]
+                    if axis == 'X':
+                        info['x_position'] = spatial_last[axis]
+                    elif axis == 'Y':
+                        info['y_position'] = spatial_last[axis]
+                    else:
+                        info['z_height'] = spatial_last[axis]
                 except ValueError:
                     pass
             
@@ -486,13 +578,24 @@ class PowerlossProgress():
                 except ValueError:
                     pass
             
-            # E (extrusion) parameter
-            if 'E' in params:
+            # E/U/V 共用材料坐标模式：M83 或 G91 时为相对，否则为绝对。
+            material_positions = info.setdefault(
+                'material_positions', {'E': 0.0, 'U': 0.0, 'V': 0.0})
+            is_relative_material = (
+                info.get('extrusion_mode') == 'relative'
+                or info.get('movement_mode') == 'relative')
+            for axis in 'EUV':
+                if axis not in params:
+                    continue
                 try:
-                    extrusion = float(params['E'])
-                    info['extrusion'] = extrusion
+                    value = float(params[axis])
+                    if is_relative_material:
+                        material_positions[axis] += value
+                    else:
+                        material_positions[axis] = value
                 except ValueError:
                     pass
+            info['extrusion'] = material_positions['E']
         
         # Parse SET_PRESSURE_ADVANCE command
         elif command == 'SET_PRESSURE_ADVANCE':
@@ -601,6 +704,8 @@ class PowerlossProgress():
     def scan_init_paramaters_for_startup(self, stop_byte=2000):
         """Scan the print file for the latest bed and chamber temperature settings."""
         info = self.powerloss_info.copy()  # Start with existing info to preserve any previously extracted data
+        info['printing_mode'] = PRINTING_MODE_UNKNOWN
+        info['printing_mode_name'] = None
         try:
             file_size = os.path.getsize(self.current_print_file)
             if stop_byte > file_size:
@@ -623,7 +728,10 @@ class PowerlossProgress():
                         line_bytes, buffer = buffer.split(b'\n', 1)
                         line = self._decode_gcode_line_bytes(line_bytes)
                         
-                        if not line or line.startswith(';'):
+                        if not line:
+                            continue
+                        if line.startswith(';'):
+                            self._parse_comment_line(line, info)
                             continue
                         
                         self._parse_gcode_line(line, info)

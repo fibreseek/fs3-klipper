@@ -49,14 +49,13 @@ class VirtualSD:
         self.variables = config.getsection('save_variables')
         # Precompile regex patterns for performance
         self.gcode_pattern = re.compile(r'^\s*G[01]\b')
-        self.p_pattern = re.compile(r'P([\d\.]+)')
         self.u_pattern = re.compile(r'\bU[\d\.\-]+\b')
         self.v_pattern = re.compile(r'\bV[\d\.\-]+\b')
         self.f_pattern = re.compile(r'\bF([\d\.]+)\b')
+        # 首次材料运动同时兼容普通 E 轴和本机共挤使用的 U/V 轴；匹配前会剥离注释。
+        self.material_axis_pattern = re.compile(r'[EUV]\s*[+\-]?(?:\d|\.)', re.IGNORECASE)
         self.extrude_restart_comment_pattern = re.compile(
             r';\s*Extrude\s+restart\b', re.IGNORECASE)
-        self.uv_mode = 0 # 0: none, 1: UV, 2: U, 3: V
-        self.uv_p_value = 0.0 # UV p value
         # Register commands
         self.gcode = self.printer.lookup_object('gcode')
         for cmd in ['M20', 'M21', 'M23', 'M24', 'M25', 'M26', 'M27', 'M39']:
@@ -94,6 +93,8 @@ class VirtualSD:
         self.printed_pos_z = 0
         self.powerloss_record_time = self.reactor.monotonic()
         self.is_start_move = False
+        # 当前加载的 SD 执行段是否曾发生过 E/U/V 材料轴运动；暂停时保持，用于状态订阅恢复。
+        self.has_started_material_move = False
         self.powerloss_progress = powerloss_progress.setup_powerloss_progress(POWERLOSS_FILE_NAME, 5)
         self.is_recover_print = False
         self.powerloss_file_exist = self.powerloss_progress.check_powerloss_file()
@@ -195,6 +196,7 @@ class VirtualSD:
             'file_position': self.file_position,
             'file_size': self.file_size,
             'is_start_move': self.is_start_move,
+            'has_started_material_move': self.has_started_material_move,
             'powerloss_file_exist': self.powerloss_file_exist,
         }
     def file_path(self):
@@ -234,6 +236,8 @@ class VirtualSD:
         self.powerloss_file_exist = False
         self.powerloss_init_info = None
         self.powerloss_progress.clear_record()
+        # 取消代表当前加载的 SD 执行段结束，清除历史材料运动状态。
+        self.has_started_material_move = False
     # G-Code commands
     def cmd_error(self, gcmd):
         raise gcmd.error("Printer is not supported command: %s" % gcmd.command)
@@ -243,8 +247,8 @@ class VirtualSD:
             self.current_file.close()
             self.current_file = None
         self.file_position = self.file_size = 0
-        self.uv_mode = 0
-        self.uv_p_value = 0.0
+        # 新文件、重置文件和断电恢复重新加载文件都从未发生材料运动开始。
+        self.has_started_material_move = False
         self.extruder_switch_detected = False
         self.powerloss_file_exist = False
         self.powerloss_init_info = None
@@ -448,6 +452,8 @@ class VirtualSD:
             gcmd.respond_raw("warning : Ivalide file type!" % filename)
             return
         self.print_progress = 0
+        # M39 旧式恢复路径不经过 _reset_file()，需显式开启新的执行段。
+        self.has_started_material_move = False
         self.sdcard_dirname = os.path.normpath(files[0])
         self._load_file(gcmd, files[1], check_subdirs=True)
         if '*' in command_line:
@@ -580,13 +586,21 @@ class VirtualSD:
                 scan_x = self.powerloss_info.get('x_position')
                 scan_y = self.powerloss_info.get('y_position')
                 scan_e = self.powerloss_info.get('extrusion')
+                scan_material = self.powerloss_info.get('material_positions', {})
                 scan_mode = self.powerloss_info.get('extrusion_mode')
+                scan_factor = self.powerloss_info.get('extrude_factor')
                 gcmd.respond_raw(
-                    "[POWERLOSS][SCAN] stop_byte=%d XY=(%s,%s) E=%s mode=%s"
-                    % (powerloss_position, scan_x, scan_y, scan_e, scan_mode))
+                    "[POWERLOSS][SCAN] stop_byte=%d XY=(%s,%s)"
+                    " E=%s U=%s V=%s mode=%s factor=%s"
+                    % (powerloss_position, scan_x, scan_y, scan_e,
+                       scan_material.get('U'), scan_material.get('V'),
+                       scan_mode, scan_factor))
                 logging.info(
-                    "virtual_sdcard recover scan: stop_byte=%d x=%s y=%s e=%s mode=%s",
-                    powerloss_position, scan_x, scan_y, scan_e, scan_mode)
+                    "virtual_sdcard recover scan: stop_byte=%d x=%s y=%s"
+                    " e=%s u=%s v=%s mode=%s factor=%s",
+                    powerloss_position, scan_x, scan_y, scan_e,
+                    scan_material.get('U'), scan_material.get('V'),
+                    scan_mode, scan_factor)
                 break
             elif status == 'failed':
                 error = scan_result.get('error', 'Unknown error')
@@ -642,7 +656,9 @@ class VirtualSD:
             return False
 
         if bed_mesh.load_runtime_mesh_snapshot():
-            gcmd.respond_raw("Loading recovery bed mesh runtime snapshot")
+            gcmd.respond_raw(
+                "Loading recovery bed mesh profile [%s]"
+                % ("runtime_active",))
             return True
 
         bed_temp = file_info.get('bed_temp')
@@ -694,19 +710,22 @@ class VirtualSD:
         new_powerloss_z = powerloss_z
         mesh_profile_loaded = False
         
-        # Apply extrusion mode (M82/M83)
-        extrusion_mode = file_info.get('extrusion_mode')
-        if extrusion_mode == 'absolute':
-            gcode_script.append("M82")
-        elif extrusion_mode == 'relative':
-            gcode_script.append("M83")
-        
-        # Apply movement mode (G90/G91)
-        movement_mode = file_info.get('movement_mode')
-        if movement_mode == 'absolute':
-            gcode_script.append("G90")
-        elif movement_mode == 'relative':
-            gcode_script.append("G91")
+        # 准备、归位和清洗均使用确定的相对材料模式与绝对空间坐标；
+        # 文件在断点处的真实模式会在所有维护动作结束后统一恢复。
+        gcode_script.append("M83")
+        gcode_script.append("G90")
+
+        # 按 G-code 头部的 PRINTING_MODE 设置灯光模式，与 SDCARD_PRINT_FILE 宏一致
+        printing_mode = file_info.get(
+            'printing_mode', powerloss_progress.PRINTING_MODE_UNKNOWN)
+        if printing_mode in (0, 1, 2):
+            gcode_script.append("M2000 L1 S%d" % printing_mode)
+            gcmd.respond_raw("[POWERLOSS] Printing mode: %s (%d)"
+                             % (file_info.get('printing_mode_name'),
+                                printing_mode))
+        else:
+            gcmd.respond_raw("[POWERLOSS] Printing mode unknown, "
+                             "skip LED mode setup")
 
         current_tool = file_info.get('current_tool', 0)
         
@@ -953,16 +972,10 @@ class VirtualSD:
         gcode_script.append("CLEAN_NOZZLE")
         gcode_script.append("MOVE_OUT_BRUSH_STATION")
 
-        # 与 PREPARE 阶段、换刀/清洗宏可能再次改变 M82/M83；必须在回到断点 XY 前与扫描一致。
-        # 扫描中的 extrusion 在「断点字节之前」按 M82 累计 E 更新；若此处仍为 M83，
-        # 则首行 G1 的 E 会被当成相对增量，与切片绝对 E 不符，易误报 maximum extrusion。
-        extrusion_mode = file_info.get('extrusion_mode')
-        if extrusion_mode == 'relative':
-            gcode_script.append("M83")
-        else:
-            gcode_script.append("M82")
-        
-        # Apply position (X, Y, Z, E) if available
+        # 恢复过程中的空间移动必须使用绝对坐标；文件原模式在末尾恢复。
+        gcode_script.append("G90")
+
+        # Apply position (X, Y, Z) if available
         x_position = file_info.get('x_position')
         y_position = file_info.get('y_position')
         z_height = file_info.get('z_height')
@@ -982,17 +995,31 @@ class VirtualSD:
             gcode_script.append("G1 Z%.3f F600" % z_height)
             self.printed_pos_z = z_height
 
-        # 同步挤出机坐标：扫描得到的 extrusion 为断点前行末的 E（与当前 M82/M83 语义一致）。
-        # 绝对挤出（M82）下为下一行执行前的累计 E，必须 G92；相对挤出（M83）下 E 为增量，勿用绝对 G92。
-        saved_e = file_info.get('extrusion')
+        # 右喷嘴预挤出属于恢复维护动作，固定使用相对材料模式。
         if current_tool == 1:
-            # 相对挤出 12mm，避免在绝对模式下把 E 设为 12 破坏与切片文件的同步
             gcode_script.append("M83")
             gcode_script.append("G1 E12 F600")
-            if extrusion_mode != 'relative':
-                gcode_script.append("M82")
-        if saved_e is not None and extrusion_mode != 'relative':
-            gcode_script.append("G92 E%.5f" % (saved_e,))
+
+        # 所有维护运动结束后，先恢复倍率，再一次同步 E/U/V 逻辑坐标。
+        extrude_factor = file_info.get('extrude_factor', 1.0)
+        gcode_script.append("M221 S%.5f" % (float(extrude_factor) * 100.0,))
+        material_positions = dict(file_info.get('material_positions') or {})
+        if 'E' not in material_positions:
+            material_positions['E'] = file_info.get('extrusion', 0.0)
+        position_parts = []
+        for axis in 'EUV':
+            position = material_positions.get(axis)
+            if position is not None:
+                position_parts.append("%s%.5f" % (axis, float(position)))
+        if position_parts:
+            gcode_script.append("G92 " + " ".join(position_parts))
+
+        # 最后恢复断点处的材料模式，保证下一条源文件命令按原语义执行。
+        extrusion_mode = file_info.get('extrusion_mode')
+        if extrusion_mode == 'relative':
+            gcode_script.append("M83")
+        else:
+            gcode_script.append("M82")
 
         # Apply feedrate (print speed)
         feedrate = file_info.get('feedrate')
@@ -1000,6 +1027,13 @@ class VirtualSD:
             gcode_script.append("G1 F%.1f" % feedrate)
         
         gcode_script.append("M400")
+        movement_mode = file_info.get('movement_mode')
+        if movement_mode == 'relative':
+            gcode_script.append("G91")
+        else:
+            gcode_script.append("G90")
+        # 恢复打印进度灯
+        gcode_script.append("M2000 L6")
         gcode_script.append("M118 [POWERLOSS] Recover print finished.")
         
         # Execute all gcode commands
@@ -1113,8 +1147,8 @@ class VirtualSD:
                 break
 
     def handle_extruder_mode(self, lines):
-        """Process lines and insert extruder mode commands.
-        Inserted commands are tuples (line, is_injected, raw_len) where:
+        """Process sdcard lines without injecting UV mode commands.
+        Returned commands are tuples (line, is_injected, raw_len) where:
         - is_injected=True means the line should not count towards file_position.
         - raw_len is the original file line byte-length (without newline) used
           to advance file_position safely even if line text is rewritten.
@@ -1125,7 +1159,6 @@ class VirtualSD:
         gcode_pattern = self.gcode_pattern
         u_pattern = self.u_pattern
         v_pattern = self.v_pattern
-        p_pattern = self.p_pattern
         
         for line in lines:
             # Skip comments early
@@ -1144,35 +1177,6 @@ class VirtualSD:
                 and u_pattern.search(original_line)
                 and self.extrude_restart_comment_pattern.search(original_line)
             )
-            
-            # Only process G0/G1 commands with U/V parameters
-            if gcode_pattern.match(original_line):
-                # Check for U and V parameters in one pass
-                has_u = u_pattern.search(original_line)
-                has_v = v_pattern.search(original_line)
-                
-                if has_u and has_v:
-                    # Both U and V present
-                    p_match = p_pattern.search(original_line)
-                    p_value = float(p_match.group(1)) if p_match else 0
-                    if self.uv_mode != 1:
-                        self.uv_mode = 1
-                        self.uv_p_value = p_value
-                        processed_lines.append((f"SET_EXTRUDER_MODE S=1 P={p_value}", True, None))  # Injected
-                    else:
-                        if p_value != self.uv_p_value:
-                            self.uv_p_value = p_value
-                            processed_lines.append((f"SET_EXTRUDER_MODE S=1 P={p_value}", True, None))  # Injected
-                elif has_u:
-                    # Only U present
-                    if self.uv_mode != 2:
-                        self.uv_mode = 2
-                        processed_lines.append(("SET_EXTRUDER_MODE S=0", True, None))  # Injected
-                elif has_v:
-                    # Only V present
-                    if self.uv_mode != 3:
-                        self.uv_mode = 3
-                        processed_lines.append(("SET_EXTRUDER_MODE S=2", True, None))  # Injected
             
             # Adjust speed for stealthchop if applicable
             if self.stealthchop > 100 and not is_extrude_restart:
@@ -1358,10 +1362,16 @@ class VirtualSD:
                     # Add a minimal delay after executing G-code to prevent "Timer too close" errors
                     # Reduced from 1ms to 0.1ms to avoid stuttering during printing
                     self.reactor.pause(self.reactor.monotonic() + 0.0001)  # 0.1ms delay
-                if not self.is_start_move and (line.startswith('G1') or line.startswith('G0')) :
+                # 仅首个包含材料轴 E/U/V 的 G0/G1 视为真正开始打印；
+                # 纯 XY/Z 移动、归零和擦嘴动作不会过早放开暂停/断电续打流程。
+                move_line = line.split(';', 1)[0]
+                is_linear_move = move_line.lstrip().upper().startswith(('G0', 'G1'))
+                if (not self.is_start_move and is_linear_move
+                        and self.material_axis_pattern.search(move_line)):
                     self.gcode.respond_raw("[SDCARD_PRINT_FILE] Print move start: %s"%(line))
                     self.printer.send_event("virtual_sdcard:move_start", line)
                     self.is_start_move = True
+                    self.has_started_material_move = True
             except self.gcode.error as e:
                 error_message = str(e)
                 try:
@@ -1412,17 +1422,15 @@ class VirtualSD:
         self.work_timer = None
         self.cmd_from_sd = False
         if error_message is not None:
+            self.has_started_material_move = False
             self.print_stats.note_error(error_message)
             self.print_stats.note_standby()
         elif self.current_file is not None:
-            self.uv_mode = 0
-            self.uv_p_value = 0.0
             self.is_start_move = False
             logging.info("SD card print paused")
         else:
-            self.uv_mode = 0
-            self.uv_p_value = 0.0
             self.is_start_move = False
+            self.has_started_material_move = False
             self.print_stats.note_complete()
             logging.info("SD card print completed")
         return self.reactor.NEVER

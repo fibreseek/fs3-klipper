@@ -74,9 +74,13 @@ class TuningTower:
         if self.band:
             z = (math.floor(z / self.band) + .5) * self.band
         return self.start + z * self.factor
-    def move(self, newpos, speed):
+    def move(self, newpos, speed, material_axes=None):
         normal_transform = self.normal_transform
-        if (newpos[3] > self.last_position[3] and newpos[2] != self.last_z
+        is_extruding = newpos[3] > self.last_position[3]
+        if material_axes:
+            is_extruding = is_extruding or any(
+                [m.distance > 0. for m in material_axes])
+        if (is_extruding and newpos[2] != self.last_z
             and newpos[:3] != self.last_position[:3]):
             # Extrusion move at new z height
             z = newpos[2]
@@ -94,7 +98,7 @@ class TuningTower:
                                                        % (newval,))
         # Forward move to actual handler
         self.last_position[:] = newpos
-        normal_transform.move(newpos, speed)
+        normal_transform.move(newpos, speed, material_axes)
     def end_test(self):
         self.gcode.respond_info("Ending tuning test mode")
         self.gcode_move.set_move_transform(self.normal_transform, force=True)
