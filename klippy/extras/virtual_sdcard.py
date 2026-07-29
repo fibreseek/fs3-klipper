@@ -733,6 +733,10 @@ class VirtualSD:
         for fan_index, speed in fan_speeds.items():
             gcode_script.append("M106 P%d S%.1f" % (fan_index, speed))
 
+        # 主板风扇不在切片文件里，且断电续打不经过 SDCARD_PRINT_FILE，
+        # 需在此单独开启，否则驱动全程无散热
+        gcode_script.append("M106 P4 S255")
+
         # Apply chamber temperature
         chamber_temp = file_info.get('chamber_temp')
         if chamber_temp is not None:
