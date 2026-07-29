@@ -14,6 +14,11 @@ PROFILE_OPTIONS = {
     'x_count': int, 'y_count': int, 'mesh_x_pps': int, 'mesh_y_pps': int,
     'algo': str, 'tension': float
 }
+# profile 命名契约：
+#   default        —— 双温完整校准保存的全床基准（calibration.cfg 写入）
+#   runtime_active —— 当前生效网床的跨重启快照（替代原 npz），续打恢复只认它
+BASELINE_PROFILE = "default"
+RUNTIME_ACTIVE_PROFILE = "runtime_active"
 
 class BedMeshError(Exception):
     pass
@@ -280,8 +285,8 @@ class BedMesh:
         self.splitter = MoveSplitter(config, self.gcode)
         # setup persistent storage
         self.pmgr = ProfileManager(config, self)
-        self.runtime_mesh_path = os.path.expanduser(
-            "~/printer_data/config/bed_mesh_runtime_active.npz")
+        # G28 清网床前的进程内暂存（不落盘）
+        self._held_mesh = None
         self.save_profile = self.pmgr.save_profile
         # register gcodes
         self.gcode.register_command(
@@ -302,6 +307,13 @@ class BedMesh:
         self.gcode.register_command(
             'BED_MESH_VERIFY', self.cmd_BED_MESH_VERIFY,
             desc=self.cmd_BED_MESH_VERIFY_help)
+        # G28 宏用：内存暂存 / 装回当前网床
+        self.gcode.register_command(
+            'BED_MESH_HOLD', self.cmd_BED_MESH_HOLD,
+            desc=self.cmd_BED_MESH_HOLD_help)
+        self.gcode.register_command(
+            'BED_MESH_RESTORE_HOLD', self.cmd_BED_MESH_RESTORE_HOLD,
+            desc=self.cmd_BED_MESH_RESTORE_HOLD_help)
         # Register dump webhooks
         webhooks = self.printer.lookup_object('webhooks')
         webhooks.register_endpoint(
@@ -351,60 +363,104 @@ class BedMesh:
         gcode_move = self.printer.lookup_object('gcode_move')
         gcode_move.reset_last_position()
         self.update_status()
+    def _persist_config_no_restart(self):
+        """将 pending 配置写入 printer.cfg，不重启（SAVE_CONFIG R=0）。"""
+        try:
+            # SAVE_CONFIG 主线程拼装配置会阻塞 reactor；落盘前先等运动结束。
+            # 额外 dwell 很小幅预留 MCU 调度缓冲，避免与最后的步序重叠。
+            toolhead = self.printer.lookup_object('toolhead')
+            toolhead.wait_moves()
+            toolhead.dwell(0.05)
+            self.gcode.run_script_from_command("SAVE_CONFIG R=0\n")
+            return True
+        except Exception:
+            logging.exception(
+                "bed_mesh: SAVE_CONFIG R=0 failed while persisting runtime_active")
+            return False
     def save_runtime_mesh_snapshot(self, mesh=None, path=None):
+        """把当前（或指定）网床写入会话 profile runtime_active，并 SAVE_CONFIG R=0 落盘。
+
+        path 参数保留以兼容旧调用，已忽略（不再写 npz）。
+        """
         z_mesh = mesh if mesh is not None else self.get_mesh()
         if z_mesh is None:
-            logging.info("bed_mesh: runtime mesh snapshot skipped, no active mesh")
+            logging.info("bed_mesh: runtime_active save skipped, no active mesh")
             return False
         probed_matrix = z_mesh.get_probed_matrix()
         if not probed_matrix or not probed_matrix[0]:
             logging.info(
-                "bed_mesh: runtime mesh snapshot skipped, probed matrix empty")
+                "bed_mesh: runtime_active save skipped, probed matrix empty")
             return False
-        save_path = os.path.expanduser(path or self.runtime_mesh_path)
-        save_dir = os.path.dirname(save_path)
         try:
-            if save_dir:
-                os.makedirs(save_dir, exist_ok=True)
-            payload = {
-                "points": np.asarray(probed_matrix, dtype=np.float32),
-                "mesh_params_json": json.dumps(dict(z_mesh.get_mesh_params())),
-                "profile_name": z_mesh.get_profile_name(),
-            }
-            np.savez_compressed(save_path, **payload)
-            logging.info("bed_mesh: runtime mesh snapshot saved to %s", save_path)
+            self.pmgr.save_profile_from_mesh(
+                RUNTIME_ACTIVE_PROFILE, z_mesh, announce=False)
+            if not self._persist_config_no_restart():
+                return False
+            logging.info(
+                "bed_mesh: runtime_active saved to printer.cfg (SAVE_CONFIG R=0)")
             return True
         except Exception:
-            logging.exception(
-                "bed_mesh: failed to save runtime mesh snapshot to %s",
-                save_path)
+            logging.exception("bed_mesh: failed to save runtime_active profile")
             return False
     def load_runtime_mesh_snapshot(self, path=None):
-        load_path = os.path.expanduser(path or self.runtime_mesh_path)
-        if not os.path.exists(load_path):
+        """从会话/配置中的 runtime_active 加载网床（不二次落盘）。
+
+        path 参数保留以兼容旧调用，已忽略。
+        """
+        profile = self.pmgr.get_profiles().get(RUNTIME_ACTIVE_PROFILE)
+        if profile is None:
             logging.info(
-                "bed_mesh: runtime mesh snapshot missing: %s", load_path)
+                "bed_mesh: runtime_active profile missing, cannot load snapshot")
             return False
         try:
-            with np.load(load_path, allow_pickle=False) as data:
-                probed_matrix = data["points"].tolist()
-                raw_profile_name = data["profile_name"].item()
-                raw_params = json.loads(data["mesh_params_json"].item())
-            mesh_params = collections.OrderedDict()
-            for key, value_type in PROFILE_OPTIONS.items():
-                value = raw_params[key]
-                mesh_params[key] = value_type(value)
-            z_mesh = ZMesh(mesh_params, raw_profile_name)
-            z_mesh.build_mesh(probed_matrix)
-            self.set_mesh(z_mesh)
+            self.pmgr.load_profile(
+                RUNTIME_ACTIVE_PROFILE, save_snapshot=False)
             logging.info(
-                "bed_mesh: runtime mesh snapshot loaded from %s", load_path)
+                "bed_mesh: runtime_active profile loaded as recovery snapshot")
             return True
         except Exception:
             logging.exception(
-                "bed_mesh: failed to load runtime mesh snapshot from %s",
-                load_path)
+                "bed_mesh: failed to load runtime_active profile")
             return False
+    cmd_BED_MESH_HOLD_help = "Hold current bed mesh in memory for later restore"
+    def cmd_BED_MESH_HOLD(self, gcmd):
+        # 职责：G28 清网床前把当前网格深拷贝到内存，不写盘
+        z_mesh = self.get_mesh()
+        if z_mesh is None:
+            self._held_mesh = None
+            gcmd.respond_info("bed_mesh: HOLD skipped, no active mesh")
+            return
+        probed_matrix = z_mesh.get_probed_matrix()
+        if not probed_matrix or not probed_matrix[0]:
+            self._held_mesh = None
+            gcmd.respond_info("bed_mesh: HOLD skipped, probed matrix empty")
+            return
+        self._held_mesh = {
+            "points": [list(row) for row in probed_matrix],
+            "mesh_params": collections.OrderedDict(z_mesh.get_mesh_params()),
+            "profile_name": z_mesh.get_profile_name(),
+        }
+        gcmd.respond_info(
+            "bed_mesh: held profile [%s] in memory"
+            % (self._held_mesh["profile_name"],))
+    cmd_BED_MESH_RESTORE_HOLD_help = (
+        "Restore bed mesh previously held by BED_MESH_HOLD")
+    def cmd_BED_MESH_RESTORE_HOLD(self, gcmd):
+        # 职责：G28 归零后装回 HOLD 的网格；失败只提示，不抛错以免打断 G28
+        if self._held_mesh is None:
+            gcmd.respond_info("bed_mesh: RESTORE_HOLD skipped, nothing held")
+            return
+        try:
+            mesh_params = collections.OrderedDict(self._held_mesh["mesh_params"])
+            z_mesh = ZMesh(mesh_params, self._held_mesh["profile_name"])
+            z_mesh.build_mesh(self._held_mesh["points"])
+            self.set_mesh(z_mesh)
+            gcmd.respond_info(
+                "bed_mesh: restored held profile [%s]"
+                % (self._held_mesh["profile_name"],))
+        except Exception:
+            logging.exception("bed_mesh: RESTORE_HOLD failed")
+            gcmd.respond_info("bed_mesh: RESTORE_HOLD failed, mesh not restored")
     def get_z_factor(self, z_pos):
         z_pos += self.tool_offset
         if z_pos >= self.fade_end:
@@ -440,9 +496,18 @@ class BedMesh:
             final_z_adj = factor * z_adj + self.fade_target
             self.last_position[:] = [x, y, z - final_z_adj] + cur_pos[3:]
         return list(self.last_position)
-    def move(self, newpos, speed):
+    def move(self, newpos, speed, material_axes=None):
         factor = self.get_z_factor(newpos[2])
-        if self.z_mesh is None or not factor:
+        if (self.z_mesh is not None and factor
+            and newpos[:3] == self.last_position[:3]):
+            # A pure extrusion/material move must retain the mesh-adjusted
+            # physical XYZ position.  Reusing the raw G-Code Z here creates a
+            # tiny spatial move that can incorrectly drive material velocity
+            # up to the extruder limit.
+            curpos = self.toolhead.get_position()
+            self.toolhead.move(list(curpos[:3]) + newpos[3:], speed,
+                               material_axes)
+        elif self.z_mesh is None or not factor:
             # No mesh calibrated, or mesh leveling phased out.
             x, y, z = newpos[:3]
             if self.log_fade_complete:
@@ -450,13 +515,17 @@ class BedMesh:
                 logging.info(
                     "bed_mesh fade complete: Current Z: %.4f fade_target: %.4f "
                     % (z, self.fade_target))
-            self.toolhead.move([x, y, z + self.fade_target] + newpos[3:], speed)
+            self.toolhead.move([x, y, z + self.fade_target] + newpos[3:],
+                               speed, material_axes)
         else:
-            self.splitter.build_move(self.last_position, newpos, factor)
+            # 材料切分由 MoveSplitter 按沿程比例完成，避免外部再算 ratio
+            self.splitter.build_move(self.last_position, newpos, factor,
+                                     material_axes)
             while not self.splitter.traverse_complete:
-                split_move = self.splitter.split()
-                if split_move:
-                    self.toolhead.move(split_move, speed)
+                split_move, split_material = self.splitter.split()
+                if split_move is not None:
+                    # splitter 已按沿程比例切好该段材料，直接下发
+                    self.toolhead.move(split_move, speed, split_material)
                 else:
                     raise self.gcode.error(
                         "Mesh Leveling: Error splitting move ")
@@ -679,11 +748,14 @@ class BedMeshCalibrate:
         self.gcode.register_command(
             'BED_MESH_TEMP_LOAD', self.cmd_BED_MESH_TEMP_LOAD)
     def _get_temp_comp(self):
+        # Temperature model is for the full configured bed mesh. Do not size it
+        # from mesh_config/mesh_min/max: those may still hold leftover adaptive
+        # sizes from a prior BED_MESH_CALIBRATE with PRINT_MIN/PRINT_MAX.
         if self.temp_cpst is None:
             self.temp_cpst = aniso_temp_compensation.AnisoTempCompensation(
-                self.mesh_min, self.mesh_max,
-                self.mesh_config['x_count'],
-                self.mesh_config['y_count'],
+                self.orig_config['mesh_min'], self.orig_config['mesh_max'],
+                self.orig_config['x_count'],
+                self.orig_config['y_count'],
                 root_config=self.config)
         return self.temp_cpst
     def _load_profile_mesh(self, profile_name):
@@ -1233,12 +1305,19 @@ class BedMeshCalibrate:
         logging.info(
             "bed_mesh: fast bed mesh fallback to recalibrate, reason=%s",
             reason)
+        # 强制 PROFILE=runtime_active：既避免覆盖校准全床基准 default，
+        # 也不再引入只写不读的中间名（原 model_leveling）。
+        # probe_finalize 的自动 save_profile 只写 pending，
+        # 由结尾 save_runtime_mesh_snapshot 统一 SAVE_CONFIG 落盘一次；
+        # 落盘前先抬升并 M400，避免与 Z 运动重叠导致 Timer too close。
+        params = dict(gcmd.get_command_parameters())
+        params['PROFILE'] = RUNTIME_ACTIVE_PROFILE
+        param_str = ' '.join('%s=%s' % (k.upper(), v) for k, v in params.items())
         self.gcode.run_script_from_command(
             "BED_MESH_CLEAR\n"
-            f"BED_MESH_CALIBRATE {gcmd.get_raw_command_parameters()}\n"
-            "BED_MESH_PROFILE SAVE=model_leveling\n"
-            "BED_MESH_PROFILE LOAD=model_leveling\n"
+            f"BED_MESH_CALIBRATE {param_str}\n"
             "G1 Z10 F600\n"
+            "M400\n"
         )
         self.bedmesh.save_runtime_mesh_snapshot()
 
@@ -1450,33 +1529,57 @@ class BedMeshCalibrate:
                 % (profile_name, target_temp))
     def cmd_BED_MESH_TEMP(self, gcmd):
         flag = gcmd.get_int('P', 0)
-        if flag == 0:
-            temps = self._parse_temp_list(gcmd)
-            temp_cpst = self._get_temp_comp()
-            temp_cpst.reset(val_t=temps)
-            self._start_temp_sampling_session(temps)
-            self._start_temp_csv_session(temps)
-        elif flag == 1:
-            temp_now = None
-            heater_bed = self.printer.lookup_object("heater_bed", None)
-            if heater_bed is not None: # ["target"]期望温度, ["temperature"]实测温度
-                temp_now = heater_bed.get_status(0)["temperature"]
+        try:
+            if flag == 0:
+                temps = self._parse_temp_list(gcmd)
+                # Force recreate so a leftover adaptive mesh_config cannot stick.
+                self.temp_cpst = None
+                temp_cpst = self._get_temp_comp()
+                temp_cpst.reset(val_t=temps)
+                self._start_temp_sampling_session(temps)
+                self._start_temp_csv_session(temps)
+            elif flag == 1:
+                temp_now = None
+                heater_bed = self.printer.lookup_object("heater_bed", None)
+                if heater_bed is not None: # ["target"]期望温度, ["temperature"]实测温度
+                    temp_now = heater_bed.get_status(0)["temperature"]
 
-            z_mesh = self.bedmesh.get_mesh()
-            if z_mesh is None:
-                logging.info("bed_mesh: temp sample skipped, no active mesh")
-                self._append_temp_csv_sample([], temp_now)
-                return
-            probed_matrix = z_mesh.get_probed_matrix()
-            self._get_temp_comp().receive(probed_matrix, temp_now)
-            self._append_temp_csv_sample(probed_matrix, temp_now)
-        elif flag == 2:
-            def clean():
-                self.temp_cpst = None # 使用完毕，及时释放内存
-                self._reset_temp_sampling_session()
-                self._reset_temp_csv_session()
-            reactor = self.printer.get_reactor()
-            self._get_temp_comp().fit(reactor, clean)
+                z_mesh = self.bedmesh.get_mesh()
+                if z_mesh is None:
+                    logging.info("bed_mesh: temp sample skipped, no active mesh")
+                    self._append_temp_csv_sample([], temp_now)
+                    return
+                probed_matrix = z_mesh.get_probed_matrix()
+                self._get_temp_comp().receive(probed_matrix, temp_now)
+                self._append_temp_csv_sample(probed_matrix, temp_now)
+            elif flag == 2:
+                def clean():
+                    self.temp_cpst = None # 使用完毕，及时释放内存
+                    self._reset_temp_sampling_session()
+                    self._reset_temp_csv_session()
+                reactor = self.printer.get_reactor()
+                temp_cpst = self._get_temp_comp()
+                sample_shapes = []
+                for sample in temp_cpst.val_z:
+                    try:
+                        rows = len(sample)
+                        cols = len(sample[0]) if rows else 0
+                        sample_shapes.append("%dx%d" % (rows, cols))
+                    except Exception:
+                        sample_shapes.append("unavailable")
+                sample_count = len(temp_cpst.val_z)
+                expected_sample_count = temp_cpst.n_t
+                sample_temps = [float(temp) for temp in temp_cpst.val_t]
+                logging.info(
+                    "[BED_MESH_TEMP] fitting temperature model: "
+                    "samples=%d/%d shapes=%s temperatures=%s",
+                    sample_count, expected_sample_count, sample_shapes, sample_temps)
+                temp_cpst.fit(reactor, clean)
+        except aniso_temp_compensation.error as e:
+            raise gcmd.error(str(e))
+        except Exception as e:
+            logging.exception("BED_MESH_TEMP P=%s failed", flag)
+            raise gcmd.error("BED_MESH_TEMP P=%s failed: %s" % (flag, e))
 
     def probe_finalize(self, offsets, positions):
         z_offset = offsets[2]
@@ -2106,7 +2209,7 @@ class MoveSplitter:
     def initialize(self, mesh, fade_offset):
         self.z_mesh = mesh
         self.fade_offset = fade_offset
-    def build_move(self, prev_pos, next_pos, factor):
+    def build_move(self, prev_pos, next_pos, factor, material_axes=None):
         self.prev_pos = tuple(prev_pos)
         self.next_pos = tuple(next_pos)
         self.current_pos = list(prev_pos)
@@ -2117,10 +2220,20 @@ class MoveSplitter:
         axes_d = [np - pp for np, pp in zip(self.next_pos, self.prev_pos)]
         self.total_move_length = math.sqrt(sum([d*d for d in axes_d[:3]]))
         self.axis_move = [not isclose(d, 0., abs_tol=1e-10) for d in axes_d]
+        # 本条指令的材料总量；按沿程比例 Δt 分摊给各切段
+        self.material_axes = list(material_axes or [])
+        self.prev_t = 0.
     def _calc_z_offset(self, pos):
         z = self.z_mesh.calc_z(pos[0], pos[1])
         offset = self.fade_offset
         return self.z_factor * (z - offset) + offset
+    def _take_material(self, t):
+        # 取出从上一段到当前沿程比例 t 之间应分摊的材料增量
+        if not self.material_axes:
+            return self.material_axes
+        delta = t - self.prev_t
+        self.prev_t = t
+        return [m.scaled(delta) for m in self.material_axes]
     def _set_next_move(self, distance_from_prev):
         t = distance_from_prev / self.total_move_length
         if t > 1. or t < 0.:
@@ -2132,6 +2245,7 @@ class MoveSplitter:
                 self.current_pos[i] = lerp(
                     t, self.prev_pos[i], self.next_pos[i])
     def split(self):
+        # 返回 (pos, material)；材料按沿程比例切分，终点段用 t=1 保证总量守恒
         if not self.traverse_complete:
             if self.axis_move[0] or self.axis_move[1]:
                 # X and/or Y axis move, traverse if necessary
@@ -2144,7 +2258,8 @@ class MoveSplitter:
                         self.z_offset = next_z
                         newpos = list(self.current_pos)
                         newpos[2] += self.z_offset
-                        return newpos
+                        t = self.distance_checked / self.total_move_length
+                        return newpos, self._take_material(t)
             # end of move reached
             self.current_pos[:] = self.next_pos
             self.z_offset = self._calc_z_offset(self.current_pos)
@@ -2152,10 +2267,11 @@ class MoveSplitter:
             # used again.
             self.current_pos[2] += self.z_offset
             self.traverse_complete = True
-            return self.current_pos
+            # 终点固定 t=1，无 XY 时也能拿到全部材料（避免 ratio=0 清零）
+            return self.current_pos, self._take_material(1.)
         else:
             # Traverse complete
-            return None
+            return None, None
 
 
 class ZMesh:
@@ -2521,19 +2637,18 @@ class ProfileManager:
                 "The SAVE_CONFIG command will update the printer config\n"
                 "file and restart the printer" %
                 (('\n').join(self.incompatible_profiles)))
-    def save_profile(self, prof_name):
-        z_mesh = self.bedmesh.get_mesh()
+    def save_profile_from_mesh(self, prof_name, z_mesh, announce=True):
+        """将指定 ZMesh 写入会话 profiles 与 configfile pending（不触发落盘）。"""
         if z_mesh is None:
             self.gcode.respond_info(
                 "Unable to save to profile [%s], the bed has not been probed"
                 % (prof_name))
-            return
+            return False
         probed_matrix = z_mesh.get_probed_matrix()
         mesh_params = z_mesh.get_mesh_params()
 
         configfile = self.printer.lookup_object('configfile')
         cfg_name = self.name + " " + prof_name
-        # set params
         z_values = ""
         for line in probed_matrix:
             z_values += "\n  "
@@ -2541,30 +2656,28 @@ class ProfileManager:
                 z_values += "%.6f, " % p
             z_values = z_values[:-2]
 
-        # temp_now = None # 探测default床网的热床温度
-        # if prof_name == "default":
-        #     heater_bed = self.printer.lookup_object("heater_bed", None)
-        #     if heater_bed is not None: # ["target"]期望温度, ["temperature"]实测温度
-        #         temp_now = heater_bed.get_status(0)["temperature"]
-        # configfile.set(cfg_name, 'temperature', temp_now)
         configfile.set(cfg_name, 'version', PROFILE_VERSION)
         configfile.set(cfg_name, 'points', z_values)
         for key, value in mesh_params.items():
             configfile.set(cfg_name, key, value)
-        # save copy in local storage
-        # ensure any self.profiles returned as status remains immutable
+        # 会话内副本，保证 status/profiles 不可变视图
         profiles = dict(self.profiles)
         profiles[prof_name] = profile = {}
         profile['points'] = probed_matrix
         profile['mesh_params'] = collections.OrderedDict(mesh_params)
         self.profiles = profiles
         self.bedmesh.update_status()
-        self.gcode.respond_info(
-            "Bed Mesh state has been saved to profile [%s]\n"
-            "for the current session.  The SAVE_CONFIG command will\n"
-            "update the printer config file and restart the printer."
-            % (prof_name))
-    def load_profile(self, prof_name):
+        if announce:
+            self.gcode.respond_info(
+                "Bed Mesh state has been saved to profile [%s]\n"
+                "for the current session.  The SAVE_CONFIG command will\n"
+                "update the printer config file and restart the printer."
+                % (prof_name))
+        return True
+    def save_profile(self, prof_name):
+        z_mesh = self.bedmesh.get_mesh()
+        self.save_profile_from_mesh(prof_name, z_mesh, announce=True)
+    def load_profile(self, prof_name, save_snapshot=True):
         profile = self.profiles.get(prof_name, None)
         if profile is None:
             raise self.gcode.error(
@@ -2577,7 +2690,9 @@ class ProfileManager:
         except BedMeshError as e:
             raise self.gcode.error(str(e))
         self.bedmesh.set_mesh(z_mesh)
-        self.bedmesh.save_runtime_mesh_snapshot(z_mesh)
+        # 加载 runtime_active 自身时不再二次落盘，避免续打路径重复 SAVE_CONFIG
+        if save_snapshot and prof_name != RUNTIME_ACTIVE_PROFILE:
+            self.bedmesh.save_runtime_mesh_snapshot(z_mesh)
     def remove_profile(self, prof_name):
         if prof_name in self.profiles:
             configfile = self.printer.lookup_object('configfile')
