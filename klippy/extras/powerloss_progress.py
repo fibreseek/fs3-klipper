@@ -452,16 +452,21 @@ class PowerlossProgress():
             if 'S' in params:
                 try:
                     speed = float(params['S'])
-                    fan_index = 0  # Default fan
                     if 'P' in params:
-                        try:
-                            fan_index = int(params['P'])
-                        except ValueError:
-                            pass
-                    info['fan_speeds'][fan_index] = speed
+                        info['fan_speeds'][int(params['P'])] = speed
+                    else:
+                        # 不带 P 的 M106 由宏展开为塑料冷却(P1)+纤维冷却(P2)，
+                        # 不能记成 P0（过滤风扇）
+                        info['fan_speeds'][1] = speed
+                        info['fan_speeds'][2] = speed
                 except ValueError:
                     pass
-        
+
+        elif command == 'M107':
+            # M107 同样被宏接管为关闭塑料冷却与纤维冷却
+            info['fan_speeds'][1] = 0.
+            info['fan_speeds'][2] = 0.
+
         elif command == 'M204':
             # Acceleration: M204 S3000
             if 'S' in params:
