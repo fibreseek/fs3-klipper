@@ -103,11 +103,16 @@ def calc_fast_bed_mesh_strategy(
     }
 
 def should_auto_save_calibrated_profile(temp_sampling_session, profile_name):
+    """是否在 probe_finalize 时立即写入正式 profile。
+
+    温补采样会话内返回 False：首轮基准只 stash，等 P=2 模型落盘成功后再 commit，
+    避免中途取消留下「新 default + 旧 temp_comp.npz」。
+    """
     if profile_name is None:
         return False
-    if temp_sampling_session is None:
-        return True
-    return not temp_sampling_session.get("baseline_profile_saved", False)
+    if temp_sampling_session is not None:
+        return False
+    return True
 
 # retrieve comma separated pair from config
 def parse_config_pair(config, option, default, minval=None, maxval=None):
@@ -847,9 +852,86 @@ class BedMeshCalibrate:
             return None
         self._temp_sampling_session = {
             "temps": list(temps),
+            # baseline_stashed：首轮网床已暂存；baseline_profile_saved 兼容旧日志语义
+            "baseline_stashed": False,
             "baseline_profile_saved": False,
+            "baseline_probed_matrix": None,
+            "baseline_mesh_params": None,
+            "baseline_profile_name": "default",
         }
         return self._temp_sampling_session
+    def abort_temp_sampling_session(self):
+        """取消温补采样：丢弃未提交的 stash，不改动正式 default / temp_comp.npz。
+
+        返回值说明当前清理结果，供 P=3 文案区分：
+        - discarded: 丢弃了未提交的基准 stash
+        - cleared: 有采样会话但无未提交 stash（例如 P=2 后残留清理）
+        - idle: 本来就没有活跃采样会话（幂等空操作）
+        """
+        session = self._temp_sampling_session
+        if session is None:
+            result = "idle"
+        elif session.get("baseline_stashed"):
+            result = "discarded"
+            logging.info(
+                "bed_mesh: abort temp-sampling session, discard stashed baseline")
+        else:
+            result = "cleared"
+            logging.info(
+                "bed_mesh: abort temp-sampling session, no stashed baseline")
+        self.temp_cpst = None
+        self._reset_temp_sampling_session()
+        self._reset_temp_csv_session()
+        return result
+    def _commit_temp_sampling_baseline(self):
+        """模型落盘成功后，把 stash 的首轮基准提升为正式 profile（通常 default）。"""
+        session = self._temp_sampling_session
+        if session is None or not session.get("baseline_stashed"):
+            logging.info("bed_mesh: no stashed baseline to commit")
+            return False
+        probed_matrix = session.get("baseline_probed_matrix")
+        mesh_params = session.get("baseline_mesh_params")
+        prof_name = session.get("baseline_profile_name") or "default"
+        if not probed_matrix or not mesh_params:
+            logging.warning("bed_mesh: stashed baseline incomplete, skip commit")
+            return False
+        z_mesh = ZMesh(mesh_params, prof_name)
+        try:
+            z_mesh.build_mesh(probed_matrix)
+        except BedMeshError:
+            logging.exception(
+                "bed_mesh: failed to rebuild stashed baseline for [%s]",
+                prof_name)
+            return False
+        ok = self.bedmesh.pmgr.save_profile_from_mesh(
+            prof_name, z_mesh, announce=True)
+        if ok:
+            logging.info(
+                "bed_mesh: committed temp-sampling baseline to profile [%s]",
+                prof_name)
+        return bool(ok)
+    def _stash_temp_sampling_baseline(self, z_mesh, profile_name):
+        """首轮探床结果写入 session，不提升正式 default。"""
+        session = self._temp_sampling_session
+        if session is None or z_mesh is None:
+            return False
+        if session.get("baseline_stashed"):
+            return False
+        probed_matrix = z_mesh.get_probed_matrix()
+        mesh_params = z_mesh.get_mesh_params()
+        if not probed_matrix or not probed_matrix[0]:
+            logging.warning("bed_mesh: skip baseline stash, probed matrix empty")
+            return False
+        session["baseline_probed_matrix"] = [list(row) for row in probed_matrix]
+        session["baseline_mesh_params"] = collections.OrderedDict(mesh_params)
+        session["baseline_profile_name"] = profile_name or "default"
+        session["baseline_stashed"] = True
+        session["baseline_profile_saved"] = True
+        logging.info(
+            "bed_mesh: stashed temp-sampling baseline for deferred promote "
+            "to [%s] (not writing official profile yet)",
+            session["baseline_profile_name"])
+        return True
     def _start_temp_csv_session(self, temps):
         self._reset_temp_csv_session()
         if not temps:
@@ -1553,11 +1635,10 @@ class BedMeshCalibrate:
                 self._get_temp_comp().receive(probed_matrix, temp_now)
                 self._append_temp_csv_sample(probed_matrix, temp_now)
             elif flag == 2:
-                def clean():
-                    self.temp_cpst = None # 使用完毕，及时释放内存
-                    self._reset_temp_sampling_session()
-                    self._reset_temp_csv_session()
+                # 拟合并原子落盘；成功后才 commit stash→default；同步等待完成再返回
                 reactor = self.printer.get_reactor()
+                completion = reactor.completion()
+                result = {"error": None}
                 temp_cpst = self._get_temp_comp()
                 sample_shapes = []
                 for sample in temp_cpst.val_z:
@@ -1573,10 +1654,58 @@ class BedMeshCalibrate:
                 logging.info(
                     "[BED_MESH_TEMP] fitting temperature model: "
                     "samples=%d/%d shapes=%s temperatures=%s",
-                    sample_count, expected_sample_count, sample_shapes, sample_temps)
-                temp_cpst.fit(reactor, clean)
+                    sample_count, expected_sample_count, sample_shapes,
+                    sample_temps)
+
+                def on_model_saved():
+                    try:
+                        if not getattr(temp_cpst, "last_save_ok", False):
+                            result["error"] = "temperature model save failed"
+                            return
+                        if not self._commit_temp_sampling_baseline():
+                            result["error"] = (
+                                "failed to commit stashed baseline to default")
+                            return
+                        self.gcode.respond_info(
+                            "[BED_MESH_TEMP] temperature model saved and "
+                            "baseline profile committed")
+                    except Exception as e:
+                        logging.exception(
+                            "BED_MESH_TEMP P=2 post-save finalize failed")
+                        result["error"] = str(e)
+                    finally:
+                        self.temp_cpst = None
+                        self._reset_temp_sampling_session()
+                        self._reset_temp_csv_session()
+                        completion.complete(True)
+
+                temp_cpst.fit(reactor, on_model_saved)
+                completion.wait()
+                if result["error"]:
+                    raise gcmd.error(
+                        "BED_MESH_TEMP P=2 failed: %s" % (result["error"],))
+            elif flag == 3:
+                # 取消/幂等清理：仅影响未提交 stash，不改已落盘的 default / npz
+                abort_result = self.abort_temp_sampling_session()
+                if abort_result == "discarded":
+                    self.gcode.respond_info(
+                        "[BED_MESH_TEMP] unfinished sampling cancelled; "
+                        "uncommitted baseline discarded "
+                        "(saved default / temp_comp.npz unchanged)")
+                elif abort_result == "cleared":
+                    self.gcode.respond_info(
+                        "[BED_MESH_TEMP] sampling session cleared "
+                        "(no uncommitted baseline)")
+                else:
+                    # idle：FINISH 正常收尾常见路径，避免误导成“校准被中止”
+                    logging.info(
+                        "[BED_MESH_TEMP] P=3 no-op: no active sampling session")
+            else:
+                raise gcmd.error("BED_MESH_TEMP unknown P=%s" % (flag,))
         except aniso_temp_compensation.error as e:
             raise gcmd.error(str(e))
+        except self.printer.command_error:
+            raise
         except Exception as e:
             logging.exception("BED_MESH_TEMP P=%s failed", flag)
             raise gcmd.error("BED_MESH_TEMP P=%s failed: %s" % (flag, e))
@@ -1714,20 +1843,25 @@ class BedMeshCalibrate:
             z_mesh.set_zero_reference(*zero_ref_pos)
         self.bedmesh.set_mesh(z_mesh)
         self.gcode.respond_info("Mesh Bed Leveling Complete")
-        if should_auto_save_calibrated_profile(
+        # 温补采样：首轮只 stash 基准，不写正式 default；普通调平仍立即 save_profile
+        if self._temp_sampling_session is not None:
+            if not self._temp_sampling_session.get("baseline_stashed", False):
+                self._stash_temp_sampling_baseline(
+                    z_mesh, self._profile_name)
+            else:
+                logging.info(
+                    "bed_mesh: skip baseline stash during temperature "
+                    "sampling baseline_stashed=%s csv_stage=%s",
+                    self._temp_sampling_session.get("baseline_stashed", None),
+                    self._temp_csv_session.get("stage_index", None)
+                    if self._temp_csv_session is not None else None)
+        elif should_auto_save_calibrated_profile(
                 self._temp_sampling_session, self._profile_name):
             self.bedmesh.save_profile(self._profile_name)
-            if self._temp_sampling_session is not None:
-                self._temp_sampling_session["baseline_profile_saved"] = True
         elif self._profile_name is not None:
             logging.info(
-                "bed_mesh: skip auto-save profile [%s] during temperature "
-                "sampling baseline_profile_saved=%s csv_stage=%s",
-                self._profile_name,
-                self._temp_sampling_session.get("baseline_profile_saved", None)
-                if self._temp_sampling_session is not None else None,
-                self._temp_csv_session.get("stage_index", None)
-                if self._temp_csv_session is not None else None)
+                "bed_mesh: skip auto-save profile [%s]",
+                self._profile_name)
     def _dump_points(self, probed_pts, corrected_pts, offsets):
         # logs generated points with offset applied, points received
         # from the finalize callback, and the list of corrected points

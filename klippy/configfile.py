@@ -3,7 +3,7 @@
 # Copyright (C) 2016-2024  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import sys, os, glob, re, time, logging, configparser, io, threading
+import sys, os, glob, re, time, logging, configparser, io, threading, shutil
 
 error = configparser.Error
 
@@ -248,6 +248,9 @@ class ConfigAutoSave:
         self.fileconfig = None
         self.status_save_pending = {}
         self.save_config_pending = False
+        # 串行化异步 SAVE_CONFIG：避免后台 replace 窗口内并发读丢失 printer.cfg（10012）
+        self._save_thread = None
+        self._save_lock = threading.Lock()
         gcode = self.printer.lookup_object('gcode')
         gcode.register_command("SAVE_CONFIG", self.cmd_SAVE_CONFIG,
                                desc=self.cmd_SAVE_CONFIG_help)
@@ -352,6 +355,11 @@ class ConfigAutoSave:
     def cmd_SAVE_CONFIG(self, gcmd):
         if not self.fileconfig.sections():
             return
+        # 等上一次异步落盘结束，再读 printer.cfg，避免 FileNotFoundError→10012
+        prev = self._save_thread
+        if prev is not None and prev.is_alive():
+            logging.info("SAVE_CONFIG: waiting for previous save thread")
+            prev.join()
         # Create string containing autosave data
         cfgrdr = ConfigFileReader()
         autosave_data = cfgrdr.build_config_string(self.fileconfig)
@@ -406,17 +414,20 @@ class ConfigAutoSave:
 
         def save_config_thread():
             msg = None
-            try:
-                f = open(temp_name, 'w')
-                f.write(data)
-                f.close()
+            # 写盘互斥，防止两次后台落盘交错破坏文件
+            with self._save_lock:
                 try:
-                    os.replace(cfgname, backup_name)
-                except FileNotFoundError:
-                    pass
-                os.replace(temp_name, cfgname)
-            except:
-                msg = "Unable to write config file during SAVE_CONFIG"
+                    f = open(temp_name, 'w')
+                    f.write(data)
+                    f.close()
+                    # 备份用 copy，不用 replace：printer.cfg 全程存在，避免并发读 10012
+                    try:
+                        shutil.copyfile(cfgname, backup_name)
+                    except FileNotFoundError:
+                        pass
+                    os.replace(temp_name, cfgname)
+                except:
+                    msg = "Unable to write config file during SAVE_CONFIG"
 
             # Use register_async_callback to return to main thread
             reactor = self.printer.get_reactor()
@@ -425,7 +436,11 @@ class ConfigAutoSave:
             
         # Start background thread for file save operation
         save_thread = threading.Thread(target=save_config_thread)
+        self._save_thread = save_thread
         save_thread.start()
+        # R=0 调用方期望落盘后再继续（例如紧接着又一次 SAVE_CONFIG）
+        if gcmd.get_int('R', 1) == 0:
+            save_thread.join()
 
 
 ######################################################################
