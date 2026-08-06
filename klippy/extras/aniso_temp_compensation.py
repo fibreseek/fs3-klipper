@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.interpolate import interpn
-import logging, os
+import logging, os, tempfile
 
 class error(Exception):
     pass
@@ -69,6 +69,7 @@ class AnisoTempCompensation:
         self.built = False # 网格构建完成标志位
         self.fname = "~/printer_data/config/temp_comp.npz"
         self.clean_callback = None
+        self.last_save_ok = False
 
     def _sync_limits_from_config(self, root_config):
         xconfig = root_config.getsection('stepper_x')
@@ -336,7 +337,8 @@ class AnisoTempCompensation:
 
     def save_model(self, filepath=None):
         """
-        保存模型参数到npz文件
+        原子保存模型到 npz：同目录 mkstemp 写入后 os.replace，避免半截文件被读到。
+        通过文件对象写入，避开 savez 对路径名自动追加 .npz 的行为。
         """
         if filepath is None:
             filepath = self.fname
@@ -347,24 +349,45 @@ class AnisoTempCompensation:
         self.grid_y = np.round(self.grid_y, decimals=6)
         self.grid_t = np.round(self.grid_t, decimals=6)
         self.grid_z = np.round(self.grid_z, decimals=6)
-            
+
+        self.last_save_ok = False
+        # 临时文件必须落在目标同目录，保证 os.replace 同文件系统原子替换
+        target_dir = os.path.dirname(filepath) or "."
+        tmp_path = None
         try:
-            # 只保存必需的网格数据
-            np.savez_compressed(
-                filepath,
-                grid_x=self.grid_x,
-                grid_y=self.grid_y,
-                grid_t=self.grid_t,
-                grid_z=self.grid_z
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                prefix=".%s." % (os.path.basename(filepath),),
+                suffix=".npz",
+                dir=target_dir,
             )
+            with os.fdopen(tmp_fd, "wb") as tmp_file:
+                # 只保存必需的网格数据；传 file obj，numpy 不会改文件名
+                np.savez_compressed(
+                    tmp_file,
+                    grid_x=self.grid_x,
+                    grid_y=self.grid_y,
+                    grid_t=self.grid_t,
+                    grid_z=self.grid_z,
+                )
+            os.replace(tmp_path, filepath)
+            tmp_path = None  # replace 成功后无需再删
             self.built = True
-            logging.debug(f"[TempComp] model save success {filepath}")
+            self.last_save_ok = True
+            logging.info("[TempComp] model save success %s", filepath)
         except Exception as e:
-            logging.debug(f"[TempComp] model save fail {e}")
+            logging.exception("[TempComp] model save fail %s", e)
+            self.last_save_ok = False
+        finally:
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
         if self.clean_callback:
-            self.clean_callback()
+            cb = self.clean_callback
             self.clean_callback = None # 防止重复调用
+            cb()
 
     def load_model(self, filepath=None):
         """
