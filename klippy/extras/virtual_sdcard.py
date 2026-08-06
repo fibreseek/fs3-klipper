@@ -931,19 +931,34 @@ class VirtualSD:
         pre_nozzle_temp = 180  # Default safe temp
         left_nozzle_temp = file_info.get('left_nozzle_temp')
         right_nozzle_temp = file_info.get('right_nozzle_temp')
+        save_vars = self.printer.lookup_object('save_variables').allVariables
+        left_preheat_temp = save_vars.get(
+            'printing_info_left_preheat_temperature', 180.0)
+        right_preheat_temp = save_vars.get(
+            'printing_info_right_preheat_temperature', 180.0)
+        logging.info("left_preheat_temp: %s, right_preheat_temp: %s",
+                     left_preheat_temp, right_preheat_temp)
+        logging.info("left_nozzle_temp: %s, right_nozzle_temp: %s",
+                     left_nozzle_temp, right_nozzle_temp)
 
         # Handle temperature adjustments based on current tool
         # Ensure temperatures are not None before performing operations
         if current_tool == 0:
             if right_nozzle_temp is not None:
                 right_nozzle_temp = right_nozzle_temp - 80
-                if right_nozzle_temp < 180: 
+                if right_nozzle_temp < 180:
                     right_nozzle_temp = 180
+            if left_nozzle_temp is not None:
+                if left_nozzle_temp < 180:
+                    left_nozzle_temp = left_preheat_temp
         elif current_tool == 1:
             if left_nozzle_temp is not None:
                 left_nozzle_temp = left_nozzle_temp - 80
-                if left_nozzle_temp < 180: 
+                if left_nozzle_temp < 180:
                     left_nozzle_temp = 180
+            if right_nozzle_temp is not None:
+                if right_nozzle_temp < 180:
+                    right_nozzle_temp = right_preheat_temp
         
         # Set nozzle temperatures
         if left_nozzle_temp is not None:

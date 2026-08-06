@@ -50,23 +50,32 @@ class PrinterSysStats:
                 'memavail': self.last_mem_avail}
 
 class PrinterStats:
+    STATS_LOG_INTERVAL = 5.
     def __init__(self, config):
         self.printer = config.get_printer()
         reactor = self.printer.get_reactor()
         self.stats_timer = reactor.register_timer(self.generate_stats)
         self.stats_cb = []
+        self.print_stats = None
+        self.last_stats_log_time = 0.
         self.printer.register_event_handler("klippy:ready", self.handle_ready)
     def handle_ready(self):
         self.stats_cb = [o.stats for n, o in self.printer.lookup_objects()
                          if hasattr(o, 'stats')]
+        self.print_stats = self.printer.lookup_object('print_stats', None)
         if self.printer.get_start_args().get('debugoutput') is None:
             reactor = self.printer.get_reactor()
             reactor.update_timer(self.stats_timer, reactor.NOW)
     def generate_stats(self, eventtime):
         stats = [cb(eventtime) for cb in self.stats_cb]
-        # if max([s[0] for s in stats]):
-        #     logging.info("Stats %.1f: %s", eventtime,
-        #                  ' '.join([s[1] for s in stats]))
+        # 仅打印中每 5s 记录一次，降低 klippy.log 体积
+        if (self.print_stats is not None
+                and self.print_stats.state == "printing"
+                and eventtime - self.last_stats_log_time >= self.STATS_LOG_INTERVAL
+                and max([s[0] for s in stats])):
+            logging.info("Stats %.1f: %s", eventtime,
+                         ' '.join([s[1] for s in stats]))
+            self.last_stats_log_time = eventtime
         return eventtime + 1.
 
 def load_config(config):
