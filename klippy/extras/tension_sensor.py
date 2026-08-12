@@ -36,7 +36,7 @@ class MySerial:
             'baseline_cluster_min_points', 6, minval=2, maxval=50
         )
         self.trigger_sample_count = config.getint(
-            'trigger_sample_count', 4, minval=1, maxval=30
+            'trigger_sample_count', 6, minval=1, maxval=30
         )
         self.detection_buffer = collections.deque(maxlen=30)
         
@@ -88,15 +88,16 @@ class MySerial:
         self._baseline_jam_streak = 0
         self._baseline_jam_trigger_count = 2
         
-        printer = config.get_printer()
-        self.gcode = printer.lookup_object('gcode')
-        self.reactor = printer.get_reactor()
+        self.printer = config.get_printer()
+        self.name = config.get_name()
+        self.gcode = self.printer.lookup_object('gcode')
+        self.reactor = self.printer.get_reactor()
         self._spi = None
         self._polling_timer = self.reactor.register_timer(self._polling_event)
         self._baseline_timer = self.reactor.register_timer(
             self._baseline_update_event
         )
-        printer.register_event_handler('klippy:disconnect', self._handle_disconnect)
+        self.printer.register_event_handler('klippy:disconnect', self._handle_disconnect)
         
         self._register_commands()
 
@@ -141,12 +142,12 @@ class MySerial:
         self.gcode.register_command(
             'TENSION_SET_THRESHOLD',
             self.cmd_SET_THRESHOLD,
-            desc="TENSION_SET_THRESHOLD MIN_DEV=<n> [TANGLING_DEV=<n>] [TREND_TOL=<n>]",
+            desc="TENSION_SET_THRESHOLD MIN_DEV=<n> [TANGLING_DEV=<n>] [TREND_TOL=<n>] [SAVE=<0|1>]",
         )
         self.gcode.register_command(
             'TENSION_SET_CONSECUTIVE',
             self.cmd_SET_CONSECUTIVE,
-            desc="TENSION_SET_CONSECUTIVE FRAMES=<n> (consecutive trend frames, same as trigger_sample_count)",
+            desc="TENSION_SET_CONSECUTIVE FRAMES=<n> [SAVE=<0|1>] (consecutive trend frames, same as trigger_sample_count)",
         )
         self.gcode.register_command(
             'TENSION_SHOW_CONFIG',
@@ -641,22 +642,43 @@ class MySerial:
     def cmd_SHOW_CALIBRATION(self, gcmd):
         gcmd.respond_info(f"Calibration entries: {len(self.calibration_log)}")
 
+    def _persist_config_option(self, option, value, save):
+        configfile = self.printer.lookup_object('configfile')
+        configfile.set(self.name, option, value)
+        if not save:
+            return
+        try:
+            self.gcode.run_script_from_command('SAVE_CONFIG R=0')
+        except Exception:
+            logging.exception(
+                "tension_sensor: SAVE_CONFIG failed for %s=%s", option, value
+            )
+
     def cmd_SET_THRESHOLD(self, gcmd):
         changed = []
+        save = gcmd.get_int('SAVE', 1, minval=0, maxval=1)
         
         min_dev = gcmd.get_int('MIN_DEV', None)
         if min_dev is not None and min_dev >= 1000:
+            persist = save and min_dev != self.jam_deviation_limit
             self.jam_deviation_limit = min_dev
+            self._persist_config_option('jam_deviation_limit', min_dev, persist)
             changed.append(f"MIN_DEV={min_dev}")
 
         tangling_dev = gcmd.get_int('TANGLING_DEV', None)
         if tangling_dev is not None and tangling_dev >= 1000:
+            persist = save and tangling_dev != self.tangling_deviation_limit
             self.tangling_deviation_limit = tangling_dev
+            self._persist_config_option(
+                'tangling_deviation_limit', tangling_dev, persist
+            )
             changed.append(f"TANGLING_DEV={tangling_dev}")
 
         trend_tol = gcmd.get_int('TREND_TOL', None)
         if trend_tol is not None and trend_tol >= 0:
+            persist = save and trend_tol != self.trend_tolerance
             self.trend_tolerance = trend_tol
+            self._persist_config_option('trend_tolerance', trend_tol, persist)
             changed.append(f"TREND_TOL={trend_tol}")
         
         gcmd.respond_info(f"Updated: {', '.join(changed) if changed else 'None'}")
@@ -665,11 +687,14 @@ class MySerial:
         frames = gcmd.get_int('FRAMES', None, minval=1, maxval=30)
         if frames is None:
             gcmd.respond_info(
-                f"Usage: TENSION_SET_CONSECUTIVE FRAMES=<1..30> "
+                f"Usage: TENSION_SET_CONSECUTIVE FRAMES=<1..30> [SAVE=<0|1>] "
                 f"(consecutive trend frames, current={self.trigger_sample_count})"
             )
             return
+        save = gcmd.get_int('SAVE', 1, minval=0, maxval=1)
+        persist = save and frames != self.trigger_sample_count
         self.trigger_sample_count = frames
+        self._persist_config_option('trigger_sample_count', frames, persist)
         gcmd.respond_info(
             f"Updated trigger_sample_count (consecutive trend frames)="
             f"{self.trigger_sample_count}"
