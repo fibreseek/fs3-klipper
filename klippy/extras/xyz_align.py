@@ -757,6 +757,11 @@ class xyz_align:
 
         x_offset = center_x1 - center_x0
         y_offset = center_y1 - center_y0
+        if z_surround_compensation < 0.03:
+            self.gcode.respond_info(
+                "[NOZZLE_OFFSET_CALIBRATION] z_surround_compensation=%f < 0.03, skip"
+                % z_surround_compensation)
+            z_surround_compensation = 0
         z_offset = abs(trigger_z1 - trigger_z0) + z_surround_compensation
         self.gcode.run_script_from_command(
             "SAVE_VARIABLE VARIABLE=xoffset VALUE=%f" % (x_offset))
