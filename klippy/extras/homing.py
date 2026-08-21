@@ -278,6 +278,8 @@ class Homing:
                 retractpos = [hp - ad * retract_r
                             for hp, ad in zip(homepos, axes_d)]
                 self.toolhead.move(retractpos, hi.retract_speed)
+                if is_z_homing:
+                    self.gcode.run_script_from_command("M400\nG4 P100")
                 for stepper in ('stepper_y', 'stepper_x'):
                     if self.printer.lookup_object(
                             'tmc2240 %s' % stepper, None) is not None:
