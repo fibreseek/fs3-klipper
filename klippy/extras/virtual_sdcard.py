@@ -751,6 +751,9 @@ class VirtualSD:
         fan_speeds = file_info.get('fan_speeds', {})
         for fan_index, speed in fan_speeds.items():
             gcode_script.append("M106 P%d S%.1f" % (fan_index, speed))
+        
+        # 开启机壳冷却风扇
+        gcode_script.append("CASE_FAN S=255")
 
         # 主板风扇与过滤风扇不在切片文件里，且断电续打不经过
         # SDCARD_PRINT_FILE，需在此单独开启，否则驱动全程无散热
